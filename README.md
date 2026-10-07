@@ -1,11 +1,12 @@
 <div align="center">
 
 # Arkuzo Memory Saver
-### Volt Integration · v1.0.1
+### Volt Integration · v1.0.2
 
 A portable Windows memory monitor with guarded, account-aware recovery through Volt.
 
-[![Version](https://img.shields.io/badge/version-1.0.1-6366f1)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.0.2-6366f1)](CHANGELOG.md)
+[![VirusTotal](https://img.shields.io/badge/VirusTotal-0%2F92%20Clean-brightgreen?logo=virustotal)](https://www.virustotal.com/gui/file/7140e1b2715f7df0488713835cf6df9e5d5a40623788b3ec0c71c70da8ad7cf1)
 ![Windows x64](https://img.shields.io/badge/platform-Windows_x64-0078D4)
 ![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-5391FE)
 ![Volt integration](https://img.shields.io/badge/Volt-integration-22c55e)
@@ -79,6 +80,21 @@ Policy     600 MB soft target · hard cap disabled
 **Upgrading a legacy installation:** if `data/config.json` does not exist and `config.json` is beside `ArkuzoMemorySaver.exe`, the launcher copies that legacy configuration byte-for-byte into `data/` and retains the original. An existing `data/config.json` always wins. Old recovery journals are not automatically migrated. Stop the old saver before switching installations.
 
 Windows may show SmartScreen warnings for an **unsigned binary**. Check that the file came from the official repository and review the warning and your organization's policy before proceeding. **Do not disable SmartScreen, antivirus, or other protections globally.**
+
+## Antivirus & Integrity Verification
+
+All official release artifacts are scanned and verified clean against **VirusTotal** across 92 security vendors.
+
+| File | SHA-256 Checksum | VirusTotal Result |
+| :--- | :--- | :--- |
+| **`ArkuzoMemorySaver.exe`** | `7140e1b2715f7df0488713835cf6df9e5d5a40623788b3ec0c71c70da8ad7cf1` | [![0/92 Clean](https://img.shields.io/badge/VirusTotal-0%2F92%20Clean-brightgreen)](https://www.virustotal.com/gui/file/7140e1b2715f7df0488713835cf6df9e5d5a40623788b3ec0c71c70da8ad7cf1) |
+| **`ArkuzoMemorySaver-runtime.zip`** | `cad70dbdcca7876fb9257d4a572dcf4ced9f7219665ce5a4eb0e59e354f9660e` | [![Clean](https://img.shields.io/badge/VirusTotal-Clean-brightgreen)](https://www.virustotal.com/gui/file/cad70dbdcca7876fb9257d4a572dcf4ced9f7219665ce5a4eb0e59e354f9660e) |
+| **`ArkuzoMemorySaver-v1.0.2-win-x64.zip`** | `66c58470905f49843ba4b2fc35561241240f5d0e28bcd9bcedae9ab7fa4675d2` | [![Clean](https://img.shields.io/badge/VirusTotal-Clean-brightgreen)](https://www.virustotal.com/gui/file/66c58470905f49843ba4b2fc35561241240f5d0e28bcd9bcedae9ab7fa4675d2) |
+
+You can independently verify checksums locally using PowerShell:
+```powershell
+Get-FileHash -Algorithm SHA256 .\ArkuzoMemorySaver.exe
+```
 
 ## Recovery is deliberately conservative
 

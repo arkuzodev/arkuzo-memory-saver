@@ -10,6 +10,16 @@ Arkuzo Memory Saver runs locally. The public launcher reads release metadata and
 - Updates preserve existing `data/config.json`. They do not reset malformed configuration.
 - Local `app/` and `data/` directories must be writable only by users you trust. Do not run the program from a shared, untrusted directory.
 
+## Antivirus & VirusTotal Verification
+
+Every official release artifact is submitted to and scanned by **VirusTotal** across 92 security vendors.
+
+| Release Asset | SHA-256 Checksum | VirusTotal Analysis | Status |
+| :--- | :--- | :--- | :--- |
+| **`ArkuzoMemorySaver.exe`** | `7140e1b2715f7df0488713835cf6df9e5d5a40623788b3ec0c71c70da8ad7cf1` | [Report Link](https://www.virustotal.com/gui/file/7140e1b2715f7df0488713835cf6df9e5d5a40623788b3ec0c71c70da8ad7cf1) | **0 / 92 Clean** |
+| **`ArkuzoMemorySaver-runtime.zip`** | `cad70dbdcca7876fb9257d4a572dcf4ced9f7219665ce5a4eb0e59e354f9660e` | [Report Link](https://www.virustotal.com/gui/file/cad70dbdcca7876fb9257d4a572dcf4ced9f7219665ce5a4eb0e59e354f9660e) | **Clean** |
+| **`ArkuzoMemorySaver-v1.0.2-win-x64.zip`** | `66c58470905f49843ba4b2fc35561241240f5d0e28bcd9bcedae9ab7fa4675d2` | [Report Link](https://www.virustotal.com/gui/file/66c58470905f49843ba4b2fc35561241240f5d0e28bcd9bcedae9ab7fa4675d2) | **Clean** |
+
 ## Volt integration
 
 The adapter uses the existing Volt window's Windows UI Automation controls. Its database probe is read-only and reports a restricted set of account status fields. The saver does not generate authentication tickets, write Volt's database, or replay Roblox command lines. When identity or launch state is unclear, recovery is blocked.

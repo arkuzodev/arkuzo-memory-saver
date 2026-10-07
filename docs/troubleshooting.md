@@ -32,7 +32,7 @@ The updater leaves your file untouched; the saver refuses malformed JSON rather 
 
 ### SmartScreen or security software warns about ArkuzoMemorySaver.exe
 
-An unsigned executable may trigger a reputation warning. Verify the official download source, review the warning, and follow your device or organization's policy. If protection blocks the binary, retain that protection and investigate the reported detection. **Do not globally disable SmartScreen or antivirus, and do not add blanket folder exclusions.**
+An unsigned executable may trigger a reputation warning. Verify the official download source, review the warning, and follow your device or organization's policy. All official releases are verified clean (0/92) on [VirusTotal](https://www.virustotal.com/gui/file/7140e1b2715f7df0488713835cf6df9e5d5a40623788b3ec0c71c70da8ad7cf1); you can check the file hash independently with `Get-FileHash -Algorithm SHA256 .\ArkuzoMemorySaver.exe`. If protection blocks the binary, retain that protection and investigate the reported detection. **Do not globally disable SmartScreen or antivirus, and do not add blanket folder exclusions.**
 
 ### The folder cannot be written
 

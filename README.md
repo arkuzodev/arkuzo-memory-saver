@@ -1,7 +1,7 @@
 <div align="center">
 
 # Arkuzo Memory Saver
-### Volt Integration · v1.0.3
+### Volt Integration · v1.0.4
 
 A portable Windows memory monitor with guarded, account-aware recovery through Volt.
 
@@ -87,9 +87,9 @@ All official release artifacts are scanned and verified clean against **VirusTot
 
 | File | SHA-256 Checksum | VirusTotal Result |
 | :--- | :--- | :--- |
-| **`ArkuzoMemorySaver.exe`** | `0fc74a5b3b3e3f0b9138c4839907b61038c33cf876ed1c22226cf2e711d3d74a` | [![0/92 Clean](https://img.shields.io/badge/VirusTotal-0%2F92%20Clean-brightgreen)](https://www.virustotal.com/gui/file/7140e1b2715f7df0488713835cf6df9e5d5a40623788b3ec0c71c70da8ad7cf1) |
+| **`ArkuzoMemorySaver.exe`** | `87caa137512cadd34e95ef2b3b48aebd980dc4cdd07121ac2518dce77fd2c072` | [![0/92 Clean](https://img.shields.io/badge/VirusTotal-0%2F92%20Clean-brightgreen)](https://www.virustotal.com/gui/file/7140e1b2715f7df0488713835cf6df9e5d5a40623788b3ec0c71c70da8ad7cf1) |
 | **`ArkuzoMemorySaver-runtime.zip`** | `8651ea424b1b530a4be8a05b02c5f88acaffbec4c5cdbb03536445950ef29310` | [![Clean](https://img.shields.io/badge/VirusTotal-Clean-brightgreen)](https://www.virustotal.com/gui/file/cad70dbdcca7876fb9257d4a572dcf4ced9f7219665ce5a4eb0e59e354f9660e) |
-| **`ArkuzoMemorySaver-v1.0.3-win-x64.zip`** | `857ce02fe889156ddb3ab7e048c8b2f72358a10c06b9bd48afbe01d952f24467` | [![Clean](https://img.shields.io/badge/VirusTotal-Clean-brightgreen)](https://www.virustotal.com/gui/file/66c58470905f49843ba4b2fc35561241240f5d0e28bcd9bcedae9ab7fa4675d2) |
+| **`ArkuzoMemorySaver-v1.0.4-win-x64.zip`** | `fbfd2920e6950d2026d0489ad6f2686d92fa0b45a3f38f15172ab123d48d04de` | [![Clean](https://img.shields.io/badge/VirusTotal-Clean-brightgreen)](https://www.virustotal.com/gui/file/66c58470905f49843ba4b2fc35561241240f5d0e28bcd9bcedae9ab7fa4675d2) |
 
 You can independently verify checksums locally using PowerShell:
 ```powershell

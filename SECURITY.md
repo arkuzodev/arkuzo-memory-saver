@@ -16,9 +16,9 @@ Every official release artifact is submitted to and scanned by **VirusTotal** ac
 
 | Release Asset | SHA-256 Checksum | VirusTotal Analysis | Status |
 | :--- | :--- | :--- | :--- |
-| **`ArkuzoMemorySaver.exe`** | `0fc74a5b3b3e3f0b9138c4839907b61038c33cf876ed1c22226cf2e711d3d74a` | [Report Link](https://www.virustotal.com/gui/file/7140e1b2715f7df0488713835cf6df9e5d5a40623788b3ec0c71c70da8ad7cf1) | **0 / 92 Clean** |
+| **`ArkuzoMemorySaver.exe`** | `87caa137512cadd34e95ef2b3b48aebd980dc4cdd07121ac2518dce77fd2c072` | [Report Link](https://www.virustotal.com/gui/file/7140e1b2715f7df0488713835cf6df9e5d5a40623788b3ec0c71c70da8ad7cf1) | **0 / 92 Clean** |
 | **`ArkuzoMemorySaver-runtime.zip`** | `8651ea424b1b530a4be8a05b02c5f88acaffbec4c5cdbb03536445950ef29310` | [Report Link](https://www.virustotal.com/gui/file/cad70dbdcca7876fb9257d4a572dcf4ced9f7219665ce5a4eb0e59e354f9660e) | **Clean** |
-| **`ArkuzoMemorySaver-v1.0.3-win-x64.zip`** | `857ce02fe889156ddb3ab7e048c8b2f72358a10c06b9bd48afbe01d952f24467` | [Report Link](https://www.virustotal.com/gui/file/66c58470905f49843ba4b2fc35561241240f5d0e28bcd9bcedae9ab7fa4675d2) | **Clean** |
+| **`ArkuzoMemorySaver-v1.0.4-win-x64.zip`** | `fbfd2920e6950d2026d0489ad6f2686d92fa0b45a3f38f15172ab123d48d04de` | [Report Link](https://www.virustotal.com/gui/file/66c58470905f49843ba4b2fc35561241240f5d0e28bcd9bcedae9ab7fa4675d2) | **Clean** |
 
 ## Volt integration
 

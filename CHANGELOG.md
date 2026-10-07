@@ -2,6 +2,13 @@
 
 Changes for **Arkuzo Memory Saver with Volt Integration** are recorded here.
 
+## v1.0.4 — Animated Startup, Rich Alert Dashboard & Account Fallback Detection
+
+- **Launcher Startup Animations:** Sleek ASCII art banner, graduated color transitions, and animated phase indicators (`INIT`, `SYNC`, `VERIFY`, `READY`, `PROGRESS`) on startup.
+- **Enhanced Dashboard Multi-Alert System:** Prominent colored alert cards (Red for critical errors like `DISCONNECTED`, `VOLT_STARTUP_ERROR`, `COMMIT PRESSURE`; Yellow for warnings), displaying up to 2 simultaneous system issues.
+- **Multi-Tier Account Fallback Detection:** Eliminates "Unmapped" instances by cascading through Volt control status, TrackerId matching, Roblox client log file analysis (`userid:<id>`), and Volt SQLite document database queries (`Arkuzo-Volt-Probe.py --user-id`).
+- **CommandLine Parser Robustness:** Handles duplicate `browsertrackerid` parameters in modern Roblox launch commands.
+
 ## v1.0.3 — Production Multi-Instance Stability & Self-Healing Launcher
 
 - **Config Lock:** Hard enforcement of calibrated multi-instance thresholds (`apply_graphics_flags: true`, `pressure_percent: 88`, `pressure_min_private_mb: 4000`, `startup_error_timeout_sec: 5`, `disconnect_timeout_sec: 5`, `cooldown_sec: 90`, `max_recycles_per_hour: 20`) to prevent degradation and false recycling loops on 8+ clients.

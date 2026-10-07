@@ -99,12 +99,38 @@ def read_account_inventory(path):
                 'relaunchDelayMs': None, 'accounts': [], 'reason': 'Volt inventory unavailable'}
 
 
+def read_user_id_map(path):
+    try:
+        with closing(sqlite3.connect(Path(path).resolve().as_uri() + '?mode=ro', uri=True, timeout=0.5)) as db:
+            row = db.execute('SELECT value FROM state_documents WHERE name=?', ('accounts',)).fetchone()
+            if not row:
+                return {}
+            document = json.loads(row[0])
+        mapping = {}
+        for a in document.get('accounts') or []:
+            uid = a.get('userId')
+            uname = a.get('username')
+            if uid and uname:
+                mapping[str(uid)] = str(uname)
+        return mapping
+    except Exception:
+        return {}
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--tracker-id', default=_GLOBAL_CHECK)
     mode.add_argument('--inventory', action='store_true')
+    mode.add_argument('--user-id')
     args = parser.parse_args()
     path = Path(os.environ.get('LOCALAPPDATA', '')) / 'Volt' / 'state.db'
-    result = read_account_inventory(path) if args.inventory else read_recovery_status(path, tracker_id=args.tracker_id)
+    if args.user_id:
+        u_map = read_user_id_map(path)
+        uname = u_map.get(str(args.user_id))
+        result = {'found': bool(uname), 'username': uname}
+    elif args.inventory:
+        result = read_account_inventory(path)
+    else:
+        result = read_recovery_status(path, tracker_id=args.tracker_id)
     print(json.dumps(result, separators=(',', ':'), allow_nan=False))

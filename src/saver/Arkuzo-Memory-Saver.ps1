@@ -346,6 +346,84 @@ function Find-RobloxProcessLog([int]$TargetProcessId, [string]$TrackerId = $null
         return $null
     } catch { return $null }
 }
+
+$script:accountNameCache = @{}
+$script:userIdCache = @{}
+
+function Get-ArkuzoAccountByUserId([string]$UserId) {
+    if (-not $UserId -or $UserId -notmatch '\A\d+\z') { return $null }
+    if ($null -eq $script:userIdCache) { $script:userIdCache = @{} }
+    if ($script:userIdCache.ContainsKey($UserId)) { return $script:userIdCache[$UserId] }
+    try {
+        $dir = if ($PSScriptRoot) { $PSScriptRoot } elseif ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { [AppDomain]::CurrentDomain.BaseDirectory }
+        $probeScript = Join-Path $dir 'Arkuzo-Volt-Probe.py'
+        if (-not (Test-Path -LiteralPath $probeScript)) {
+            $probeScript = 'C:/Users/Philip/Desktop/arkuzo-memory-saver/src/saver/Arkuzo-Volt-Probe.py'
+        }
+        if (Test-Path -LiteralPath $probeScript) {
+            $raw = & python $probeScript --user-id $UserId 2>$null
+            if ($raw) {
+                $parsed = $raw | ConvertFrom-Json
+                if ($parsed -and $parsed.found -and $parsed.username) {
+                    $script:userIdCache[$UserId] = [string]$parsed.username
+                    return [string]$parsed.username
+                }
+            }
+        }
+    } catch { }
+    $script:userIdCache[$UserId] = $null
+    return $null
+}
+
+function Resolve-ArkuzoAccountName([int]$ProcessId, [string]$TrackerId = $null, [string]$LogPath = $null) {
+    if ($null -eq $script:accountNameCache) { $script:accountNameCache = @{} }
+    if ($script:accountNameCache.ContainsKey($ProcessId)) {
+        return $script:accountNameCache[$ProcessId]
+    }
+    $resolved = $null
+
+    # 1. Primary: Exact Volt Status match (trackerId + processId)
+    if ($voltControlStatus.available -and $voltControlStatus.accounts) {
+        $exact = @($voltControlStatus.accounts | Where-Object { $_.trackerId -and $_.trackerId -eq $TrackerId -and $_.processId -eq $ProcessId })
+        if ($exact.Count -eq 1 -and $exact[0].username) {
+            $resolved = [string]$exact[0].username
+        }
+    }
+
+    # 2. Secondary: Volt Status match by TrackerId only (when processId is null in Volt UI automation)
+    if (-not $resolved -and $TrackerId -and $voltControlStatus.available -and $voltControlStatus.accounts) {
+        $byTracker = @($voltControlStatus.accounts | Where-Object { $_.trackerId -and $_.trackerId -eq $TrackerId })
+        if ($byTracker.Count -eq 1 -and $byTracker[0].username) {
+            $resolved = [string]$byTracker[0].username
+        }
+    }
+
+    # 3. Tertiary: Parse Roblox Client Log for websiteBTId or userid
+    if (-not $resolved -and $LogPath -and (Test-Path -LiteralPath $LogPath)) {
+        try {
+            $match = Select-String -Path $LogPath -Pattern 'userid:(\d+)' | Select-Object -First 1
+            if ($match -and $match.Matches[0].Groups[1].Value) {
+                $uid = $match.Matches[0].Groups[1].Value
+                $mappedUser = Get-ArkuzoAccountByUserId $uid
+                if ($mappedUser) {
+                    $resolved = $mappedUser
+                } else {
+                    $resolved = "UID:$uid"
+                }
+            }
+        } catch { }
+    }
+
+    # 4. Quaternary: Tracker ID indicator
+    if (-not $resolved -and $TrackerId) {
+        $shortId = if ($TrackerId.Length -gt 8) { $TrackerId.Substring(0, 8) + '..' } else { $TrackerId }
+        $resolved = "ID:$shortId"
+    }
+
+    if (-not $resolved) { $resolved = 'Unmapped' }
+    if ($resolved -ne 'Unmapped') { $script:accountNameCache[$ProcessId] = $resolved }
+    return $resolved
+}
 function Read-RobloxLogTail([string]$Path, [ref]$CurrentOffset) {
     if (-not (Test-Path -LiteralPath $Path)) { return $null }
     $fs = $null
@@ -582,10 +660,11 @@ function Test-ArkuzoClientIdentity($Watcher, [int]$ClientId, [long]$StartTicks) 
 function Get-ArkuzoBrowserTrackerId([string]$CommandLine) {
     if ([string]::IsNullOrEmpty($CommandLine)) { return $null }
     # Keep the command line in memory only: it also contains authentication tickets.
-    if ([regex]::Matches($CommandLine, '(?i)browsertrackerid').Count -ne 1) { return $null }
     $matches = [regex]::Matches($CommandLine, '(?i)(?<![a-z0-9_])browsertrackerid(?::|=|%3A)([0-9]+)(?=$|[\s+&"'']|%2b|%26|%20|%22)')
-    if ($matches.Count -ne 1) { return $null }
-    return $matches[0].Groups[1].Value
+    if ($matches.Count -lt 1) { return $null }
+    $unique = @($matches | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+    if ($unique.Count -ne 1) { return $null }
+    return [string]$unique[0]
 }
 function Test-ArkuzoTargetRecovery($Watcher, [int]$ClientId, [long]$StartTicks) {
     try {
@@ -1629,10 +1708,16 @@ function New-ArkuzoFrame($Model, [int]$Width, [int]$Height) {
         if ($paused.Count -gt $shown -and $lines.Count -lt $usable) { $lines.Add((New-ArkuzoLine "  + $($paused.Count-$shown) paused accounts" Red $Width)) }
     }
     if ($lines.Count -lt $usable -and $Height -ge 12) {
-        if ($Model.Notice) {
-            $lines.Add((New-ArkuzoLine "  [!] $($Model.Notice)" Yellow $Width))
+        $alertList = if ($Model.Issues) { @($Model.Issues) } elseif ($Model.Notice) { @(@{ Message = $Model.Notice }) } else { @() }
+        if ($alertList.Count -gt 0) {
+            $maxAlerts = [Math]::Min(2, [Math]::Max(1, $usable - $lines.Count - 1))
+            for ($aIdx = 0; $aIdx -lt [Math]::Min($alertList.Count, $maxAlerts); $aIdx++) {
+                $msg = [string]$alertList[$aIdx].Message
+                $alertColor = if ($msg -match '(?i)DISCONNECTED|ERROR|STARTUP|PRESSURE|FAIL|CRITICAL') { [ConsoleColor]::Red } else { [ConsoleColor]::Yellow }
+                $lines.Add((New-ArkuzoLine "  [!] $msg" $alertColor $Width))
+            }
         } else {
-            $lines.Add((New-ArkuzoLine '  NOTE  Working set != private RAM. Hard cap may reduce performance.' DarkGray $Width))
+            $lines.Add((New-ArkuzoLine '  NOTE  Working set != private RAM. Guard policy active.' DarkGray $Width))
         }
     }
     # No spinner or progress animation after boot. The frame changes only when measurements do.
@@ -1703,6 +1788,7 @@ function Draw-Dashboard($Rows, [int]$Detected, [int64]$Resident, [int64]$Private
             PrivateMB = $Private / 1MB; Cpu = $Cpu; Uptime = $clock.Elapsed
             Trims = $script:trimCount; History = @($cpuHistory.ToArray()); SystemMemory = $systemMemory; HealthPolicy = $healthPolicy
             Rows = @($Rows.ToArray()); SuspendedAccounts = @(Get-ArkuzoSuspendedAccountDisplay); Notice = $notice; Now = Get-Date
+            Issues = @($issues | Select-Object -First 3)
             ConfigLocked = [bool]$isConfigLocked
         }
         $frame = @(New-ArkuzoFrame -Model $model -Width $width -Height $height)
@@ -1756,7 +1842,7 @@ try {
         $clients = @(Get-Process -Name RobloxPlayerBeta -ErrorAction SilentlyContinue)
         $liveIds = @($clients | ForEach-Object { $_.Id })
         foreach ($id in @($tracked.Keys)) {
-            if ($liveIds -notcontains $id) { Record-ClientExit $id $tracked[$id]; $tracked.Remove($id); $warnings.Remove([string]$id) }
+            if ($liveIds -notcontains $id) { Record-ClientExit $id $tracked[$id]; $tracked.Remove($id); $warnings.Remove([string]$id); if ($script:accountNameCache.ContainsKey($id)) { $script:accountNameCache.Remove($id) } }
         }
         $rows = New-Object 'System.Collections.Generic.List[object]'
         $totalCpu = [double]0
@@ -1770,7 +1856,7 @@ try {
                 if ($client.HasExited) {
                     if ($tracked.ContainsKey($client.Id)) {
                         Record-ClientExit $client.Id $tracked[$client.Id] 'HasExited reported'
-                        $tracked.Remove($client.Id)
+                        $tracked.Remove($client.Id); if ($script:accountNameCache.ContainsKey($client.Id)) { $script:accountNameCache.Remove($client.Id) }
                     }
                     continue
                 }
@@ -1779,7 +1865,7 @@ try {
                 $window = $client.MainWindowHandle
                 $isResponding = [Arkuzo.HealthNativeV1]::IsResponsive($window)
                 $launchError = [Arkuzo.HealthNativeV1]::HasVoltStartupNotice($window)
-                if ($tracked.ContainsKey($id) -and $tracked[$id].StartTicks -ne $ticks) { Record-ClientExit $id $tracked[$id] 'PID reused'; $tracked.Remove($id) }
+                if ($tracked.ContainsKey($id) -and $tracked[$id].StartTicks -ne $ticks) { Record-ClientExit $id $tracked[$id] 'PID reused'; $tracked.Remove($id); if ($script:accountNameCache.ContainsKey($id)) { $script:accountNameCache.Remove($id) } }
                 # Manage clients even while loading or with no visible window.
                 if (-not $tracked.ContainsKey($id)) {
                     $slot = 0
@@ -1920,8 +2006,7 @@ try {
                     Write-Diagnostic 'CLIENT_STATE_CHANGED' @{ previous = $state.LastStatus; sample = $state.LastSnapshot }
                     $state.LastStatus = $status
                 }
-                $accountRows = @($voltControlStatus.accounts | Where-Object { $_.trackerId -eq $state.TrackerId -and $_.processId -eq $id })
-                $accountName = if ($accountRows.Count -eq 1) { [string]$accountRows[0].username } else { 'Unmapped' }
+                $accountName = Resolve-ArkuzoAccountName -ProcessId $id -TrackerId $state.TrackerId -LogPath $state.LogPath
                 $rows.Add([pscustomobject]@{
                     Id = $id; Slot = $state.Slot; Account = $accountName; Cpu = $cpu
                     Ram = $client.WorkingSet64 / 1MB; Private = $client.PrivateMemorySize64 / 1MB

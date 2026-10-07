@@ -13,7 +13,7 @@ Examples:
   .\Arkuzo-Memory-Saver.ps1 -Minimize
   .\Arkuzo-Memory-Saver.ps1 -EnableTrimming -HardLimit -MaxRamMB 600 -TrimEverySec 90
   .\Arkuzo-Memory-Saver.ps1 -ApplyGraphicsFlags
-Use Arkuzo Memory Saver.exe to choose a preset and start the controller.
+Use ArkuzoMemorySaver.exe to choose a preset and start the controller.
 Graphics settings persist, affect next launches, and have unique backups.
 Diagnostics: Arkuzo-Logs under DataDirectory (unless LogDirectory is set), sampled every 5 seconds.
 Each run keeps up to five 10 MB JSON-line .log files; previous sessions remain.

@@ -13,8 +13,8 @@ The package script rebuilds the self-contained launcher and creates, under ignor
 
 | Asset | Purpose |
 | --- | --- |
-| `Arkuzo Memory Saver.exe` | Single-file Windows x64 launcher |
-| `ArkuzoMemorySaver-v1.0.1-win-x64.zip` | End-user archive containing only `Arkuzo Memory Saver.exe` |
+| `ArkuzoMemorySaver.exe` | Single-file Windows x64 launcher |
+| `ArkuzoMemorySaver-v1.0.2-win-x64.zip` | End-user archive containing only `ArkuzoMemorySaver.exe` |
 | `ArkuzoMemorySaver-runtime.zip` | Exactly three runtime programs and `defaults.json` |
 | `ArkuzoMemorySaver-runtime.sha256` | Updater checksum for the runtime ZIP |
 | `SHA256SUMS.txt` | Checksums for the executable and ZIP downloads |
@@ -23,15 +23,15 @@ Never include `data/`, `app/`, a local `config.json`, logs, recovery journals, V
 
 ## Publish
 
-Commit the reviewed source, tests, documentation, and root `Arkuzo Memory Saver.exe`, then push `main`. Create a stable GitHub Release for the corresponding commit, with all five assets. The launcher discovers **published stable releases**, not commits or draft/prerelease tags. Asset names for the runtime ZIP and its checksum are part of the updater protocol and must stay stable.
+Commit the reviewed source, tests, documentation, and root `ArkuzoMemorySaver.exe`, then push `main`. Create a stable GitHub Release for the corresponding commit, with all five assets. The launcher discovers **published stable releases**, not commits or draft/prerelease tags. Asset names for the runtime ZIP and its checksum are part of the updater protocol and must stay stable.
 
 ## Verify the published assets
 
-1. Download `Arkuzo Memory Saver.exe` from the newly published release into a new writable test directory.
-2. Run `Arkuzo Memory Saver.exe --verify-only` to exercise the real GitHub metadata, download, checksum, extraction, configuration initialization, and installed-cache checks without starting Roblox or the saver.
+1. Download `ArkuzoMemorySaver.exe` from the newly published release into a new writable test directory.
+2. Run `ArkuzoMemorySaver.exe --verify-only` to exercise the real GitHub metadata, download, checksum, extraction, configuration initialization, and installed-cache checks without starting Roblox or the saver.
 3. Hash `data/config.json`, customize it, run verification again, and confirm that it is byte-identical.
-4. Run `Arkuzo Memory Saver.exe --offline --verify-only` to validate the cache without network access.
+4. Run `ArkuzoMemorySaver.exe --offline --verify-only` to validate the cache without network access.
 5. Confirm the release tag points to the intended commit and all uploaded asset digests match the local artifacts.
 6. Only start the saver interactively when no other saver controller is running. Existing live clients must not be disturbed by a release smoke test.
 
-The launcher itself is not silently replaced while running. A future launcher-protocol change should ship a new `Arkuzo Memory Saver.exe` and explicitly document any required manual launcher upgrade.
+The launcher itself is not silently replaced while running. A future launcher-protocol change should ship a new `ArkuzoMemorySaver.exe` and explicitly document any required manual launcher upgrade.

@@ -8,8 +8,8 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 REPO = 'arkuzodev/arkuzo-memory-saver'
-VERSION = 'v1.0.1'
-NAMES = ['Run.exe', 'ArkuzoMemorySaver-runtime.zip', 'ArkuzoMemorySaver-runtime.sha256', f'ArkuzoMemorySaver-{VERSION}-win-x64.zip', 'SHA256SUMS.txt']
+VERSION = 'v1.0.2'
+NAMES = ['ArkuzoMemorySaver.exe', 'ArkuzoMemorySaver-runtime.zip', 'ArkuzoMemorySaver-runtime.sha256', f'ArkuzoMemorySaver-{VERSION}-win-x64.zip', 'SHA256SUMS.txt']
 
 def run(command, expected=0, timeout=120):
     result = subprocess.run(command, capture_output=True, text=True, errors='replace', timeout=timeout)
@@ -46,8 +46,8 @@ def main():
         print('PASS all five published assets match local release bytes and GitHub digests')
         install = base / 'Fresh portable ü folder'
         install.mkdir()
-        exe = install / 'Run.exe'
-        exe.write_bytes((downloads / 'Run.exe').read_bytes())
+        exe = install / 'ArkuzoMemorySaver.exe'
+        exe.write_bytes((downloads / 'ArkuzoMemorySaver.exe').read_bytes())
         run([str(exe), '--verify-only'])
         config = install / 'data' / 'config.json'
         saved = json.loads(config.read_text(encoding='utf-8-sig'))

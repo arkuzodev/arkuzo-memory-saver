@@ -10,7 +10,7 @@ A portable Windows memory monitor with guarded, account-aware recovery through V
 ![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-5391FE)
 ![Volt integration](https://img.shields.io/badge/Volt-integration-22c55e)
 
-**[Download Arkuzo Memory Saver.exe](https://github.com/arkuzodev/arkuzo-memory-saver/releases/latest/download/Arkuzo%20Memory%20Saver.exe)** · **[Releases](https://github.com/arkuzodev/arkuzo-memory-saver/releases/latest)** · **[Configuration](docs/configuration.md)** · **[Troubleshooting](docs/troubleshooting.md)**
+**[Download ArkuzoMemorySaver.exe](https://github.com/arkuzodev/arkuzo-memory-saver/releases/latest/download/ArkuzoMemorySaver.exe)** · **[Releases](https://github.com/arkuzodev/arkuzo-memory-saver/releases/latest)** · **[Configuration](docs/configuration.md)** · **[Troubleshooting](docs/troubleshooting.md)**
 
 </div>
 
@@ -18,7 +18,7 @@ A portable Windows memory monitor with guarded, account-aware recovery through V
 
 ## One download. Separate runtime and data.
 
-Download **only `Arkuzo Memory Saver.exe`**, put it in a writable folder, and launch it. On first start, the launcher retrieves the **latest stable official release's runtime ZIP and checksum**, verifies its SHA-256 hash, installs the version, and starts the saver. Prereleases are not selected automatically.
+Download **only `ArkuzoMemorySaver.exe`**, put it in a writable folder, and launch it. On first start, the launcher retrieves the **latest stable official release's runtime ZIP and checksum**, verifies its SHA-256 hash, installs the version, and starts the saver. Prereleases are not selected automatically.
 
 Subsequent starts check for stable runtime updates. Versioned files live in `app/versions/`; your configuration, logs, and recovery journal live separately in `data/`. **An update never overwrites an existing user configuration.** If the JSON is malformed, the saver refuses to start instead of silently replacing it with defaults. The runtime update itself can still complete; your configuration is preserved.
 
@@ -61,7 +61,7 @@ Policy     600 MB soft target · hard cap disabled
 ## Requirements
 
 - **Windows x64** with **Windows PowerShell 5.1**.
-- A writable folder for `Arkuzo Memory Saver.exe`, `app/`, and `data/`.
+- A writable folder for `ArkuzoMemorySaver.exe`, `app/`, and `data/`.
 - Internet access for the first runtime download and online update checks.
 - **No separate .NET installation** for the self-contained launcher.
 - For Volt integration: **Python 3 available on `PATH`** and a running Volt installation with its **Account Manager accessible**. The probe uses Python's standard library.
@@ -70,13 +70,13 @@ Policy     600 MB soft target · hard cap disabled
 
 ## Get started
 
-1. Download `Arkuzo Memory Saver.exe` from the [official latest stable release](https://github.com/arkuzodev/arkuzo-memory-saver/releases/latest). Keep it in a dedicated writable folder rather than opening it from a temporary download preview.
+1. Download `ArkuzoMemorySaver.exe` from the [official latest stable release](https://github.com/arkuzodev/arkuzo-memory-saver/releases/latest). Keep it in a dedicated writable folder rather than opening it from a temporary download preview.
 2. Run it and allow the first runtime download and checksum validation to complete.
 3. For recovery, install Python 3 on `PATH`, start Volt, and keep Account Manager accessible. Enable Volt's auto-relaunch only for accounts you intend to manage, with valid sessions and a previous launch.
 4. Review `data/config.json` and the [configuration guide](docs/configuration.md). Restart the saver after intentional configuration changes.
 5. Allow each newly launched client its own five-minute warmup before expecting ordinary trimming.
 
-**Upgrading a legacy installation:** if `data/config.json` does not exist and `config.json` is beside `Arkuzo Memory Saver.exe`, the launcher copies that legacy configuration byte-for-byte into `data/` and retains the original. An existing `data/config.json` always wins. Old recovery journals are not automatically migrated. Stop the old saver before switching installations.
+**Upgrading a legacy installation:** if `data/config.json` does not exist and `config.json` is beside `ArkuzoMemorySaver.exe`, the launcher copies that legacy configuration byte-for-byte into `data/` and retains the original. An existing `data/config.json` always wins. Old recovery journals are not automatically migrated. Stop the old saver before switching installations.
 
 Windows may show SmartScreen warnings for an **unsigned binary**. Check that the file came from the official repository and review the warning and your organization's policy before proceeding. **Do not disable SmartScreen, antivirus, or other protections globally.**
 
@@ -105,7 +105,7 @@ A verified idle dead account is paused and excluded from automated launch reques
 
 ## For maintainers
 
-End users need the root `Arkuzo Memory Saver.exe`, not a source checkout or manually assembled runtime.
+End users need the root `ArkuzoMemorySaver.exe`, not a source checkout or manually assembled runtime.
 
 | Source location | Purpose |
 | --- | --- |

@@ -5,7 +5,7 @@
 ## Start with the safe checks
 
 - Note the installed version, the visible warning, and when it occurred.
-- Confirm you started the official root `Arkuzo Memory Saver.exe` from a writable folder.
+- Confirm you started the official root `ArkuzoMemorySaver.exe` from a writable folder.
 - Inspect local logs under `data/`, but sanitize them before sharing.
 - Keep one saver controller running. Do not erase configuration or the recovery journal to bypass an error.
 - Distinguish working-set RAM, private memory, and OS commit utilization. A smaller RAM reading after trimming does not prove the underlying allocation pressure is gone.
@@ -20,7 +20,7 @@ For an already initialized installation, offline startup requires a previously i
 
 ### A runtime checksum does not match
 
-The launcher must reject that runtime. Check connectivity, proxy interference, and whether you obtained `Arkuzo Memory Saver.exe` from the [official release page](https://github.com/arkuzodev/arkuzo-memory-saver/releases/latest). Retry the official download when online. Never edit the checksum or bypass hash verification to make an archive install.
+The launcher must reject that runtime. Check connectivity, proxy interference, and whether you obtained `ArkuzoMemorySaver.exe` from the [official release page](https://github.com/arkuzodev/arkuzo-memory-saver/releases/latest). Retry the official download when online. Never edit the checksum or bypass hash verification to make an archive install.
 
 SHA-256 verifies agreement with the published checksum; it does not make an unsigned executable signed or establish trust independently of the release source.
 
@@ -30,13 +30,13 @@ Your existing `data/config.json` is intentionally preserved. Stop the saver, bac
 
 The updater leaves your file untouched; the saver refuses malformed JSON rather than silently resetting your policy. Do not delete the file merely to get past validation, and do not confuse source `config/defaults.json` with your installed user configuration.
 
-### SmartScreen or security software warns about Arkuzo Memory Saver.exe
+### SmartScreen or security software warns about ArkuzoMemorySaver.exe
 
 An unsigned executable may trigger a reputation warning. Verify the official download source, review the warning, and follow your device or organization's policy. If protection blocks the binary, retain that protection and investigate the reported detection. **Do not globally disable SmartScreen or antivirus, and do not add blanket folder exclusions.**
 
 ### The folder cannot be written
 
-Keep `Arkuzo Memory Saver.exe` in a folder where your user can create `app/` and `data/`. A read-only location or organization-managed restriction may prevent installation or audit writes. Choose an appropriate writable location; do not assume running everything as administrator is the solution.
+Keep `ArkuzoMemorySaver.exe` in a folder where your user can create `app/` and `data/`. A read-only location or organization-managed restriction may prevent installation or audit writes. Choose an appropriate writable location; do not assume running everything as administrator is the solution.
 
 ## Monitoring and trimming
 

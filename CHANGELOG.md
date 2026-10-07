@@ -2,6 +2,13 @@
 
 Changes for **Arkuzo Memory Saver with Volt Integration** are recorded here.
 
+## v1.0.2 — Executable branding and embedded application icon
+
+- Rename single-file launcher executable to `ArkuzoMemorySaver.exe`.
+- Embed high-resolution application icon (16px to 256px) generated from the official emblem.
+- Remove legacy `Run.exe` executable artifacts.
+- Update release packaging and verification suites.
+
 ## v1.0.1 — Cookie-dead account isolation
 
 - Add a separate red `COOKIE DEAD` account section, including accounts without a running client.

@@ -1,0 +1,37 @@
+# Maintainer release checklist
+
+Use Windows x64 with PowerShell 5.1, the .NET 10 SDK, Python 3, Git, and authenticated GitHub CLI. End users do not need the .NET SDK.
+
+## Validate and package
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File build/test.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File build/package.ps1 -Version v1.0.0
+```
+
+The package script rebuilds the self-contained launcher and creates, under ignored `dist/`:
+
+| Asset | Purpose |
+| --- | --- |
+| `Run.exe` | Single-file Windows x64 launcher |
+| `ArkuzoMemorySaver-v1.0.0-win-x64.zip` | End-user archive containing only `Run.exe` |
+| `ArkuzoMemorySaver-runtime.zip` | Exactly three runtime programs and `defaults.json` |
+| `ArkuzoMemorySaver-runtime.sha256` | Updater checksum for the runtime ZIP |
+| `SHA256SUMS.txt` | Checksums for the executable and ZIP downloads |
+
+Never include `data/`, `app/`, a local `config.json`, logs, recovery journals, Volt databases, or credentials in a release. `config/defaults.json` is the public default, not a live user's configuration. Update the engine, launcher, and changelog version together for subsequent releases.
+
+## Publish
+
+Commit the reviewed source, tests, documentation, and root `Run.exe`, then push `main`. Create a stable GitHub Release for the corresponding commit, with all five assets. The launcher discovers **published stable releases**, not commits or draft/prerelease tags. Asset names for the runtime ZIP and its checksum are part of the updater protocol and must stay stable.
+
+## Verify the published assets
+
+1. Download `Run.exe` from the newly published release into a new writable test directory.
+2. Run `Run.exe --verify-only` to exercise the real GitHub metadata, download, checksum, extraction, configuration initialization, and installed-cache checks without starting Roblox or the saver.
+3. Hash `data/config.json`, customize it, run verification again, and confirm that it is byte-identical.
+4. Run `Run.exe --offline --verify-only` to validate the cache without network access.
+5. Confirm the release tag points to the intended commit and all uploaded asset digests match the local artifacts.
+6. Only start the saver interactively when no other saver controller is running. Existing live clients must not be disturbed by a release smoke test.
+
+The launcher itself is not silently replaced while running. A future launcher-protocol change should ship a new `Run.exe` and explicitly document any required manual launcher upgrade.

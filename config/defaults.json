@@ -1,0 +1,40 @@
+{
+  "selected_preset": "agressive",
+  "settings": {
+    "target_ram_mb": 600,
+    "trim_enabled": true,
+    "trim_every_sec": 45,
+    "priority": "BelowNormal",
+    "cores_per_instance": 2,
+    "hard_limit": false,
+    "poll_ms": 350,
+    "minimize_on_launch": false,
+    "apply_graphics_flags": false
+  },
+  "health": {
+    "enabled": true,
+    "private_limit_mb": 6000,
+    "pressure_percent": 82,
+    "pressure_min_private_mb": 2500,
+    "warmup_sec": 300,
+    "hang_timeout_sec": 120,
+    "startup_error_timeout_sec": 40,
+    "disconnect_timeout_sec": 5,
+    "cooldown_sec": 240,
+    "max_recycles_per_hour": 10,
+    "trim_spacing_sec": 2,
+    "private_limit_sustain_sec": 60
+  },
+  "recovery": {
+    "enabled": true,
+    "restore_missing": true,
+    "restore_wait_sec": 90,
+    "relaunch_delay_sec": 30,
+    "retry_base_sec": 90,
+    "retry_max_sec": 900,
+    "retry_max_per_hour": 6,
+    "ready_stable_sec": 30,
+    "excluded_account_ids": []
+  },
+  "notes": "v1.0.0: verified account restoration, serialized recovery, persistent retry backoff; thresholds are policy, not a crash-free guarantee."
+}

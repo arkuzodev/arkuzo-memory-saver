@@ -1,0 +1,21 @@
+# User-owned data, installed releases, and local secrets
+/data/
+/app/
+/.release-verify/
+/dist/
+/src/launcher/artifacts/
+/tests/launcher/verification-output.txt
+*.env
+.env*
+*.log
+*.tmp
+*.pdb
+__pycache__/
+*.py[cod]
+**/bin/
+**/obj/
+.vs/
+.vscode/
+.DS_Store
+Thumbs.db
+# Only the published launcher binary belongs at the root.

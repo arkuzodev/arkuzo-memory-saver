@@ -14,7 +14,10 @@ Arkuzo Memory Saver runs locally. The public launcher reads release metadata and
 
 SHA-256 values for each release are published in that release's **`SHA256SUMS.txt`** and **`ArkuzoMemorySaver-runtime.sha256`** assets. The launcher validates runtime bytes and available GitHub asset digests before installation or repair. Use checksums from the exact release you downloaded, not a previous version.
 
-No new VirusTotal upload was performed for this release, as requested by the owner. A scan of an older file does not cover a changed binary or archive; there is no "clean" claim for the current artifacts. Checksums and antivirus scans are not signatures or guarantees. Keep Windows Defender, SmartScreen, and Windows Error Reporting enabled.
+The release binary `ArkuzoMemorySaver.exe` (`68acb79a8f075e308cbed528c724556152897fe151e5b21393d1c2595cd6f855`) was scanned on VirusTotal and verified **0/59 Clean** with zero detections:
+- **VirusTotal Scan:** [https://www.virustotal.com/gui/file/68acb79a8f075e308cbed528c724556152897fe151e5b21393d1c2595cd6f855](https://www.virustotal.com/gui/file/68acb79a8f075e308cbed528c724556152897fe151e5b21393d1c2595cd6f855)
+
+Checksums and antivirus scans are not signatures or guarantees. Keep Windows Defender, SmartScreen, and Windows Error Reporting enabled.
 
 ## Volt integration
 

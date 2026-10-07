@@ -25,6 +25,13 @@ Never include `data/`, `app/`, a local `config.json`, logs, recovery journals, V
 
 Commit the reviewed source, tests, documentation, and root `ArkuzoMemorySaver.exe`, then push `main`. Create a stable GitHub Release for the corresponding commit, with all five assets. The launcher discovers **published stable releases**, not commits or draft/prerelease tags. Asset names for the runtime ZIP and its checksum are part of the updater protocol and must stay stable.
 
+## VirusTotal Scan & Integrity Verification
+
+Before and after publishing each new version:
+1. Scan `ArkuzoMemorySaver.exe` and release archives on [VirusTotal](https://www.virustotal.com).
+2. Confirm 0 detections across all security vendors.
+3. Update `README.md`, `SECURITY.md`, and the GitHub Release notes with the SHA-256 hashes and VirusTotal report links.
+
 ## Verify the published assets
 
 1. Download `ArkuzoMemorySaver.exe` from the newly published release into a new writable test directory.

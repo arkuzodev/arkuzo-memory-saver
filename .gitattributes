@@ -6,3 +6,4 @@
 *.json text eol=lf
 *.exe binary
 *.zip binary
+*.ico binary

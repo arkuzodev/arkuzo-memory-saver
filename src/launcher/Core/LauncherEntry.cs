@@ -22,7 +22,7 @@ public static class LauncherEntry
  public static int Run(string[] args,string root)
  {
   if(args.Any(x=>x!="--offline" && x!="--verify-only") || args.Distinct().Count()!=args.Length)
-  { Console.Error.WriteLine("Usage: Run.exe [--offline] [--verify-only]");return 2; }
+  { Console.Error.WriteLine("Usage: \"Arkuzo Memory Saver.exe\" [--offline] [--verify-only]");return 2; }
   try {
    using var updaterLock=new LauncherLock(root);
    var store=new Installation(Path.GetFullPath(root));

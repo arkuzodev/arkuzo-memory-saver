@@ -13,7 +13,7 @@ The launcher initializes **`data/config.json`** from packaged defaults only when
 1. Stop the saver normally. Keep a backup of `data/config.json`.
 2. Edit the existing JSON file, retaining the surrounding structure and unrelated keys.
 3. Use JSON booleans (`true`/`false`) and numbers, with no comments or trailing commas.
-4. Restart through `Run.exe` and check startup diagnostics before relying on the changed policy.
+4. Restart through `Arkuzo Memory Saver.exe` and check startup diagnostics before relying on the changed policy.
 
 **Malformed existing JSON makes the saver refuse to start; the updater preserves it even if the runtime update completes.** It is not silently reset. Restore your own known-good backup or correct the reported error. Do not delete the configuration to make an error disappear: doing so loses your selected policy and exclusions.
 

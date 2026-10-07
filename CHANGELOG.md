@@ -2,6 +2,15 @@
 
 Changes for **Arkuzo Memory Saver with Volt Integration** are recorded here.
 
+## v1.0.1 — Cookie-dead account isolation
+
+- Add a separate red `COOKIE DEAD` account section, including accounts without a running client.
+- Read Volt's explicit dead-session status without inferring a permanent ban or attempting captcha bypass.
+- Keep dead accounts paused with retained recovery history; release their handoff only after verified idle/no-process safety checks.
+- Avoid letting an unrelated dead session disable recovery for otherwise eligible accounts.
+- Accept valid newly imported accounts without tracker/launch history while keeping them ineligible for automatic launch.
+- Preserve configuration and account retry accounting across runtime updates.
+
 ## v1.0.0 — Initial release
 
 ### Distribution and updates

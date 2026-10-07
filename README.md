@@ -1,11 +1,11 @@
 <div align="center">
 
 # Arkuzo Memory Saver
-### Volt Integration · v1.0.0
+### Volt Integration · v1.0.1
 
 A portable Windows memory monitor with guarded, account-aware recovery through Volt.
 
-[![Version](https://img.shields.io/badge/version-1.0.0-6366f1)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.0.1-6366f1)](CHANGELOG.md)
 ![Windows x64](https://img.shields.io/badge/platform-Windows_x64-0078D4)
 ![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-5391FE)
 ![Volt integration](https://img.shields.io/badge/Volt-integration-22c55e)
@@ -41,6 +41,7 @@ flowchart LR
 | Sustained-memory guard | A 6,000 MB private-memory threshold sustained for 60 seconds can make a client a recovery candidate. Current system pressure has separate checks. |
 | Volt account recovery | Acts only when account identity, process generation, launcher control, relaunch eligibility, and audit state can be verified. |
 | Bounded restoration | Serializes recovery, preserves unresolved handoffs, and persists retry backoff and budgets across saver restarts. |
+| Cookie-dead isolation | Shows invalid sessions in a separate red `COOKIE DEAD` section; pauses only that account when safe idle/no-process evidence is verified. |
 | Portable updates | Keeps versioned runtime files separate from persistent user data; validated cached versions support offline startup. |
 
 **The 600 MB value is not an enforced hard cap.** Trimming may reduce resident RAM temporarily, but it does not free private allocations or fix a memory leak. The 82% OS commit threshold is a policy for selecting recovery candidates—not a promise of crash prevention.
@@ -88,6 +89,12 @@ Recovery covers opted-in, previously launched, uniquely mapped accounts. Missing
 The native relaunch delay is kept at **at least 30 seconds**; an already larger user delay is preserved. Missing-account retries use persistent **90–900 second backoff**, with cooldowns and hourly budgets. An unresolved account handoff protects other accounts from collateral closures.
 
 A restored account must have a new, exactly mapped process generation, connected launcher socket, responsive non-error window, and correctly bound server-acceptance evidence over a continuous confirmation interval. **Those observations are readiness criteria, not an overnight endurance guarantee.**
+
+### Cookie-dead accounts
+
+Volt's red cross corresponds to a dead account session. The saver displays these accounts separately in red as **`COOKIE DEAD`**. A dead session can result from expiration, revocation, a challenge, or another authentication problem; it is not proof of a permanent ban.
+
+A verified idle dead account is paused and excluded from automated launch requests. Its recovery history is retained separately so it does not indefinitely hold the handoff gate for healthy accounts. If a process, launch, or identity remains uncertain, the safety gate stays closed. Restore the account session in Volt manually; the saver only resumes after verifying it is eligible again. Newly imported accounts without a launch history are displayed but never automatically activated.
 
 ### What it does not promise
 

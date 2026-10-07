@@ -9,6 +9,7 @@ foreach($f in $ast.FindAll({param($n) $n -is [Management.Automation.Language.Fun
 }
 function Assert([bool]$ok,[string]$msg){if(-not $ok){throw "FAIL: $msg"}}
 $script:recoveryPending=@{ 'account-test'=@{status='AwaitingReplacement';closedUtc=[datetime]::UtcNow.ToString('o')} }
+$script:voltControlStatus=@{available=$true;globalMappingSafe=$true;accounts=@()};$script:voltControlCheckedUtc=[datetime]::UtcNow;$script:suspendedAccounts=@{}
 # Backward compatibility fallback reproduces the old missing handoff gate.
 $allowed=$true
 if(Get-Command Test-ArkuzoRecoveryHandoff -ErrorAction SilentlyContinue){$allowed=Test-ArkuzoRecoveryHandoff}

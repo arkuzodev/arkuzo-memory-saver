@@ -1,6 +1,6 @@
 #requires -Version 5.1
 [CmdletBinding()]
-param([string]$Version = 'v1.0.0', [switch]$SkipLauncherBuild)
+param([string]$Version = 'v1.0.1', [switch]$SkipLauncherBuild)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 if ($Version -notmatch '^v\d+\.\d+\.\d+$') { throw 'Use a stable semantic version, for example v1.0.0.' }

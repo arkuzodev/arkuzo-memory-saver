@@ -87,6 +87,12 @@ Without Python or Volt, basic monitoring and eligible trimming remain available.
 
 Singleton protection applies across saver copies. Find the existing saver console and any supervising process, then stop the existing controller normally before switching versions or folders. Do not remove the mutex, kill unrelated processes, or run a second controller against the same clients.
 
+### Red `COOKIE DEAD` in the separate paused-account section
+
+This is Volt's dead-session status, not a diagnosis of a permanent ban. Resolve the login/captcha/session issue in Volt manually. The saver does not solve captchas or replace cookies.
+
+Once the account is precisely identified as dead, idle, and without an associated active or uncertain process/launch, its handoff can be paused separately. The retained retry history is not discarded. Other verified healthy accounts can continue; an ambiguous or still-running account is not silently removed from the protection gate. Imported accounts that have never launched do not invalidate the whole inventory and are not automatically started.
+
 ### “Recovery blocked” or accounts remain missing
 
 Possible causes include cooldown/hourly budgets, an unresolved handoff, invalid recovery state, unavailable audit logging, or an account that cannot be uniquely restored. Review the reason before changing policy.

@@ -60,7 +60,7 @@ function Warn-Throttled {}
 function Save-ArkuzoRecoveryJournal {}
 $script:MonitorOnly=$false;$script:ownsControllerMutex=$true;$script:recoveryJournalHealthy=$true;$script:logFailed=$false
 $script:restorePolicy=@{enabled=$true;restore_missing=$false;excluded_account_ids=@();ready_stable_sec=30;restore_wait_sec=90}
-$script:voltControlStatus=@{available=$true;accounts=@(@{accountId='test';processId=72;trackerId='222';controlReady=$true;autoRelaunch=$true;cookieAlive=$true;uiStatus='Connected'})}
+$script:voltControlStatus=@{available=$true;globalMappingSafe=$true;accounts=@(@{accountId='test';processId=72;trackerId='222';controlReady=$true;autoRelaunch=$true;cookieAlive=$true;uiStatus='Connected'})}
 $state=@{TrackerId='222';Watcher=@{};StartTicks=200;GameReady=$true;LastSnapshot=@{windowPresent=$true;responding=$true;launchError=$false};HealthSnapshotUtc=$now.AddSeconds(-30)}
 $script:tracked=@{72=$state}
 $entry=New-Entry;$entry.readySinceUtc=$now.AddSeconds(-40).ToString('o');$entry.lastObservedUtc=$now.AddSeconds(-5).ToString('o');$entry.replacementPid=72;$entry.replacementStartTicks=200

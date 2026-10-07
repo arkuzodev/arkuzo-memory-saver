@@ -8,7 +8,7 @@ public sealed class GitHubReleaseSource
  public async Task<ReleasePayload> FetchAsync()
  {
   using var client=new HttpClient(handler) {Timeout=TimeSpan.FromSeconds(30)};
-  client.DefaultRequestHeaders.UserAgent.ParseAdd("ArkuzoMemorySaver-Launcher/1.0.0");
+  client.DefaultRequestHeaders.UserAgent.ParseAdd("ArkuzoMemorySaver-Launcher/1.0.1");
   client.DefaultRequestHeaders.Add("X-GitHub-Api-Version","2022-11-28");
   using var budget=new CancellationTokenSource(TimeSpan.FromSeconds(90));
   var metadata=await Download(client,"https://api.github.com/repos/arkuzodev/arkuzo-memory-saver/releases/latest",1024*1024,budget.Token);

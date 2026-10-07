@@ -6,7 +6,7 @@ Use Windows x64 with PowerShell 5.1, the .NET 10 SDK, Python 3, Git, and authent
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File build/test.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File build/package.ps1 -Version v1.0.0
+powershell -NoProfile -ExecutionPolicy Bypass -File build/package.ps1 -Version v1.0.1
 ```
 
 The package script rebuilds the self-contained launcher and creates, under ignored `dist/`:
@@ -14,7 +14,7 @@ The package script rebuilds the self-contained launcher and creates, under ignor
 | Asset | Purpose |
 | --- | --- |
 | `Run.exe` | Single-file Windows x64 launcher |
-| `ArkuzoMemorySaver-v1.0.0-win-x64.zip` | End-user archive containing only `Run.exe` |
+| `ArkuzoMemorySaver-v1.0.1-win-x64.zip` | End-user archive containing only `Run.exe` |
 | `ArkuzoMemorySaver-runtime.zip` | Exactly three runtime programs and `defaults.json` |
 | `ArkuzoMemorySaver-runtime.sha256` | Updater checksum for the runtime ZIP |
 | `SHA256SUMS.txt` | Checksums for the executable and ZIP downloads |

@@ -85,11 +85,19 @@ class ProbeTests(unittest.TestCase):
             self.assertNotIn('987654321', serialized)
             self.assertNotIn('SECRET', serialized)
             self.assertEqual(before, self.path.read_bytes())
-    def test_target_preserves_conservative_global_readiness(self):
+    def test_target_readiness_is_independent_of_unrelated_disabled_account(self):
         self.doc['accounts'][0]['browserTrackerId'] = '987654321'
         self.doc['accounts'].append({'autoRelaunch': False, 'cookieStatus': 'alive', 'browserTrackerId': '123456789'})
         self.save()
-        self.assertFalse(self.target_status('987654321')['safeToRecycle'])
+        self.assertTrue(self.target_status('987654321')['safeToRecycle'])
+
+    def test_target_unrelated_malformed_or_duplicate_tracker_blocks(self):
+        self.doc['accounts'][0]['browserTrackerId'] = '12345'
+        for trackers in (('oops',), ('67890', '67890')):
+            self.doc['accounts'] = self.doc['accounts'][:1]
+            self.doc['accounts'].extend({'autoRelaunch': False, 'cookieStatus': 'dead', 'browserTrackerId': tracker} for tracker in trackers)
+            self.save()
+            self.assertFalse(self.target_status('12345')['safeToRecycle'])
 
     def test_target_cli_cannot_fall_back_to_global_ready(self):
         self.doc['accounts'][0]['browserTrackerId'] = '987654321'; self.save()
@@ -112,7 +120,7 @@ class ProbeTests(unittest.TestCase):
         self.assertTrue(callable(reader), 'Sanitized inventory API must exist')
         result = reader(self.path)
         self.assertTrue(result['available'])
-        self.assertEqual(result['accounts'], [{'accountId':'11111111-1111-4111-8111-111111111111','username':'alpha','displayName':'Alpha','trackerId':'12345','autoRelaunch':True,'cookieAlive':True,'lastLaunchAtMs':1234567890}])
+        self.assertEqual(result['accounts'], [{'accountId':'11111111-1111-4111-8111-111111111111','username':'alpha','displayName':'Alpha','trackerId':'12345','autoRelaunch':True,'cookieAlive':True,'cookieStatus':'alive','lastLaunchAtMs':1234567890}])
         self.assertTrue(result['safeToRecycle'])
         self.assertEqual(result['relaunchDelayMs'], 10000)
         self.assertNotIn('SECRET', json.dumps(result))
@@ -120,6 +128,32 @@ class ProbeTests(unittest.TestCase):
 
     def valid_inventory(self):
         self.doc['accounts'][0].update(id='11111111-1111-4111-8111-111111111111', username='alpha', displayName='Alpha', browserTrackerId='12345', lastLaunchAtMs=1234567890)
+
+    def test_mixed_inventory_keeps_unlaunched_and_dead_rows(self):
+        self.valid_inventory()
+        for index, status in enumerate(('alive', 'dead', 'DEAD', None), 2):
+            self.doc['accounts'].append(dict(self.doc['accounts'][0], id=f'{index:08d}-1111-4111-8111-111111111111', username=f'user{index}', displayName=f'User{index}', browserTrackerId=None, lastLaunchAtMs=None, cookieStatus=status))
+        self.save(); before = self.path.read_bytes()
+        result = probe.read_account_inventory(self.path)
+        self.assertTrue(result['available'])
+        self.assertTrue(result['safeToRecycle'])
+        self.assertEqual([a['cookieStatus'] for a in result['accounts']], ['alive', 'alive', 'dead', 'unknown', 'unknown'])
+        self.assertEqual(result['accounts'][1]['lastLaunchAtMs'], 0)
+        self.assertIsNone(result['accounts'][1]['trackerId'])
+        self.assertEqual(before, self.path.read_bytes())
+
+    def test_inventory_duplicate_identity_and_nonempty_tracker_fail_closed(self):
+        for field in ('id', 'username', 'displayName', 'browserTrackerId'):
+            self.valid_inventory()
+            other = dict(self.doc['accounts'][0], id='22222222-2222-4222-8222-222222222222', username='beta', displayName='Beta', browserTrackerId='67890')
+            other[field] = self.doc['accounts'][0][field]
+            self.doc['accounts'] = [self.doc['accounts'][0], other]
+            self.save()
+            self.assertFalse(probe.read_account_inventory(self.path)['available'], field)
+        self.doc['accounts'] = self.doc['accounts'][:1]
+        for value in ('', ' ', '12x', True):
+            self.valid_inventory(); self.doc['accounts'][0]['browserTrackerId'] = value; self.save()
+            self.assertFalse(probe.read_account_inventory(self.path)['available'])
 
     def test_inventory_malformed_identity_fails_closed(self):
         for key, bad in [('id','bad'), ('browserTrackerId','123x'), ('browserTrackerId',True), ('username',None), ('displayName',''), ('lastLaunchAtMs',True), ('lastLaunchAtMs',float('nan')), ('lastLaunchAtMs',-1)]:

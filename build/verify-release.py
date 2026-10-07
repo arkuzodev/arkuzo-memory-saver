@@ -8,8 +8,8 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 REPO = 'arkuzodev/arkuzo-memory-saver'
-VERSION = 'v1.0.0'
-NAMES = ['Run.exe', 'ArkuzoMemorySaver-runtime.zip', 'ArkuzoMemorySaver-runtime.sha256', 'ArkuzoMemorySaver-v1.0.0-win-x64.zip', 'SHA256SUMS.txt']
+VERSION = 'v1.0.1'
+NAMES = ['Run.exe', 'ArkuzoMemorySaver-runtime.zip', 'ArkuzoMemorySaver-runtime.sha256', f'ArkuzoMemorySaver-{VERSION}-win-x64.zip', 'SHA256SUMS.txt']
 
 def run(command, expected=0, timeout=120):
     result = subprocess.run(command, capture_output=True, text=True, errors='replace', timeout=timeout)

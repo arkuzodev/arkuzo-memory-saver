@@ -20,12 +20,14 @@ function Get-VoltTrackerId([string]$CommandLine) {
 }
 
 function New-VoltUnavailableStatus([string]$Reason) {
-    return [pscustomobject]@{available=$false;managerId=$null;managerStartTicks=$null;relaunchDelayMs=$null;accounts=@();reason=$Reason}
+    return [pscustomobject]@{available=$false;globalMappingSafe=$false;managerId=$null;managerStartTicks=$null;relaunchDelayMs=$null;accounts=@();reason=$Reason}
 }
 
 function Get-VoltUiBinding($Accounts, $Nodes, [int]$ManagerId, [int[]]$UiProcessIds=@()) {
     $bad=[pscustomobject]@{valid=$false;reason='Volt Account Manager UI is unknown or ambiguous';rows=@();delayNode=$null;delaySec=$null}
     $allowed=@($ManagerId)+@($UiProcessIds)
+    $labels=@($Nodes | Where-Object { $_.kind -ceq 'Text' -and $_.name.StartsWith('@') })
+    if ($labels.Count -ne @($Accounts).Count -or @($labels | Where-Object { $_.name -cnotin @($Accounts | ForEach-Object { '@'+$_.username }) }).Count -gt 0) { return $bad }
     if (@($Nodes | Where-Object { [int]$_.processId -notin $allowed }).Count -gt 0) { return $bad }
     $editors=@($Nodes | Where-Object { $_.name -ceq 'Relaunch delay in seconds' -and $_.kind -eq 'Edit' })
     if ($editors.Count -ne 1 -or -not $editors[0].valueWritable -or $editors[0].value -notmatch '\A[0-9]+\z') { return $bad }
@@ -42,7 +44,7 @@ function Get-VoltUiBinding($Accounts, $Nodes, [int]$ManagerId, [int[]]$UiProcess
             $segment += $n
         }
         $scoped=@($segment | Where-Object { $_.name -ceq $actionName -and $_.kind -eq 'Button' })
-        if ($scoped.Count -ne 1 -or -not $scoped[0].enabled -or -not $scoped[0].invokable) { return $bad }
+        if ($scoped.Count -ne 1) { return $bad }
         $sockets=@($segment | Where-Object { $_.kind -eq 'Group' -and $_.name -match '\ASocket connected to Roblox process PID [0-9]+\z' })
         $connected=@($segment | Where-Object { $_.kind -eq 'Text' -and $_.name -ceq 'Connected' })
         $idle=@($segment | Where-Object { $_.kind -eq 'Text' -and $_.name -ceq 'Idle' })
@@ -68,20 +70,47 @@ function New-VoltControlContext($Inventory, $Managers, $Nodes, $Processes, [stri
         $seen=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
         foreach($a in $sourceAccounts) {
             $value=$a.$field
+            if ($field -eq 'trackerId' -and $null -eq $value) { continue }
             if ($value -isnot [string] -or [string]::IsNullOrWhiteSpace($value) -or $value -match '[\r\n\x00]' -or -not $seen.Add($value)) { $status.reason='Volt account identity is malformed or ambiguous'; return $context }
             if (($field -eq 'accountId' -and $value -notmatch '\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\z') -or ($field -eq 'trackerId' -and $value -notmatch '\A[0-9]+\z')) { return $context }
         }
+    }
+    foreach($a in $sourceAccounts) {
+        $launch=$a.lastLaunchAtMs
+        if ($null -ne $launch -and (($launch -isnot [int] -and $launch -isnot [long] -and $launch -isnot [double] -and $launch -isnot [decimal]) -or [double]::IsNaN([double]$launch) -or [double]::IsInfinity([double]$launch) -or $launch -lt 0)) { $status.reason='Volt launch history is malformed'; return $context }
     }
     $manager=$managers[0]
     if (-not $manager.identityStable -or -not [string]::Equals($manager.path,$ExpectedPath,[StringComparison]::OrdinalIgnoreCase) -or $manager.startTicks -le 0 -or $manager.windowHandle -eq 0) { return $context }
     $ui=Get-VoltUiBinding -Accounts $Inventory.accounts -Nodes @($Nodes) -ManagerId $manager.processId -UiProcessIds $UiProcessIds
     $context.Manager=$manager; $context.Ui=$ui
     if (-not $ui.valid) { $status.reason=$ui.reason; return $context }
+    $globallyMapped=@($ui.rows | Where-Object { $_.uiStatus -ceq 'Unknown' }).Count -eq 0
+    $seenLiveTrackers=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $seenLivePids=New-Object 'Collections.Generic.HashSet[int]'
+    foreach($p in @($Processes)) {
+        if ($p.trackerId -isnot [string] -or $p.trackerId -notmatch '\A[0-9]+\z' -or -not $seenLiveTrackers.Add($p.trackerId) -or -not $seenLivePids.Add([int]$p.processId) -or $p.processId -le 0 -or -not $p.identityStable -or -not $p.ownerStable -or $p.startTicks -le 0 -or [int]$p.parentProcessId -ne [int]$manager.processId -or $p.parentStartTicks -ne $manager.startTicks -or @($sourceAccounts | Where-Object { $_.trackerId -ceq $p.trackerId }).Count -ne 1) { $globallyMapped=$false }
+    }
+    # Validate both directions: every live client owns exactly one UI row,
+    # and every connected row has that exact verified live socket process.
+    foreach($a in $sourceAccounts) {
+        $row=@($ui.rows | Where-Object { $_.accountId -ceq $a.accountId })
+        $live=@($Processes | Where-Object { $null -ne $a.trackerId -and $_.trackerId -ceq $a.trackerId })
+        if ($row.Count -ne 1) { $globallyMapped=$false; continue }
+        if ($row[0].uiStatus -ceq 'Connected') {
+            if ($live.Count -ne 1 -or $row[0].socketId -ne $live[0].processId) { $globallyMapped=$false }
+        } elseif ($row[0].uiStatus -ceq 'Idle') {
+            if ($live.Count -ne 0) { $globallyMapped=$false }
+        } else { $globallyMapped=$false }
+    }
     $accounts=@()
     foreach($a in @($Inventory.accounts)) {
         $row=@($ui.rows | Where-Object { $_.accountId -ceq $a.accountId })[0]
-        $live=@($Processes | Where-Object { $_.trackerId -ceq $a.trackerId })
-        $ready=$Inventory.safeToRecycle -and $a.autoRelaunch -and $a.cookieAlive
+        $live=@($Processes | Where-Object { $null -ne $a.trackerId -and $_.trackerId -ceq $a.trackerId })
+        $cookieStatus='unknown'
+        if ($a.cookieStatus -ceq 'alive' -or $a.cookieStatus -ceq 'dead') { $cookieStatus=$a.cookieStatus }
+        $lastLaunch=$a.lastLaunchAtMs
+        if ($null -eq $lastLaunch) { $lastLaunch=0 }
+        $ready=$globallyMapped -and $Inventory.autoEnabled -and $a.autoRelaunch -and $cookieStatus -ceq 'alive' -and $null -ne $a.trackerId -and $lastLaunch -gt 0 -and $row.button.enabled -and $row.button.invokable
         $processId=$null
         if ($row.uiStatus -eq 'Connected') {
             $ready=$ready -and $live.Count -eq 1
@@ -91,9 +120,10 @@ function New-VoltControlContext($Inventory, $Managers, $Nodes, $Processes, [stri
             }
         } elseif($row.uiStatus -eq 'Idle') { $ready=$ready -and $live.Count -eq 0 }
         else { $ready=$false }
-        $accounts += [pscustomobject]@{accountId=$a.accountId;username=$a.username;displayName=$a.displayName;trackerId=$a.trackerId;autoRelaunch=[bool]$a.autoRelaunch;cookieAlive=[bool]$a.cookieAlive;lastLaunchAtMs=$a.lastLaunchAtMs;uiStatus=$row.uiStatus;processId=$processId;controlReady=[bool]$ready}
+        $suspensionSafe=$cookieStatus -ceq 'dead' -and $row.uiStatus -ceq 'Idle' -and $live.Count -eq 0 -and $globallyMapped
+        $accounts += [pscustomobject]@{accountId=$a.accountId;username=$a.username;displayName=$a.displayName;trackerId=$a.trackerId;autoRelaunch=[bool]$a.autoRelaunch;cookieAlive=($cookieStatus -ceq 'alive');cookieStatus=$cookieStatus;suspensionSafe=[bool]$suspensionSafe;lastLaunchAtMs=$lastLaunch;uiStatus=$row.uiStatus;processId=$processId;controlReady=[bool]$ready}
     }
-    $context.Status=[pscustomobject]@{available=$true;managerId=[int]$manager.processId;managerStartTicks=[long]$manager.startTicks;relaunchDelayMs=$Inventory.relaunchDelayMs;accounts=$accounts;reason='Exact Volt manager and account controls observed'}
+    $context.Status=[pscustomobject]@{available=$true;globalMappingSafe=[bool]$globallyMapped;managerId=[int]$manager.processId;managerStartTicks=[long]$manager.startTicks;relaunchDelayMs=$Inventory.relaunchDelayMs;accounts=$accounts;reason='Exact Volt manager and account controls observed'}
     return $context
 }
 
@@ -103,14 +133,14 @@ function Test-VoltControlRevalidation($Original, $Fresh) {
         if (($Original.Inventory | ConvertTo-Json -Depth 10 -Compress) -cne ($Fresh.Inventory | ConvertTo-Json -Depth 10 -Compress) -or ($Original.Status.accounts | ConvertTo-Json -Depth 10 -Compress) -cne ($Fresh.Status.accounts | ConvertTo-Json -Depth 10 -Compress) -or (@($Original.Processes | Sort-Object processId) | ConvertTo-Json -Depth 10 -Compress) -cne (@($Fresh.Processes | Sort-Object processId) | ConvertTo-Json -Depth 10 -Compress)) { return $false }
         foreach($row in @($Original.Ui.rows)) {
             $match=@($Fresh.Ui.rows | Where-Object { $_.accountId -ceq $row.accountId })
-            if ($match.Count -ne 1 -or $match[0].uiStatus -cne $row.uiStatus -or $match[0].socketId -ne $row.socketId -or $match[0].button.name -cne $row.button.name -or $match[0].button.processId -ne $row.button.processId) { return $false }
+            if ($match.Count -ne 1 -or $match[0].uiStatus -cne $row.uiStatus -or $match[0].socketId -ne $row.socketId -or $match[0].button.name -cne $row.button.name -or $match[0].button.processId -ne $row.button.processId -or $match[0].button.enabled -ne $row.button.enabled -or $match[0].button.invokable -ne $row.button.invokable) { return $false }
         }
         return $true
     } catch { return $false }
 }
 
 function Test-VoltMissingLaunch($Context, [string]$AccountId, [string]$ExpectedTrackerId, [double]$NowMs, [int]$MinLaunchAgeSec=90) {
-    if (-not $Context.Status.available -or $AccountId -notmatch '\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\z' -or $ExpectedTrackerId -notmatch '\A[0-9]+\z') { return $false }
+    if (-not $Context.Status.available -or $Context.Status.globalMappingSafe -isnot [bool] -or -not $Context.Status.globalMappingSafe -or $AccountId -notmatch '\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\z' -or $ExpectedTrackerId -notmatch '\A[0-9]+\z') { return $false }
     if ($MinLaunchAgeSec -lt 90 -or $MinLaunchAgeSec -gt 3600 -or [double]::IsNaN($NowMs) -or [double]::IsInfinity($NowMs)) { return $false }
     $seenTrackers=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     $seenPids=New-Object 'Collections.Generic.HashSet[int]'
@@ -124,7 +154,12 @@ function Test-VoltMissingLaunch($Context, [string]$AccountId, [string]$ExpectedT
 
 function Invoke-VoltControlAction([string]$Action, [hashtable]$Facade, [string]$AccountId, [string]$ExpectedTrackerId, [int]$RelaunchDelaySec=30, [int]$MinLaunchAgeSec=90) {
     $context=& $Facade.Read $Facade.Root
-    if ($Action -ceq 'Status') { return $context.Status }
+    if ($Action -ceq 'Status') {
+        if (-not $context.Status.available) { return $context.Status }
+        $fresh=& $Facade.Read $Facade.Root
+        if (-not (Test-VoltControlRevalidation $context $fresh)) { return New-VoltUnavailableStatus 'Volt read-only snapshots changed' }
+        return $fresh.Status
+    }
     if ($Action -ceq 'Configure') {
         $result=$context.Status; $result | Add-Member configured $false -Force
         if (-not $result.available -or $RelaunchDelaySec -lt 30 -or $RelaunchDelaySec -gt 3600) { $result.reason='Delay configuration blocked'; return $result }

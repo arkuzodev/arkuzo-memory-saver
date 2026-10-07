@@ -22,8 +22,16 @@ def read_recovery_status(path, tracker_id=_GLOBAL_CHECK):
             document = json.loads(row[0])
         settings = document.get('settings') or {}
         accounts = document.get('accounts') or []
+        seen_trackers = set()
+        for account in accounts:
+            tracker = account.get('browserTrackerId')
+            if tracker is None:
+                continue
+            if type(tracker) not in (str, int) or re.fullmatch(r'[0-9]+', str(tracker)) is None or str(tracker) in seen_trackers:
+                raise ValueError('ambiguous tracker mapping')
+            seen_trackers.add(str(tracker))
         # Deliberately do not expose cookies, tokens, names, server links or IDs.
-        safe = bool(accounts) and settings.get('autoRelaunchEnabled') is True and all(
+        safe = bool(accounts) and settings.get('autoRelaunchEnabled') is True and any(
             a.get('autoRelaunch') is True and a.get('cookieStatus') == 'alive' for a in accounts
         )
         if tracker_id is not _GLOBAL_CHECK:
@@ -54,22 +62,36 @@ def read_account_inventory(path):
         settings = document.get('settings') or {}
         accounts = document.get('accounts') or []
         inventory = []
+        seen = {key: set() for key in ('id', 'username', 'displayName', 'browserTrackerId')}
         for a in accounts:
             account_id = a.get('id')
             tracker = a.get('browserTrackerId')
             last_launch = a.get('lastLaunchAtMs')
+            if last_launch is None:
+                last_launch = 0
             if not (isinstance(account_id, str) and _UUID.fullmatch(account_id)
-                    and type(tracker) in (str, int) and re.fullmatch(r'[0-9]+', str(tracker))
-                    and isinstance(a.get('username'), str) and a['username']
-                    and isinstance(a.get('displayName'), str) and a['displayName']
+                    and (tracker is None or (type(tracker) in (str, int) and re.fullmatch(r'[0-9]+', str(tracker))))
+                    and isinstance(a.get('username'), str) and a['username'].strip()
+                    and isinstance(a.get('displayName'), str) and a['displayName'].strip()
                     and type(last_launch) in (int, float) and math.isfinite(last_launch) and last_launch >= 0):
                 raise ValueError('invalid inventory')
+            for key in seen:
+                value = a.get(key)
+                if key == 'browserTrackerId' and value is None:
+                    continue
+                value = str(value).casefold()
+                if re.search(r'[\r\n\x00]', value) or value in seen[key]:
+                    raise ValueError('ambiguous inventory')
+                seen[key].add(value)
+            cookie_status = a.get('cookieStatus')
+            if cookie_status not in ('alive', 'dead'):
+                cookie_status = 'unknown'
             inventory.append({'accountId': account_id, 'username': a['username'],
-                              'displayName': a['displayName'], 'trackerId': str(tracker),
-                              'autoRelaunch': a.get('autoRelaunch') is True, 'cookieAlive': a.get('cookieStatus') == 'alive',
-                              'lastLaunchAtMs': last_launch})
-        ready = bool(accounts) and settings.get('autoRelaunchEnabled') is True and all(
-            a['autoRelaunch'] and a['cookieAlive'] for a in inventory)
+                              'displayName': a['displayName'], 'trackerId': str(tracker) if tracker is not None else None,
+                              'autoRelaunch': a.get('autoRelaunch') is True, 'cookieAlive': cookie_status == 'alive',
+                              'cookieStatus': cookie_status, 'lastLaunchAtMs': last_launch})
+        ready = bool(accounts) and settings.get('autoRelaunchEnabled') is True and any(
+            a['autoRelaunch'] and a['cookieAlive'] and a['trackerId'] is not None and a['lastLaunchAtMs'] > 0 for a in inventory)
         return {'available': True, 'safeToRecycle': ready, 'autoEnabled': settings.get('autoRelaunchEnabled') is True,
                 'relaunchDelayMs': settings.get('relaunchDelayMs'), 'accounts': inventory, 'reason': 'Inventory read'}
     except (OSError, ValueError, sqlite3.Error, TypeError, AttributeError):

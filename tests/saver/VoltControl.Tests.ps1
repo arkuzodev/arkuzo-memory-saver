@@ -13,8 +13,8 @@ function Case([string]$name,[scriptblock]$body) { & $body; $script:passed++; Wri
 $expectedPath='C:\Fixtures\Local\Volt\tauri-app.exe'
 function Fixture {
     $inventory=[pscustomobject]@{available=$true;safeToRecycle=$true;autoEnabled=$true;relaunchDelayMs=10000;accounts=@(
-        [pscustomobject]@{accountId='11111111-1111-4111-8111-111111111111';username='alpha';displayName='Alpha';trackerId='12345';autoRelaunch=$true;cookieAlive=$true;lastLaunchAtMs=100000}
-        [pscustomobject]@{accountId='22222222-2222-4222-8222-222222222222';username='beta';displayName='Beta';trackerId='67890';autoRelaunch=$true;cookieAlive=$true;lastLaunchAtMs=100000}
+        [pscustomobject]@{accountId='11111111-1111-4111-8111-111111111111';username='alpha';displayName='Alpha';trackerId='12345';autoRelaunch=$true;cookieAlive=$true;cookieStatus='alive';lastLaunchAtMs=100000}
+        [pscustomobject]@{accountId='22222222-2222-4222-8222-222222222222';username='beta';displayName='Beta';trackerId='67890';autoRelaunch=$true;cookieAlive=$true;cookieStatus='alive';lastLaunchAtMs=100000}
     )}
     $manager=[pscustomobject]@{processId=10;startTicks=[long]100;path=$expectedPath;identityStable=$true;windowHandle=77}
     $nodes=@(
@@ -33,6 +33,87 @@ function Fixture {
     )
     $processes=@([pscustomobject]@{processId=20;startTicks=[long]200;trackerId='12345';parentProcessId=[uint32]10;parentStartTicks=[long]100;identityStable=$true;ownerStable=$true})
     return @{Inventory=$inventory;Managers=@($manager);Nodes=$nodes;Processes=$processes;ExpectedPath=$expectedPath}
+}
+Case 'Dead idle account is suspension safe without poisoning healthy readiness' {
+    $f=Fixture; $f.Inventory.accounts[1].cookieStatus='dead'; $f.Inventory.accounts[1].cookieAlive=$false
+    $f.Inventory.accounts[1].trackerId=$null; $f.Inventory.accounts[1].lastLaunchAtMs=$null
+    $f.Nodes[11].enabled=$false; $f.Nodes[11].invokable=$false
+    $c=New-VoltControlContext @f
+    Assert $c.Status.available 'Dead unlaunched row remains valid inventory'
+    Assert $c.Status.accounts[0].controlReady 'Healthy connected account remains ready'
+    Assert (-not $c.Status.accounts[1].controlReady) 'Dead account cannot launch'
+    Assert $c.Status.accounts[1].suspensionSafe 'Exact dead idle row and fully mapped global snapshot permit suspension'
+    Assert ($c.Status.accounts[1].cookieStatus -ceq 'dead') 'Explicit dead signal serialized'
+    Assert (($c.Status | ConvertTo-Json -Depth 10) -match 'suspensionSafe') 'Suspension evidence serialized'
+    $f.Inventory.accounts[1].cookieStatus='alive'; $f.Inventory.accounts[1].cookieAlive=$true
+    $c=New-VoltControlContext @f
+    Assert ($c.Status.available -and -not $c.Status.accounts[1].controlReady -and -not $c.Status.accounts[1].suspensionSafe) 'Fresh alive account never autostarts or suspends'
+}
+Case 'Invalid launch timestamps and changed button capability fail closed' {
+    foreach($bad in @(-1, [double]::NaN, [double]::PositiveInfinity, $true, '123')) {
+        $f=Fixture; $f.Inventory.accounts[1].lastLaunchAtMs=$bad
+        Assert (-not (New-VoltControlContext @f).Status.available) 'Invalid persisted timestamp blocks inventory'
+    }
+    $f=Fixture; $original=New-VoltControlContext @f
+    $g=Fixture; $g.Nodes[11].enabled=$false
+    Assert (-not (Test-VoltControlRevalidation $original (New-VoltControlContext @g))) 'Changed exact button enabled status invalidates'
+    $g=Fixture; $g.Nodes[11].invokable=$false
+    Assert (-not (Test-VoltControlRevalidation $original (New-VoltControlContext @g))) 'Changed Invoke capability invalidates'
+}
+Case 'Dead suspension rejects all unknown live ownership and loading evidence' {
+    foreach($mutation in @('Connected','TargetLive','UnknownTracker','Orphan','Duplicate','Unstable','Loading','OtherLoading','UnknownCookie','ManagerUnstable','DuplicateRow')) {
+        $f=Fixture; $f.Inventory.accounts[1].cookieStatus='dead'; $f.Inventory.accounts[1].cookieAlive=$false
+        switch($mutation) {
+            Connected { $f.Nodes[8].name='Socket connected to Roblox process PID 21'; $f.Nodes[9].name='Connected' }
+            TargetLive { $f.Processes += [pscustomobject]@{processId=21;startTicks=201;trackerId='67890';parentProcessId=10;parentStartTicks=100;identityStable=$true;ownerStable=$true} }
+            UnknownTracker { $f.Processes[0].trackerId=$null }
+            Orphan { $f.Processes[0].ownerStable=$false }
+            Duplicate { $f.Processes += $f.Processes[0] }
+            Unstable { $f.Processes[0].identityStable=$false }
+            Loading { $f.Nodes[9].name='Loading' }
+            OtherLoading { $f.Nodes[4].name='Loading' }
+            UnknownCookie { $f.Inventory.accounts[1].cookieStatus='DEAD' }
+            ManagerUnstable { $f.Managers[0].identityStable=$false }
+            DuplicateRow { $f.Nodes += $f.Nodes[7] }
+        }
+        $c=New-VoltControlContext @f
+        Assert (-not ($c.Status.available -and $c.Status.accounts[1].suspensionSafe)) "$mutation cannot suspend"
+    }
+}
+Case 'No dead launch request occurs initially or after cookie changes before action' {
+    foreach($timing in @('Initial','Fresh')) {
+        $f=Fixture; $g=Fixture; $g.Inventory.accounts[1].cookieStatus='dead'; $g.Inventory.accounts[1].cookieAlive=$false
+        if($timing -eq 'Initial') { $f.Inventory.accounts[1].cookieStatus='dead'; $f.Inventory.accounts[1].cookieAlive=$false }
+        $script:originalContext=New-VoltControlContext @f; $script:freshContext=New-VoltControlContext @g
+        $script:reads=0; $script:writes=0
+        $facade=@{Read={ $script:reads++; if($script:reads -eq 1){$script:originalContext}else{$script:freshContext} };Verify={$true};Now={[double]1000000};Invoke={$script:writes++};Wait={}}
+        $result=Invoke-VoltControlAction -Action LaunchMissing -AccountId $f.Inventory.accounts[1].accountId -ExpectedTrackerId '67890' -Facade $facade
+        Assert (-not $result.requestAccepted -and $script:writes -eq 0) "$timing dead cookie never invokes launcher"
+    }
+}
+Case 'Read-only Status refuses suspension evidence from changing snapshots' {
+    $f=Fixture; $f.Inventory.accounts[1].cookieStatus='dead'; $f.Inventory.accounts[1].cookieAlive=$false
+    $g=Fixture; $g.Inventory.accounts[1].cookieStatus='dead'; $g.Inventory.accounts[1].cookieAlive=$false; $g.Managers[0].startTicks=101
+    $script:originalContext=New-VoltControlContext @f; $script:freshContext=New-VoltControlContext @g; $script:reads=0; $script:writes=0
+    $facade=@{Read={ $script:reads++; if($script:reads -eq 1){$script:originalContext}else{$script:freshContext} };Invoke={$script:writes++};SetDelay={$script:writes++}}
+    $result=Invoke-VoltControlAction -Action Status -Facade $facade
+    Assert (-not $result.available -and $script:writes -eq 0) 'Changing manager snapshots cannot supply suspension evidence'
+}
+Case 'Six idle rows expose four healthy controls and one dead suspension' {
+    $f=Fixture; $f.Processes=@(); $f.Inventory.accounts=@(); $f.Nodes=@($f.Nodes[0])
+    for($i=1;$i -le 6;$i++) {
+        $cookie='alive'; if($i -eq 6){$cookie='dead'}
+        $tracker=$null; $launch=$null; if($i -le 4){$tracker=[string](10000+$i);$launch=100000}
+        $f.Inventory.accounts += [pscustomobject]@{accountId=('{0:00000000}-1111-4111-8111-111111111111' -f $i);username=('user'+$i);displayName=('User'+$i);trackerId=$tracker;autoRelaunch=$true;cookieAlive=($cookie -ceq 'alive');cookieStatus=$cookie;lastLaunchAtMs=$launch}
+        foreach($pair in @(@(('Select'),'CheckBox'),@(('@user'+$i),'Text'),@('No connected Roblox socket','Group'),@('Idle','Text'),@('Memory: No active process','Text'),@( ('Relaunch User'+$i+' immediately'),'Button'))) {
+            $f.Nodes += [pscustomobject]@{name=$pair[0];kind=$pair[1];processId=10;enabled=($i -ne 6);invokable=($i -ne 6)}
+        }
+    }
+    $c=New-VoltControlContext @f
+    Assert ($c.Status.available -and $c.Status.accounts.Count -eq 6) 'All six exact rows retained'
+    Assert (@($c.Status.accounts | Where-Object controlReady).Count -eq 4) 'Four previously launched healthy controls'
+    Assert (@($c.Status.accounts | Where-Object suspensionSafe).Count -eq 1 -and $c.Status.accounts[5].suspensionSafe) 'Only explicit dead idle row suspended'
+    Assert (-not $c.Status.accounts[4].controlReady -and -not $c.Status.accounts[4].suspensionSafe) 'Fresh alive row is excluded from unattended actions'
 }
 Case 'Flattened UI rows bind by exact username, not ancestor or slot' {
     Assert ([bool](Get-Command New-VoltControlContext -ErrorAction SilentlyContinue)) 'Snapshot context API must exist'
@@ -97,14 +178,16 @@ Case 'Socket process generation and live owner are mandatory per account' {
     foreach($field in @('identityStable','ownerStable')) {
         $f=Fixture; $f.Processes[0].$field=$false; $c=New-VoltControlContext @f
         Assert (-not $c.Status.accounts[0].controlReady) 'Unstable live identity is not restorable'
-        Assert $c.Status.accounts[1].controlReady 'Other account remains independently bound'
+        Assert (-not $c.Status.accounts[1].controlReady -and -not $c.Status.globalMappingSafe) 'Unknown live ownership globally blocks controls'
     }
     $f=Fixture; $f.Processes[0].parentStartTicks=101
     Assert (-not (New-VoltControlContext @f).Status.accounts[0].controlReady) 'Parent PID reuse'
     $f=Fixture; $f.Processes[0].processId=21
     Assert (-not (New-VoltControlContext @f).Status.accounts[0].controlReady) 'UI socket wrong PID'
     $f=Fixture; $f.Inventory.safeToRecycle=$false
-    Assert (-not (New-VoltControlContext @f).Status.accounts[1].controlReady) 'Global conservative readiness is preserved'
+    Assert (New-VoltControlContext @f).Status.accounts[1].controlReady 'Individual readiness does not rely on legacy all-account summary'
+    $f.Inventory.autoEnabled=$false
+    Assert (-not (New-VoltControlContext @f).Status.accounts[1].controlReady) 'Global auto relaunch still required'
 }
 Case 'Owned WebView renderer UI remains bound to the manager HWND' {
     $f=Fixture; foreach($n in $f.Nodes) { $n.processId=30 }; $f.UiProcessIds=@(10,30)

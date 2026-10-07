@@ -36,5 +36,5 @@
     "ready_stable_sec": 30,
     "excluded_account_ids": []
   },
-  "notes": "v1.0.0: verified account restoration, serialized recovery, persistent retry backoff; thresholds are policy, not a crash-free guarantee."
+  "notes": "v1.0.1: verified account restoration, serialized recovery, persistent retry backoff; thresholds are policy, not a crash-free guarantee."
 }

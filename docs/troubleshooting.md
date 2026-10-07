@@ -85,7 +85,11 @@ Without Python or Volt, basic monitoring and eligible trimming remain available.
 
 ### “Another ArkuzoSaver controller is already running”
 
-Singleton protection applies across saver copies. Find the existing saver console and any supervising process, then stop the existing controller normally before switching versions or folders. Do not remove the mutex, kill unrelated processes, or run a second controller against the same clients.
+Singleton protection applies across saver copies. The launcher checks both its installation lock and the existing process controller before preparing or executing another runtime. If a saver is already running, it shows **`[ALREADY RUNNING]`**, leaves that saver unchanged, and keeps an interactive launcher window open until a key is pressed. This is a harmless no-op, not a competing controller. A supervising background saver is detected too.
+
+Normal startup errors and nonzero runtime exits also remain visible until acknowledged. Redirected input/output and `--verify-only` never wait for keyboard input; real errors retain nonzero exit codes.
+
+Find the existing saver console and any supervising process, then stop the existing controller normally before switching versions or folders. Do not remove the mutex, kill unrelated processes, or run a second controller against the same clients.
 
 ### Red `COOKIE DEAD` in the separate paused-account section
 

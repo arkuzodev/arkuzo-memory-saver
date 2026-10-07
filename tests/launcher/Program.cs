@@ -3,6 +3,14 @@ using System.Security.Cryptography;
 using System.Text;
 static void Assert(bool value, string message) { if (!value) throw new Exception(message); }
 static void Reject(Action action) { try { action(); } catch (InvalidDataException) { return; } throw new Exception("Expected rejection"); }
+var confirmations=0;
+LauncherUi.WaitForDismissal(false,false,false,()=>confirmations++);
+Assert(confirmations==1,"interactive notice waits for acknowledgement instead of disappearing");
+foreach(var redirects in new[]{(true,false),(false,true),(true,true)})
+ LauncherUi.WaitForDismissal(false,redirects.Item1,redirects.Item2,()=>confirmations++);
+LauncherUi.WaitForDismissal(true,false,false,()=>confirmations++);
+Assert(confirmations==1,"redirected and verify-only launches never wait for a key");
+Console.WriteLine("PASS visible interactive notices and nonblocking verification/redirected output");
 var bytes=Encoding.UTF8.GetBytes("real fixture bytes");
 var hash=Convert.ToHexStringLower(SHA256.HashData(bytes));
 Assert(RuntimePackage.CheckHash(bytes, hash+"  ArkuzoMemorySaver-runtime.zip\n", "sha256:"+hash)==hash,"valid checksum");
@@ -79,7 +87,59 @@ try {
  using(var held=new LauncherLock(entryTemp)) {
   var contender=Task.Run(()=> { try { using var second=new LauncherLock(entryTemp); return false; } catch(InvalidOperationException) { return true; } }).GetAwaiter().GetResult();
   Assert(contender,"mutex excludes contender");
+  var savedOut=Console.Out;
+  using var duplicateOutput=new StringWriter();
+  Console.SetOut(duplicateOutput);
+  try {
+   var duplicateWaits=0;
+   var duplicateExit=Task.Run(()=>LauncherEntry.Run(new[]{"--offline"},entryTemp,LauncherEntry.ControllerMutexName,()=>duplicateWaits++)).GetAwaiter().GetResult();
+   Assert(duplicateExit==0,"second launch is an explicit already-running no-op, not a startup error");
+   Assert(duplicateWaits==1,"same-installation notice uses injected acknowledgement instead of reading real keyboard input");
+   Assert(duplicateOutput.ToString().Contains("[ALREADY RUNNING]",StringComparison.Ordinal),"second launch explains why no competing saver is started");
+   Assert(!Directory.Exists(Path.Combine(entryTemp,"app")),"second launch never prepares or executes another runtime");
+  } finally { Console.SetOut(savedOut); }
  }
+ var controllerName="Local\\ArkuzoLauncher-ControllerTest-"+Guid.NewGuid().ToString("N");
+ using(var controller=new Mutex(false,controllerName)) {
+  Assert(controller.WaitOne(0),"test owns a separate controller mutex");
+  try {
+   var savedOut=Console.Out;
+   using var controllerOutput=new StringWriter();
+   Console.SetOut(controllerOutput);
+   try {
+    var noticeWaits=0;
+    var duplicateExit=Task.Run(()=>LauncherEntry.Run(new[]{"--offline"},entryTemp,controllerName,()=>noticeWaits++)).GetAwaiter().GetResult();
+    Assert(duplicateExit==0,"a controller in another installation is a safe already-running no-op");
+    Assert(noticeWaits==1,"already-running notice stays open until acknowledged");
+    Assert(controllerOutput.ToString().Contains("[ALREADY RUNNING]",StringComparison.Ordinal),"cross-installation controller is detected before startup");
+    Assert(!Directory.Exists(Path.Combine(entryTemp,"app")) && !Directory.Exists(Path.Combine(entryTemp,"data")),"controller preflight has no runtime/config/log side effects");
+   } finally { Console.SetOut(savedOut); }
+  } finally { controller.ReleaseMutex(); }
+ }
+ var startupWaits=0;
+ var noRuntimeRoot=Path.Combine(entryTemp,"missing-runtime");
+ Assert(LauncherEntry.Run(new[]{"--offline"},noRuntimeRoot,controllerName,()=>startupWaits++)==1 && startupWaits==1,"ordinary startup errors remain visible until acknowledged");
+ startupWaits=0;
+ Assert(LauncherEntry.Run(new[]{"--offline","--verify-only"},noRuntimeRoot,controllerName,()=>startupWaits++)==1 && startupWaits==0,"verification failures retain nonzero exit without waiting");
+ var childRoot=Path.Combine(entryTemp,"child-exit-notice");
+ byte[] ChildFixture(int exitCode) {
+  using var ms=new MemoryStream();
+  using(var archive=new System.IO.Compression.ZipArchive(ms,System.IO.Compression.ZipArchiveMode.Create,true))
+   foreach(var file in RuntimePackage.Files) {
+    using var writer=new StreamWriter(archive.CreateEntry(file).Open(),new UTF8Encoding(false));
+    writer.Write(file=="Arkuzo-Memory-Saver.ps1" ? "param([string]$DataDirectory)\nexit "+exitCode : "{}");
+   }
+  return ms.ToArray();
+ }
+ var failedChild=ChildFixture(7);
+ new Installation(childRoot).Install(new ReleasePayload("v1.0.0",failedChild,Convert.ToHexStringLower(SHA256.HashData(failedChild))));
+ var childWaits=0;
+ Assert(LauncherEntry.Run(new[]{"--offline"},childRoot,controllerName,()=>childWaits++)==7 && childWaits==1,"runtime startup errors preserve child exit code and readable console");
+ var stoppedChild=ChildFixture(0);
+ new Installation(childRoot).Install(new ReleasePayload("v1.0.1",stoppedChild,Convert.ToHexStringLower(SHA256.HashData(stoppedChild))));
+ childWaits=0;
+ Assert(LauncherEntry.Run(new[]{"--offline"},childRoot,controllerName,()=>childWaits++)==0 && childWaits==0,"a normal saver stop does not add an unexpected acknowledgement prompt");
+ Console.WriteLine("PASS cross-installation preflight, visible startup/child errors, verification no-wait, normal stop");
  var script=Path.Combine(entryTemp,"Arkuzo-Memory-Saver.ps1");
  File.WriteAllText(script,"param([string]$DataDirectory)\nif ($DataDirectory -ne '"+Path.Combine(entryTemp,"data").Replace("'","''")+"') { exit 99 }; exit 7");
  Assert(LauncherEntry.ExecuteChild(Updater.ChildStart(entryTemp,entryTemp))==7,"wait and return child exit code");

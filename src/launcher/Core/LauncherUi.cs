@@ -73,6 +73,36 @@ public static class LauncherUi
         catch { }
     }
 
+    public static void WaitForDismissal(bool verifyOnly)
+    {
+        WaitForDismissal(verifyOnly,Console.IsInputRedirected,Console.IsOutputRedirected,
+            () => { Console.ReadKey(intercept: true); });
+    }
+
+    internal static void WaitForDismissal(bool verifyOnly,bool inputRedirected,bool outputRedirected,Action readKey)
+    {
+        if (verifyOnly || inputRedirected || outputRedirected) return;
+        Console.WriteLine("\n  Press any key to close this launcher window. The running saver will not be stopped.");
+        try { readKey(); }
+        catch (InvalidOperationException) { }
+        catch (System.IO.IOException) { }
+    }
+
+    public static void ShowAlreadyRunning(string message)
+    {
+        try
+        {
+            if (!Console.IsOutputRedirected) Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine("\n  [ALREADY RUNNING] " + message);
+            Console.WriteLine("  Your existing Memory Saver is still running and has not been changed.");
+            Console.WriteLine("  No second controller was started. Use the existing saver, or stop it normally before switching copies.");
+        }
+        finally
+        {
+            if (!Console.IsOutputRedirected) Console.ResetColor();
+        }
+    }
+
     public static void ShowError(string message)
     {
         if (Console.IsOutputRedirected)

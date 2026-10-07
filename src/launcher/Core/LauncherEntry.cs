@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 namespace Launcher;
+internal sealed class AlreadyRunningException(string message) : InvalidOperationException(message);
 // The synchronous entry point keeps Windows mutex ownership on one thread through child exit.
 public sealed class LauncherLock : IDisposable
 {
@@ -12,19 +13,27 @@ public sealed class LauncherLock : IDisposable
   var id=Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar).ToUpperInvariant())));
   mutex=new Mutex(false,"Global\\ArkuzoMemorySaver-"+id);
   try { try { owned=mutex.WaitOne(0); } catch(AbandonedMutexException) { owned=true; }
-   if(!owned) throw new InvalidOperationException("Another launcher is already running for this installation.");
+   if(!owned) throw new AlreadyRunningException("Another launcher is already running for this installation.");
   } catch {mutex.Dispose();throw;}
  }
  public void Dispose() { if(owned) {mutex.ReleaseMutex(); owned=false;} mutex.Dispose(); }
 }
 public static class LauncherEntry
 {
- public static int Run(string[] args,string root)
+ internal const string ControllerMutexName = "Local\\ArkuzoSaver-ProcessController";
+ public static int Run(string[] args,string root) => Run(args,root,ControllerMutexName);
+ internal static int Run(string[] args,string root,string controllerMutexName,Action? acknowledgement=null)
  {
+  void DismissNotice() {
+   if(args.Contains("--verify-only")) return;
+   if(acknowledgement is null) LauncherUi.WaitForDismissal(false); else acknowledgement();
+  }
   if(args.Any(x=>x!="--offline" && x!="--verify-only") || args.Distinct().Count()!=args.Length)
   { Console.Error.WriteLine("Usage: ArkuzoMemorySaver.exe [--offline] [--verify-only]");return 2; }
   try {
    using var updaterLock=new LauncherLock(root);
+   if (!args.Contains("--verify-only") && ControllerIsRunning(controllerMutexName))
+       throw new AlreadyRunningException("A Memory Saver controller is already running, possibly from another folder or a background watchdog.");
    if (!Console.IsOutputRedirected && !args.Contains("--verify-only"))
    {
        LauncherUi.ShowBanner();
@@ -56,8 +65,33 @@ public static class LauncherEntry
    }
    store.Validate();
    Installation.SafePath(Path.Combine(root,"data","config.json"));
-   return ExecuteChild(Updater.ChildStart(Path.GetFullPath(root),store.RuntimePath(installed)));
-  } catch(Exception ex) { LauncherUi.ShowError(ex.Message); return 1; }
+   var exitCode=ExecuteChild(Updater.ChildStart(Path.GetFullPath(root),store.RuntimePath(installed)));
+   if(exitCode!=0) {
+    LauncherUi.ShowError("Memory Saver exited with code "+exitCode+". See the details above.");
+    DismissNotice();
+   }
+   return exitCode;
+  } catch(AlreadyRunningException ex) {
+   LauncherUi.ShowAlreadyRunning(ex.Message);
+   DismissNotice();
+   return args.Contains("--verify-only") ? 1 : 0;
+  } catch(Exception ex) {
+   LauncherUi.ShowError(ex.Message);
+   DismissNotice();
+   return 1;
+  }
+ }
+ internal static bool ControllerIsRunning(string mutexName)
+ {
+  if (!Mutex.TryOpenExisting(mutexName,out var controller)) return false;
+  using(controller) {
+   var acquired=false;
+   try {
+    try { acquired=controller.WaitOne(0); }
+    catch(AbandonedMutexException) { acquired=true; }
+    return !acquired;
+   } finally { if(acquired) controller.ReleaseMutex(); }
+  }
  }
  internal static int ExecuteChild(ProcessStartInfo info)
  {

@@ -64,7 +64,15 @@ public sealed class Installation(string root)
         var stage=Path.Combine(versions,".stage-"+Guid.NewGuid().ToString("N"));
         try
         {
-            if (Directory.Exists(target)) ValidateFiles(installed);
+            if (Directory.Exists(target))
+            {
+                try { ValidateFiles(installed); }
+                catch (InvalidDataException)
+                {
+                    foreach (var file in files) File.WriteAllBytes(Path.Combine(target, file.Key), file.Value);
+                    ValidateFiles(installed);
+                }
+            }
             else
             {
                 Directory.CreateDirectory(stage);

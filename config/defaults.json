@@ -9,19 +9,19 @@
     "hard_limit": false,
     "poll_ms": 350,
     "minimize_on_launch": false,
-    "apply_graphics_flags": false
+    "apply_graphics_flags": true
   },
   "health": {
     "enabled": true,
     "private_limit_mb": 6000,
-    "pressure_percent": 82,
-    "pressure_min_private_mb": 2500,
+    "pressure_percent": 88,
+    "pressure_min_private_mb": 4000,
     "warmup_sec": 300,
     "hang_timeout_sec": 120,
-    "startup_error_timeout_sec": 40,
+    "startup_error_timeout_sec": 5,
     "disconnect_timeout_sec": 5,
-    "cooldown_sec": 240,
-    "max_recycles_per_hour": 10,
+    "cooldown_sec": 90,
+    "max_recycles_per_hour": 20,
     "trim_spacing_sec": 2,
     "private_limit_sustain_sec": 60
   },
@@ -36,5 +36,6 @@
     "ready_stable_sec": 30,
     "excluded_account_ids": []
   },
-  "notes": "v1.0.1: verified account restoration, serialized recovery, persistent retry backoff; thresholds are policy, not a crash-free guarantee."
+  "config_lock": true,
+  "notes": "CONFIG LOCKED: forced production values for 8+ clients multi-instance stability. Dynamic graphics flags, rapid Volt startup error recovery, and serialized account restoration."
 }

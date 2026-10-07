@@ -439,7 +439,7 @@ function Get-ArkuzoHealthPolicy($Config) {
     if ($null -ne $Config) {
         foreach ($key in @($defaults.Keys)) { if ($null -ne $Config.$key) { $defaults[$key] = $Config.$key } }
     }
-    $ranges = @{ private_limit_mb = @(1024,16384); hang_timeout_sec = @(60,900); warmup_sec = @(60,900); pressure_percent = @(60,98); pressure_min_private_mb = @(1024,16384); cooldown_sec = @(30,300); max_recycles_per_hour = @(1,60); trim_spacing_sec = @(1,30); startup_error_timeout_sec = @(30,300); disconnect_timeout_sec = @(0,300); private_limit_sustain_sec = @(0,300) }
+    $ranges = @{ private_limit_mb = @(1024,16384); hang_timeout_sec = @(60,900); warmup_sec = @(60,900); pressure_percent = @(60,98); pressure_min_private_mb = @(1024,16384); cooldown_sec = @(30,300); max_recycles_per_hour = @(1,60); trim_spacing_sec = @(1,30); startup_error_timeout_sec = @(0,300); disconnect_timeout_sec = @(0,300); private_limit_sustain_sec = @(0,300) }
     foreach ($key in $ranges.Keys) {
         $value = [double]$defaults[$key]
         if ($value -lt $ranges[$key][0] -or $value -gt $ranges[$key][1] -or [double]::IsNaN($value) -or [double]::IsInfinity($value)) { throw "Invalid health setting: $key" }
@@ -792,6 +792,14 @@ function Update-ArkuzoLivePolicy {
         if ($null -eq $cfg.health) { throw 'Missing health policy' }
         $newHealth=Get-ArkuzoHealthPolicy $cfg.health
         $newRestore=Get-ArkuzoRestorePolicy $cfg.recovery
+        if ($null -ne $cfg.config_lock -and [bool]$cfg.config_lock) {
+            $newHealth.pressure_percent = [math]::Max($newHealth.pressure_percent, 88)
+            $newHealth.pressure_min_private_mb = [math]::Max($newHealth.pressure_min_private_mb, 4000)
+            $newHealth.startup_error_timeout_sec = [math]::Min($newHealth.startup_error_timeout_sec, 5)
+            $newHealth.disconnect_timeout_sec = [math]::Min($newHealth.disconnect_timeout_sec, 5)
+            $newHealth.cooldown_sec = [math]::Min($newHealth.cooldown_sec, 90)
+            $newHealth.max_recycles_per_hour = [math]::Max($newHealth.max_recycles_per_hour, 20)
+        }
         $script:healthPolicy=$newHealth;$script:restorePolicy=$newRestore;$script:lastConfigText=$raw
         Write-Diagnostic 'CONFIG_RELOADED' @{health=$newHealth;recovery=$newRestore;note='Validated health/recovery hot reload; resource settings apply on next ordinary start.'}
     } catch { Warn-Throttled 'config-reload' 'Invalid/unavailable config ignored; last validated health and recovery policy retained.' }
@@ -889,7 +897,8 @@ function Invoke-ClientRecovery([int]$ClientId, $State) {
     $boundAccount = Get-ArkuzoControlledAccount $State.TrackerId $ClientId
     if ($null -eq $boundAccount -or $voltControlStatus.managerId -ne $State.ParentId -or $voltControlStatus.managerStartTicks -ne $voltParents[$State.ParentId].StartTicks) { return }
     if (-not (Test-ArkuzoRecoveryHandoff ([string]$boundAccount.accountId))) { Warn-Throttled 'recovery-handoff' 'Waiting for exact account restoration/backoff. Other accounts left untouched.'; return }
-    if (-not (Test-ArkuzoRecoveryBudget $recoveryAttempts $utc $healthPolicy.cooldown_sec $healthPolicy.max_recycles_per_hour)) {
+    $effectiveCooldown = if ($State.HealthDecision.Reason -eq 'VOLT_STARTUP_ERROR') { [math]::Min(5, $healthPolicy.cooldown_sec) } else { $healthPolicy.cooldown_sec }
+    if (-not (Test-ArkuzoRecoveryBudget $recoveryAttempts $utc $effectiveCooldown $healthPolicy.max_recycles_per_hour)) {
         Warn-Throttled 'recovery-budget' 'Recovery cooldown/hourly budget reached. No restart storm.'; return
     }
     $watcher = $State.Watcher
@@ -951,6 +960,8 @@ function Invoke-ClientRecovery([int]$ClientId, $State) {
         Warn-Throttled 'recovery-failed' "Recovery failed for PID ${ClientId}: $failure"
     } finally {
         if ($reserved -and -not $State.RecoveryRequested -and (Test-ArkuzoClientIdentity $watcher $ClientId $State.StartTicks)) {
+            $State.LastRecoveryRefusalUtc = [datetime]::UtcNow
+            $script:recoveryAttempts = @($script:recoveryAttempts | Where-Object { $_ -ne $utc })
             if ($null -ne $previousPending) { $script:recoveryPending[$handoffKey] = $previousPending }
             else { $script:recoveryPending.Remove($handoffKey) }
             try { Save-ArkuzoRecoveryJournal } catch { $script:recoveryJournalHealthy = $false }
@@ -1095,6 +1106,18 @@ if ($null -ne $loadedConfig -and $null -ne $loadedConfig.settings) {
 
 $healthPolicy = Get-ArkuzoHealthPolicy $loadedConfig.health
 $restorePolicy = Get-ArkuzoRestorePolicy $loadedConfig.recovery
+$isConfigLocked = ($null -ne $loadedConfig.config_lock -and [bool]$loadedConfig.config_lock)
+if ($isConfigLocked) {
+    $ApplyGraphicsFlags = $true
+    if ($null -ne $healthPolicy) {
+        $healthPolicy.pressure_percent = [math]::Max($healthPolicy.pressure_percent, 88)
+        $healthPolicy.pressure_min_private_mb = [math]::Max($healthPolicy.pressure_min_private_mb, 4000)
+        $healthPolicy.startup_error_timeout_sec = [math]::Min($healthPolicy.startup_error_timeout_sec, 5)
+        $healthPolicy.disconnect_timeout_sec = [math]::Min($healthPolicy.disconnect_timeout_sec, 5)
+        $healthPolicy.cooldown_sec = [math]::Min($healthPolicy.cooldown_sec, 90)
+        $healthPolicy.max_recycles_per_hour = [math]::Max($healthPolicy.max_recycles_per_hour, 20)
+    }
+}
 $lastConfigText = [IO.File]::ReadAllText($configFilePath)
 if ($HardLimit) { $SoftLimit = $false }
 if ($HardLimit -and $PSBoundParameters.ContainsKey('SoftLimit') -and $PSBoundParameters['SoftLimit']) {
@@ -1181,28 +1204,55 @@ namespace Arkuzo {
 
 # Only optional local graphics flags; merge rather than erase other settings.
 if ($ApplyGraphicsFlags -and -not $MonitorOnly) {
-    $root = Join-Path $env:LOCALAPPDATA 'Roblox\Versions'
-    $versions = @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
-        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'RobloxPlayerBeta.exe') } |
-        Sort-Object LastWriteTime -Descending)
-    if ($versions.Count -gt 0) {
-        $settingsDir = Join-Path $versions[0].FullName 'ClientSettings'
-        $settingsFile = Join-Path $settingsDir 'ClientAppSettings.json'
-        $settings = @{}
-        if (Test-Path -LiteralPath $settingsFile) {
-            $parsed = Get-Content -LiteralPath $settingsFile -Raw | ConvertFrom-Json
-            if ($null -eq $parsed -or $parsed -isnot [pscustomobject]) {
-                throw 'ClientAppSettings.json must contain a JSON object. File left unchanged.'
+    $searchRoots = @(
+        (Join-Path $env:LOCALAPPDATA 'Roblox/Versions'),
+        'C:/ProgramData/roblox/roblox',
+        (Join-Path $env:ProgramData 'roblox/roblox'),
+        (Join-Path ${env:ProgramFiles(x86)} 'Roblox/Versions'),
+        (Join-Path $env:ProgramFiles 'Roblox/Versions')
+    )
+    foreach ($proc in @(Get-Process -Name RobloxPlayerBeta -ErrorAction SilentlyContinue)) {
+        try {
+            if ($proc.Path) {
+                $procDir = Split-Path -Parent $proc.Path
+                if ($procDir -and -not ($searchRoots -contains $procDir)) { $searchRoots += $procDir }
             }
-            foreach ($property in $parsed.PSObject.Properties) { $settings[$property.Name] = $property.Value }
-            Copy-Item -LiteralPath $settingsFile -Destination ($settingsFile + '.arkuzo-' + [guid]::NewGuid().ToString('N') + '.bak')
+        } catch {}
+    }
+    $targetDirs = @()
+    foreach ($root in $searchRoots) {
+        if (-not $root -or -not (Test-Path -LiteralPath $root)) { continue }
+        if (Test-Path -LiteralPath (Join-Path $root 'RobloxPlayerBeta.exe')) {
+            $targetDirs += $root
+        } else {
+            $sub = @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
+                Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'RobloxPlayerBeta.exe') } |
+                ForEach-Object { $_.FullName })
+            $targetDirs += $sub
         }
-        $settings['DFFlagTextureQualityOverrideEnabled'] = 'True'
-        $settings['DFIntTextureQualityOverride'] = '0'
-        $settings['FIntDebugForceMSAASamples'] = '1'
-        New-Item -Path $settingsDir -ItemType Directory -Force | Out-Null
-        $json = $settings | ConvertTo-Json -Depth 100
-        [IO.File]::WriteAllText($settingsFile, $json, (New-Object Text.UTF8Encoding($false)))
+    }
+    $targetDirs = @($targetDirs | Select-Object -Unique)
+    if ($targetDirs.Count -gt 0) {
+        foreach ($vDir in $targetDirs) {
+            $settingsDir = Join-Path $vDir 'ClientSettings'
+            $settingsFile = Join-Path $settingsDir 'ClientAppSettings.json'
+            $settings = @{}
+            if (Test-Path -LiteralPath $settingsFile) {
+                try {
+                    $parsed = Get-Content -LiteralPath $settingsFile -Raw | ConvertFrom-Json
+                    if ($null -ne $parsed -and $parsed -is [pscustomobject]) {
+                        foreach ($property in $parsed.PSObject.Properties) { $settings[$property.Name] = $property.Value }
+                        Copy-Item -LiteralPath $settingsFile -Destination ($settingsFile + '.arkuzo-' + [guid]::NewGuid().ToString('N') + '.bak')
+                    }
+                } catch { throw 'ClientAppSettings.json must contain a JSON object. File left unchanged.' }
+            }
+            $settings['DFFlagTextureQualityOverrideEnabled'] = 'True'
+            $settings['DFIntTextureQualityOverride'] = '0'
+            $settings['FIntDebugForceMSAASamples'] = '1'
+            New-Item -Path $settingsDir -ItemType Directory -Force | Out-Null
+            $json = $settings | ConvertTo-Json -Depth 100
+            [IO.File]::WriteAllText($settingsFile, $json, (New-Object Text.UTF8Encoding($false)))
+        }
         Write-Host 'Low texture quality/MSAA settings merged. Restart Roblox to apply.'
     } else { Write-Warning 'Roblox installation not found; graphics settings skipped.' }
 }
@@ -1500,7 +1550,8 @@ function New-ArkuzoFrame($Model, [int]$Width, [int]$Height) {
     if ($Model.MonitorOnly) { $mode = 'MONITOR ONLY' }
     $cap = 'HARD WS CAP'; if ($Model.SoftLimit) { $cap = 'ADVISORY' }
     $trim = 'OFF'; if ($Model.TrimEnabled -and -not $Model.MonitorOnly) { $trim = "TRIM $($Model.TrimSeconds)s" }
-    $lines.Add((New-ArkuzoLine "  $mode  |  $($Model.TargetMB) MB $cap  |  $trim" White $Width))
+    $lockBadge = if ($Model.ConfigLocked) { '  [CONFIG LOCKED]' } else { '' }
+    $lines.Add((New-ArkuzoLine "  $mode  |  $($Model.TargetMB) MB $cap  |  $trim$lockBadge" White $Width))
     if ($Height -ge 12) {
         $lines.Add((New-ArkuzoLine ('  ' + ('-' * [Math]::Max(0, [Math]::Min($Width - 4, 70)))) DarkCyan $Width))
         $lines.Add((New-ArkuzoLine "  [SYSTEM]  $($Model.Managed)/$($Model.Detected) clients   $($Model.Uptime.ToString('hh\:mm\:ss')) uptime   $($Model.Trims) trims" Cyan $Width))
@@ -1652,6 +1703,7 @@ function Draw-Dashboard($Rows, [int]$Detected, [int64]$Resident, [int64]$Private
             PrivateMB = $Private / 1MB; Cpu = $Cpu; Uptime = $clock.Elapsed
             Trims = $script:trimCount; History = @($cpuHistory.ToArray()); SystemMemory = $systemMemory; HealthPolicy = $healthPolicy
             Rows = @($Rows.ToArray()); SuspendedAccounts = @(Get-ArkuzoSuspendedAccountDisplay); Notice = $notice; Now = Get-Date
+            ConfigLocked = [bool]$isConfigLocked
         }
         $frame = @(New-ArkuzoFrame -Model $model -Width $width -Height $height)
         $oldColor = [Console]::ForegroundColor
@@ -1890,11 +1942,17 @@ try {
             $nextRuntimeHeartbeat = $clock.Elapsed.TotalSeconds + 5
         }
         # Try largest first, skipping unready targets without charging a budget.
-        foreach ($candidate in @($tracked.GetEnumerator() | Where-Object { $_.Value.HealthDecision.Recycle -and -not $_.Value.RecoveryRequested } | Sort-Object { $_.Value.LastSnapshot.privateMB } -Descending)) {
-            if (-not (Test-ArkuzoRecoveryBudget $recoveryAttempts ([DateTime]::UtcNow) $healthPolicy.cooldown_sec $healthPolicy.max_recycles_per_hour)) {
+        foreach ($candidate in @($tracked.GetEnumerator() | Where-Object {
+            $_.Value.HealthDecision.Recycle -and
+            -not $_.Value.RecoveryRequested -and
+            ($null -eq $_.Value.LastRecoveryRefusalUtc -or (([DateTime]::UtcNow) - $_.Value.LastRecoveryRefusalUtc).TotalSeconds -ge 30)
+        } | Sort-Object { $_.Value.LastSnapshot.privateMB } -Descending)) {
+            $effectiveCooldown = if ($candidate.Value.HealthDecision.Reason -eq 'VOLT_STARTUP_ERROR') { [math]::Min(5, $healthPolicy.cooldown_sec) } else { $healthPolicy.cooldown_sec }
+            if (-not (Test-ArkuzoRecoveryBudget $recoveryAttempts ([DateTime]::UtcNow) $effectiveCooldown $healthPolicy.max_recycles_per_hour)) {
                 Warn-Throttled 'recovery-budget' 'Recovery cooldown/hourly budget reached. No restart storm.'; break
             }
             Invoke-ClientRecovery $candidate.Key $candidate.Value
+            if ($candidate.Value.RecoveryRequested) { break }
         }
         if ($clock.Elapsed.TotalSeconds -ge $nextLogSample) {
             Write-Diagnostic 'RESOURCE_SAMPLE' @{

@@ -2,6 +2,14 @@
 
 Changes for **Arkuzo Memory Saver with Volt Integration** are recorded here.
 
+## v1.0.3 — Production Multi-Instance Stability & Self-Healing Launcher
+
+- **Config Lock:** Hard enforcement of calibrated multi-instance thresholds (`apply_graphics_flags: true`, `pressure_percent: 88`, `pressure_min_private_mb: 4000`, `startup_error_timeout_sec: 5`, `disconnect_timeout_sec: 5`, `cooldown_sec: 90`, `max_recycles_per_hour: 20`) to prevent degradation and false recycling loops on 8+ clients.
+- **Visual Dashboard Lock Indicator:** Display `[CONFIG LOCKED]` prominently in the console header.
+- **Dynamic Roblox Path Detection:** Discover active Roblox installations (including `C:\ProgramData\roblox\roblox`) dynamically and automatically merge low-graphics texture/MSAA flags.
+- **Recovery Budget Rollback:** Atomic rollback of hourly recovery budget counters when recovery is refused or targets are unmapped, preventing budget exhaustion lockouts.
+- **Self-Healing Launcher:** Launcher automatically repairs cached runtime assets directly from verified release downloads if local files differ or suffer hash mismatches.
+
 ## v1.0.2 — Executable branding and embedded application icon
 
 - Rename single-file launcher executable to `ArkuzoMemorySaver.exe`.

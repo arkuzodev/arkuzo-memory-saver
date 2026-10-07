@@ -10,15 +10,11 @@ Arkuzo Memory Saver runs locally. The public launcher reads release metadata and
 - Updates preserve existing `data/config.json`. They do not reset malformed configuration.
 - Local `app/` and `data/` directories must be writable only by users you trust. Do not run the program from a shared, untrusted directory.
 
-## Antivirus & VirusTotal Verification
+## Release integrity and antivirus status
 
-Every official release artifact is submitted to and scanned by **VirusTotal** across 92 security vendors.
+SHA-256 values for each release are published in that release's **`SHA256SUMS.txt`** and **`ArkuzoMemorySaver-runtime.sha256`** assets. The launcher validates runtime bytes and available GitHub asset digests before installation or repair. Use checksums from the exact release you downloaded, not a previous version.
 
-| Release Asset | SHA-256 Checksum | VirusTotal Analysis | Status |
-| :--- | :--- | :--- | :--- |
-| **`ArkuzoMemorySaver.exe`** | `87caa137512cadd34e95ef2b3b48aebd980dc4cdd07121ac2518dce77fd2c072` | [Report Link](https://www.virustotal.com/gui/file/7140e1b2715f7df0488713835cf6df9e5d5a40623788b3ec0c71c70da8ad7cf1) | **0 / 92 Clean** |
-| **`ArkuzoMemorySaver-runtime.zip`** | `8651ea424b1b530a4be8a05b02c5f88acaffbec4c5cdbb03536445950ef29310` | [Report Link](https://www.virustotal.com/gui/file/cad70dbdcca7876fb9257d4a572dcf4ced9f7219665ce5a4eb0e59e354f9660e) | **Clean** |
-| **`ArkuzoMemorySaver-v1.0.4-win-x64.zip`** | `fbfd2920e6950d2026d0489ad6f2686d92fa0b45a3f38f15172ab123d48d04de` | [Report Link](https://www.virustotal.com/gui/file/66c58470905f49843ba4b2fc35561241240f5d0e28bcd9bcedae9ab7fa4675d2) | **Clean** |
+No new VirusTotal upload was performed for this release, as requested by the owner. A scan of an older file does not cover a changed binary or archive; there is no "clean" claim for the current artifacts. Checksums and antivirus scans are not signatures or guarantees. Keep Windows Defender, SmartScreen, and Windows Error Reporting enabled.
 
 ## Volt integration
 

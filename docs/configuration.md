@@ -97,6 +97,22 @@ The **82% threshold is a candidate-selection policy, not a guarantee**. OS commi
 | `ready_stable_sec` | `30` | Continuous restoration-readiness confirmation interval. |
 | `excluded_account_ids` | `[]` | Account identifiers excluded from restoration eligibility. Keep real identifiers private. |
 
+## `pagefile`: guarded virtual memory scaling (opt-in)
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | Disabled by default. Only set to `true` if dynamic pagefile expansion is explicitly desired. |
+| `growth_step_mb` | `4096` | Size to add per growth operation (4 GiB). |
+| `max_file_mb` | `65536` | Maximum size for an individual pagefile (64 GiB). |
+| `max_total_mb` | `131072` | Maximum cumulative pagefile allocation (128 GiB). |
+| `reserve_free_bytes` | `16106127360` | Minimum free disk space reserve on the pagefile volume (15 GiB). Growth is refused if remaining disk space would drop below this. |
+| `reserve_free_percent` | `10` | Minimum free disk percentage reserve required. |
+| `trigger_percent` | `80` | OS commit utilization trigger percentage evaluated before candidate recycling. |
+| `cooldown_sec` | `3600` | Cooldown period between pagefile modification requests. |
+| `max_requests_per_boot` | `1` | Bounded per-boot growth request limit to prevent runaway expansions. |
+| `max_boot_growth_mb` | `4096` | Maximum total growth permitted within a single Windows boot session. |
+
+
 A larger Volt delay can extend the time before an account becomes provably idle. The adapter verifies the delay using both accessible UI controls and read-only persisted state. **Thirty seconds is not proof that a seat lease has expired or that a launch guard cannot trigger.**
 
 Retries and unresolved handoffs are persisted in the recovery journal. Do not delete that journal to reset a cooldown or budget. While an account restoration is unresolved, other accounts are protected from collateral closures; a confirmed unhealthy replacement of that same account can be considered through the existing safety gates and backoff.

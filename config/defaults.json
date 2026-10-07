@@ -36,6 +36,18 @@
     "ready_stable_sec": 30,
     "excluded_account_ids": []
   },
+  "pagefile": {
+    "enabled": false,
+    "growth_step_mb": 4096,
+    "max_file_mb": 65536,
+    "max_total_mb": 131072,
+    "reserve_free_bytes": 16106127360,
+    "reserve_free_percent": 10,
+    "trigger_percent": 80,
+    "cooldown_sec": 3600,
+    "max_requests_per_boot": 1,
+    "max_boot_growth_mb": 4096
+  },
   "config_lock": true,
   "notes": "CONFIG LOCKED: forced production values for 8+ clients multi-instance stability. Dynamic graphics flags, rapid Volt startup error recovery, and serialized account restoration."
 }

@@ -2,6 +2,15 @@
 
 Changes for **Arkuzo Memory Saver with Volt Integration** are recorded here.
 
+## v1.0.5 — Visible Singleton Launcher, Native Privileges & VoltX Engine Optimizations
+
+- **Visible Singleton Launcher:** When another launcher or running controller is detected, the window displays an informative `[ALREADY RUNNING]` alert and remains open until a key is pressed (in interactive mode), preventing immediate window disappearance.
+- **Native Token Privileges (`AdjustTokenPrivileges`):** Enables `SeDebugPrivilege` and `SeIncreaseWorkingSetPrivilege` with strict `ERROR_NOT_ALL_ASSIGNED` verification and rich Win32 error formatting (including Access Denied 5 guidance) for diagnostic transparency.
+- **Fail-Closed RobloxCrashHandler Cleanup:** Safely cleans orphaned `RobloxCrashHandler.exe` processes by checking parent process status, startup ticks, image paths, and Roblox publisher signatures. System-wide `WerFault` is preserved to ensure Windows error reporting remains intact.
+- **Bounded Pagefile Management:** Introduces opt-in dynamic pagefile growth before commit limits are breached. Gated behind administrator checks, a minimum 15 GiB free disk reserve, atomic backups, and pending-reboot verification without suppressing recovery.
+- **15-FPS Engine Flag Request:** Safely merges `DFIntTaskSchedulerTargetFps: 15` into `ClientAppSettings.json` with automatic backup and atomic replacement, accurately logging the status as `REQUESTED_ONLY` based on the official Roblox Player allowlist.
+- **Atomic Hot Reload:** Pagefile configuration changes participate in runtime hot reload with atomic validation, retaining previous valid policies if any section is invalid.
+
 ## v1.0.4 — Animated Startup, Rich Alert Dashboard & Account Fallback Detection
 
 - **Launcher Startup Animations:** Sleek ASCII art banner, graduated color transitions, and animated phase indicators (`INIT`, `SYNC`, `VERIFY`, `READY`, `PROGRESS`) on startup.

@@ -1,12 +1,11 @@
 <div align="center">
 
 # Arkuzo Memory Saver
-### Volt Integration · v1.0.4
+### Volt Integration · v1.0.5
 
 A portable Windows memory monitor with guarded, account-aware recovery through Volt.
 
-[![Version](https://img.shields.io/badge/version-1.0.3-6366f1)](CHANGELOG.md)
-[![VirusTotal](https://img.shields.io/badge/VirusTotal-0%2F92%20Clean-brightgreen?logo=virustotal)](https://www.virustotal.com/gui/file/7140e1b2715f7df0488713835cf6df9e5d5a40623788b3ec0c71c70da8ad7cf1)
+[![Version](https://img.shields.io/badge/version-1.0.5-6366f1)](CHANGELOG.md)
 ![Windows x64](https://img.shields.io/badge/platform-Windows_x64-0078D4)
 ![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-5391FE)
 ![Volt integration](https://img.shields.io/badge/Volt-integration-22c55e)
@@ -81,15 +80,9 @@ Policy     600 MB soft target · hard cap disabled
 
 Windows may show SmartScreen warnings for an **unsigned binary**. Check that the file came from the official repository and review the warning and your organization's policy before proceeding. **Do not disable SmartScreen, antivirus, or other protections globally.**
 
-## Antivirus & Integrity Verification
+## Integrity verification
 
-All official release artifacts are scanned and verified clean against **VirusTotal** across 92 security vendors.
-
-| File | SHA-256 Checksum | VirusTotal Result |
-| :--- | :--- | :--- |
-| **`ArkuzoMemorySaver.exe`** | `87caa137512cadd34e95ef2b3b48aebd980dc4cdd07121ac2518dce77fd2c072` | [![0/92 Clean](https://img.shields.io/badge/VirusTotal-0%2F92%20Clean-brightgreen)](https://www.virustotal.com/gui/file/7140e1b2715f7df0488713835cf6df9e5d5a40623788b3ec0c71c70da8ad7cf1) |
-| **`ArkuzoMemorySaver-runtime.zip`** | `8651ea424b1b530a4be8a05b02c5f88acaffbec4c5cdbb03536445950ef29310` | [![Clean](https://img.shields.io/badge/VirusTotal-Clean-brightgreen)](https://www.virustotal.com/gui/file/cad70dbdcca7876fb9257d4a572dcf4ced9f7219665ce5a4eb0e59e354f9660e) |
-| **`ArkuzoMemorySaver-v1.0.4-win-x64.zip`** | `fbfd2920e6950d2026d0489ad6f2686d92fa0b45a3f38f15172ab123d48d04de` | [![Clean](https://img.shields.io/badge/VirusTotal-Clean-brightgreen)](https://www.virustotal.com/gui/file/66c58470905f49843ba4b2fc35561241240f5d0e28bcd9bcedae9ab7fa4675d2) |
+The exact release publishes **`SHA256SUMS.txt`** for its executable and archives, plus **`ArkuzoMemorySaver-runtime.sha256`** for updater validation. The launcher verifies downloaded bytes and available GitHub asset digests. No new VirusTotal scan was requested for this build; an older scan does not certify different file hashes. See [security and privacy](SECURITY.md).
 
 You can independently verify checksums locally using PowerShell:
 ```powershell

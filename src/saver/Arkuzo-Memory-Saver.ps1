@@ -47,6 +47,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$ArkuzoRuntimeVersion = '1.0.5'
 # Resolve persistent data independently of the versioned program files.
 if ([string]::IsNullOrWhiteSpace($DataDirectory)) { $DataDirectory = $PSScriptRoot }
 $DataDirectory = [IO.Path]::GetFullPath($DataDirectory)
@@ -879,9 +880,11 @@ function Update-ArkuzoLivePolicy {
             $newHealth.cooldown_sec = [math]::Min($newHealth.cooldown_sec, 90)
             $newHealth.max_recycles_per_hour = [math]::Max($newHealth.max_recycles_per_hour, 20)
         }
-        $script:healthPolicy=$newHealth;$script:restorePolicy=$newRestore;$script:lastConfigText=$raw
-        Write-Diagnostic 'CONFIG_RELOADED' @{health=$newHealth;recovery=$newRestore;note='Validated health/recovery hot reload; resource settings apply on next ordinary start.'}
-    } catch { Warn-Throttled 'config-reload' 'Invalid/unavailable config ignored; last validated health and recovery policy retained.' }
+        $newPagefile=Get-ArkuzoPagefilePolicy -Input $cfg.pagefile -PressurePercent $newHealth.pressure_percent
+        if (-not $newPagefile.valid) { throw ('Invalid pagefile policy: '+($newPagefile.errors -join '; ')) }
+        $script:healthPolicy=$newHealth;$script:restorePolicy=$newRestore;$script:pagefilePolicy=$newPagefile;$script:lastConfigText=$raw
+        Write-Diagnostic 'CONFIG_RELOADED' @{health=$newHealth;recovery=$newRestore;pagefile=$newPagefile;note='Validated health/recovery/pagefile hot reload; resource settings apply on next ordinary start.'}
+    } catch { Warn-Throttled 'config-reload' 'Invalid/unavailable config ignored; last validated health, recovery and pagefile policy retained.' }
 }
 function Write-ArkuzoRuntimeStatus {
     if ($MonitorOnly -or -not $ownsControllerMutex) { return }
@@ -891,10 +894,12 @@ function Write-ArkuzoRuntimeStatus {
         $missing=@($expected|Where-Object{-not $_.processId})
         $controlFresh=$voltControlStatus.available -and $null -ne $voltControlCheckedUtc -and ([datetime]::UtcNow-$voltControlCheckedUtc).TotalSeconds -ge 0 -and ([datetime]::UtcNow-$voltControlCheckedUtc).TotalSeconds -le 25
         Save-ArkuzoAtomicJson (Join-Path $DataDirectory 'runtime-status.json') @{
-            version='1.0.1';pid=$PID;startTicks=$script:controllerStartTicks;updatedUtc=[datetime]::UtcNow.ToString('o');monitorOnly=$false;controller=$true
+            version=$ArkuzoRuntimeVersion;pid=$PID;startTicks=$script:controllerStartTicks;updatedUtc=[datetime]::UtcNow.ToString('o');monitorOnly=$false;controller=$true
             clients=@($tracked.Values|ForEach-Object{$_.LastSnapshot}|Where-Object{$null -ne $_});accounts=$accounts;expectedAccounts=$expected.Count;missingAccounts=$missing.Count
             pending=@($recoveryPending.Values);pendingRecoveries=$recoveryPending.Count;suspendedAccounts=@($script:suspendedAccounts.Values);suspendedAccountCount=$script:suspendedAccounts.Count;missingRecoveryBlocked=(-not $controlFresh -or $missing.Count -gt 0 -or $recoveryPending.Count -gt 0)
             voltControlAvailable=[bool]$voltControlStatus.available;recoveryJournalHealthy=[bool]$recoveryJournalHealthy;systemMemory=$systemMemory;health=$healthPolicy;recovery=$restorePolicy;logFailed=$logFailed
+            pagefilePolicy=$pagefilePolicy;pagefile=$script:pagefileStatus;nativePrivileges=$script:nativePrivilegeInitialization;graphics=$script:graphicsStatus
+            updateAvailable=$script:updateAvailableStatus
         }
     } catch { Warn-Throttled 'runtime-heartbeat' 'Runtime heartbeat could not be persisted. Watchdog must report degraded status.' }
 }
@@ -1140,6 +1145,571 @@ function Get-ArkuzoHealthDecision($State, $Sample, $Policy, [double]$Now) {
     return [pscustomobject]@{ Reason = $reason; Recycle = ([bool]$Sample.eligible -and $reason -ne ''); Status = $status }
 }
 
+# Optional pagefile helpers. These functions never enable Windows pagefile management
+# or reboot the host; the caller must explicitly opt in and retain recovery policy.
+function Get-ArkuzoPagefileValue {
+    param($Object, [string]$Name, $Default = $null)
+    if ($Object -is [Collections.IDictionary]) {
+        if ($Object.Contains($Name)) { return $Object[$Name] }
+    } elseif ($null -ne $Object -and $null -ne $Object.PSObject.Properties[$Name]) {
+        return $Object.PSObject.Properties[$Name].Value
+    }
+    return $Default
+}
+function Test-ArkuzoPagefileNumber {
+    param($Value, [double]$Minimum, [double]$Maximum, [switch]$Integer)
+    if ($Value -is [bool] -or $Value -is [string] -or $null -eq $Value) { return $false }
+    if ($Value -isnot [ValueType]) { return $false }
+    try {
+        $n = [double]$Value
+        return (-not [double]::IsNaN($n) -and -not [double]::IsInfinity($n) -and
+            $n -ge $Minimum -and $n -le $Maximum -and (-not $Integer -or [math]::Floor($n) -eq $n))
+    } catch { return $false }
+}
+function Get-ArkuzoPagefilePolicy {
+    # Alias avoids PowerShell's automatic $input enumerator. Input is the pagefile subsection.
+    param([Alias('Input')]$Configuration = $null, $PressurePercent = 88)
+    $values = [ordered]@{
+        enabled = $false; growth_step_mb = 4096; max_file_mb = 65536; max_total_mb = 131072
+        reserve_free_bytes = [int64]16106127360; reserve_free_percent = 10
+        trigger_percent = 80; cooldown_sec = 3600; max_requests_per_boot = 1; max_boot_growth_mb = 4096
+    }
+    $errors = New-Object 'Collections.Generic.List[string]'
+    if ($null -ne $Configuration) {
+        if ($Configuration -is [Collections.IDictionary]) { $keys = @($Configuration.Keys) }
+        elseif ($Configuration -is [pscustomobject]) { $keys = @($Configuration.PSObject.Properties.Name) }
+        else { $keys = @(); $errors.Add('Input must be a pagefile configuration object.') }
+        foreach ($key in $keys) {
+            if (-not $values.Contains([string]$key)) { $errors.Add("Unknown pagefile option: $key"); continue }
+            $values[$key] = Get-ArkuzoPagefileValue $Configuration ([string]$key)
+        }
+    }
+    if ($values.enabled -isnot [bool]) { $errors.Add('enabled must be a literal boolean.') }
+    $bounds = @{
+        growth_step_mb = @(1,8192); max_file_mb = @(1,131072); max_total_mb = @(1,262144)
+        reserve_free_bytes = @([int64]1048576,[int64]1099511627776)
+        cooldown_sec = @(60,86400); max_requests_per_boot = @(1,4); max_boot_growth_mb = @(1,32768)
+    }
+    foreach ($key in $bounds.Keys) {
+        if (-not (Test-ArkuzoPagefileNumber $values[$key] $bounds[$key][0] $bounds[$key][1] -Integer)) {
+            $errors.Add("$key must be an integer in [$($bounds[$key][0]), $($bounds[$key][1])].")
+        }
+    }
+    if (-not (Test-ArkuzoPagefileNumber $values.reserve_free_percent 1 50)) { $errors.Add('reserve_free_percent must be in [1, 50].') }
+    if (-not (Test-ArkuzoPagefileNumber $PressurePercent 2 99)) { $errors.Add('PressurePercent must be in [2, 99].') }
+    if (-not (Test-ArkuzoPagefileNumber $values.trigger_percent 1 98)) { $errors.Add('trigger_percent must be in [1, 98].') }
+    if ((Test-ArkuzoPagefileNumber $values.max_total_mb 1 262144 -Integer) -and
+        (Test-ArkuzoPagefileNumber $values.max_file_mb 1 131072 -Integer) -and $values.max_total_mb -lt $values.max_file_mb) {
+        $errors.Add('max_total_mb must be at least max_file_mb.')
+    }
+    if ((Test-ArkuzoPagefileNumber $values.trigger_percent 1 98) -and
+        (Test-ArkuzoPagefileNumber $PressurePercent 2 99) -and $values.trigger_percent -ge $PressurePercent) {
+        $errors.Add('trigger_percent must precede PressurePercent.')
+    }
+    $values.enabled = ($errors.Count -eq 0 -and $values.enabled -is [bool] -and $values.enabled)
+    $values['pressure_percent'] = $PressurePercent
+    $values['valid'] = ($errors.Count -eq 0); $values['errors'] = @($errors.ToArray())
+    return [pscustomobject]$values
+}
+
+function Get-ArkuzoPagefileUtcNow {
+    param([hashtable]$Dependencies = @{})
+    $value = if ($Dependencies.ContainsKey('UtcNow')) { & $Dependencies.UtcNow } else { [datetime]::UtcNow }
+    if ($value -isnot [datetime]) { throw 'UtcNow seam must return one DateTime.' }
+    return $value.ToUniversalTime()
+}
+function Test-ArkuzoPagefileAdministrator {
+    param([hashtable]$Dependencies = @{})
+    if ($Dependencies.ContainsKey('IsAdministrator')) { $value = & $Dependencies.IsAdministrator }
+    else {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        try {
+            $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+            $value = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        } finally { $identity.Dispose() }
+    }
+    if ($value -isnot [bool]) { throw 'Administrator check must return one literal boolean.' }
+    return $value
+}
+function Read-ArkuzoPagefileCim {
+    param([string]$ClassName, [hashtable]$Dependencies = @{})
+    if ($Dependencies.ContainsKey('ReadCim')) { return (& $Dependencies.ReadCim $ClassName) }
+    return (Get-CimInstance -Namespace 'root/cimv2' -ClassName $ClassName -ErrorAction Stop)
+}
+function Get-ArkuzoPagefileSnapshot {
+    # Read only. Instance is retained solely for updating the exact freshly re-read setting.
+    param([hashtable]$Dependencies = @{})
+    $snapshot = [pscustomobject]@{
+        available = $false; capturedUtc = $null; bootId = $null; computerName = $null
+        automaticManagedPagefile = $null; isAdministrator = $false
+        settings = @(); usage = @(); drives = @(); error = $null
+    }
+    try {
+        $snapshot.capturedUtc = (Get-ArkuzoPagefileUtcNow $Dependencies).ToString('o')
+        $computers = @(Read-ArkuzoPagefileCim 'Win32_ComputerSystem' $Dependencies)
+        $systems = @(Read-ArkuzoPagefileCim 'Win32_OperatingSystem' $Dependencies)
+        if ($computers.Count -ne 1 -or $systems.Count -ne 1 -or
+            $computers[0].AutomaticManagedPagefile -isnot [bool] -or
+            [string]::IsNullOrWhiteSpace([string]$computers[0].Name) -or
+            $systems[0].LastBootUpTime -isnot [datetime]) { throw 'Missing or ambiguous computer/boot/automatic-management identity.' }
+        $snapshot.computerName = [string]$computers[0].Name
+        $snapshot.bootId = $snapshot.computerName + ':' + $systems[0].LastBootUpTime.ToUniversalTime().Ticks
+        $snapshot.automaticManagedPagefile = $computers[0].AutomaticManagedPagefile
+        $snapshot.isAdministrator = Test-ArkuzoPagefileAdministrator $Dependencies
+        $snapshot.settings = @(foreach ($row in @(Read-ArkuzoPagefileCim 'Win32_PageFileSetting' $Dependencies)) {
+            $class = 'Win32_PageFileSetting'; $namespace = 'root/cimv2'; $server = $snapshot.computerName
+            if ($null -ne $row.CimSystemProperties) {
+                $class = [string]$row.CimSystemProperties.ClassName
+                $namespace = [string]$row.CimSystemProperties.Namespace
+                $server = [string]$row.CimSystemProperties.ServerName
+            }
+            [pscustomobject]@{
+                name = $row.Name; settingId = $row.SettingID; initialSizeMB = $row.InitialSize; maximumSizeMB = $row.MaximumSize
+                cimClass = $class; cimNamespace = $namespace; cimServer = $server; instance = $row
+            }
+        })
+        $snapshot.usage = @(foreach ($row in @(Read-ArkuzoPagefileCim 'Win32_PageFileUsage' $Dependencies)) {
+            [pscustomobject]@{name=$row.Name; allocatedMB=$row.AllocatedBaseSize; temporary=$row.TempPageFile}
+        })
+        $snapshot.drives = @(foreach ($row in @(Read-ArkuzoPagefileCim 'Win32_LogicalDisk' $Dependencies)) {
+            [pscustomobject]@{
+                deviceId=$row.DeviceID; driveType=$row.DriveType; sizeBytes=$row.Size; freeBytes=$row.FreeSpace
+                volumeSerial=$row.VolumeSerialNumber; fileSystem=$row.FileSystem
+            }
+        })
+        if ($snapshot.settings.Count -gt 16 -or $snapshot.usage.Count -gt 16 -or $snapshot.drives.Count -gt 26) { throw 'Snapshot exceeds bounded local pagefile/drive inventory.' }
+        $snapshot.available = $true
+    } catch {
+        $snapshot.error = [pscustomobject]@{stage='SnapshotRead';type=$_.Exception.GetType().FullName;message=$_.Exception.Message}
+    }
+    return $snapshot
+}
+
+function Get-ArkuzoPagefileGrowthDecision {
+    # Pure decision: only manually fixed, already active root pagefile.sys files qualify.
+    param($Snapshot, $Policy, $SystemMemory)
+    $decision = [pscustomobject]@{
+        eligible=$false; status='InvalidPolicy'; reason='Pagefile policy is missing or invalid.'; validationErrors=@()
+        targetName=$null; target=$null; drive=$null; oldInitialSizeMB=0; oldMaximumSizeMB=0
+        oldAllocatedMB=0; newInitialSizeMB=0; newMaximumSizeMB=0; growthMB=0
+        totalConfiguredMB=0; reserveBytes=[int64]0; diskChargeBytes=[int64]0
+    }
+    if ($null -eq $Policy -or $Policy.valid -isnot [bool] -or -not $Policy.valid) {
+        $decision.validationErrors=@(Get-ArkuzoPagefileValue $Policy 'errors' @()); return $decision
+    }
+    # Revalidate numeric bounds even if a caller changed a previously validated object.
+    $inputValues = @{}
+    foreach ($key in @('enabled','growth_step_mb','max_file_mb','max_total_mb','reserve_free_bytes',
+        'reserve_free_percent','trigger_percent','cooldown_sec','max_requests_per_boot','max_boot_growth_mb')) {
+        $inputValues[$key] = Get-ArkuzoPagefileValue $Policy $key
+    }
+    $p = Get-ArkuzoPagefilePolicy -Input $inputValues -PressurePercent $Policy.pressure_percent
+    if (-not $p.valid) { $decision.validationErrors=@($p.errors); return $decision }
+    if (-not $p.enabled) { $decision.status='Disabled'; $decision.reason='Pagefile management is opt-in and disabled.'; return $decision }
+    if ($null -eq $Snapshot -or $Snapshot.available -isnot [bool] -or -not $Snapshot.available -or
+        $Snapshot.automaticManagedPagefile -isnot [bool] -or [string]::IsNullOrWhiteSpace([string]$Snapshot.bootId)) {
+        $decision.status='SnapshotUnavailable'; $decision.reason='Pagefile/boot identity could not be read safely.'; return $decision
+    }
+    $settings = @($Snapshot.settings); $usage = @($Snapshot.usage)
+    if ($Snapshot.automaticManagedPagefile -or @($settings | Where-Object {
+        (Test-ArkuzoPagefileNumber $_.initialSizeMB 0 0 -Integer) -and
+        (Test-ArkuzoPagefileNumber $_.maximumSizeMB 0 0 -Integer)
+    }).Count -gt 0) {
+        $decision.status='WindowsManaged'; $decision.reason='Windows manages pagefile growth; no configuration writes are permitted.'; return $decision
+    }
+    if ($Snapshot.isAdministrator -isnot [bool] -or -not $Snapshot.isAdministrator) {
+        $decision.status='NotAdministrator'; $decision.reason='An elevated administrator token is required.'; return $decision
+    }
+    if (-not (Test-ArkuzoPagefileNumber $SystemMemory.commitUsedMB 0 1073741824) -or
+        -not (Test-ArkuzoPagefileNumber $SystemMemory.commitLimitMB 1 1073741824) -or
+        -not (Test-ArkuzoPagefileNumber $SystemMemory.commitPercent 0 100) -or
+        [math]::Abs((100.0 * $SystemMemory.commitUsedMB / $SystemMemory.commitLimitMB) - $SystemMemory.commitPercent) -gt 0.2) {
+        $decision.status='MemoryUnavailable'; $decision.reason='Fresh consistent OS commit telemetry is required.'; return $decision
+    }
+    if ($SystemMemory.commitPercent -lt $p.trigger_percent) {
+        $decision.status='BelowTrigger'; $decision.reason='OS commit is below the early pagefile trigger.'; return $decision
+    }
+    $decision.status='UnsupportedLayout'; $decision.reason='Only unambiguous existing, active, fixed-size local pagefiles are supported.'
+    if ($settings.Count -lt 1 -or $settings.Count -gt 16 -or $usage.Count -ne $settings.Count) { return $decision }
+    $names = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $total = [int64]0
+    foreach ($file in $settings) {
+        if ($file.name -isnot [string] -or $file.name -notmatch '^[A-Za-z]:\\pagefile\.sys$' -or -not $names.Add($file.name) -or
+            $file.cimClass -ine 'Win32_PageFileSetting' -or ([string]$file.cimNamespace).Replace('\','/').Trim('/') -ine 'root/cimv2' -or
+            -not (Test-ArkuzoPagefileNumber $file.initialSizeMB 1 4294967295 -Integer) -or
+            -not (Test-ArkuzoPagefileNumber $file.maximumSizeMB 1 4294967295 -Integer) -or $file.initialSizeMB -ne $file.maximumSizeMB) { return $decision }
+        if ($file.cimServer -and $file.cimServer -ine $Snapshot.computerName -and $file.cimServer -ine 'localhost' -and $file.cimServer -ne '.') { return $decision }
+        $active = @($usage | Where-Object { $_.name -ieq $file.name })
+        if ($active.Count -ne 1 -or $active[0].temporary -isnot [bool] -or $active[0].temporary -or
+            -not (Test-ArkuzoPagefileNumber $active[0].allocatedMB 1 4294967295 -Integer)) { return $decision }
+        if ($active[0].allocatedMB -lt $file.initialSizeMB) {
+            $decision.status='PendingReboot'; $decision.reason='Configured capacity is not active; another growth request is unsafe.'; return $decision
+        }
+        if ($active[0].allocatedMB -gt $file.maximumSizeMB) {
+            $decision.status='RuntimeMismatch'; $decision.reason='Active allocation exceeds fixed configuration; never reduce it.'; return $decision
+        }
+        $total += [int64]$file.maximumSizeMB
+    }
+    $decision.totalConfiguredMB = $total
+    $decision.status='AtCeiling'; $decision.reason='Per-file or total configured capacity is already at its ceiling.'
+    foreach ($file in @($settings | Sort-Object name)) {
+        $growth = [int64][math]::Min($p.growth_step_mb, [math]::Min($p.max_boot_growth_mb,
+            [math]::Min($p.max_file_mb - $file.maximumSizeMB, $p.max_total_mb - $total)))
+        if ($growth -lt 1) { continue }
+        $drives = @($Snapshot.drives | Where-Object { $_.deviceId -ieq $file.name.Substring(0,2) })
+        if ($drives.Count -ne 1 -or $drives[0].driveType -ne 3 -or
+            [string]::IsNullOrWhiteSpace([string]$drives[0].volumeSerial) -or
+            [string]::IsNullOrWhiteSpace([string]$drives[0].fileSystem) -or
+            -not (Test-ArkuzoPagefileNumber $drives[0].sizeBytes 1 9007199254740991 -Integer) -or
+            -not (Test-ArkuzoPagefileNumber $drives[0].freeBytes 0 $drives[0].sizeBytes -Integer)) {
+            $decision.status='UnknownDrive'; $decision.reason='Target must map to one known fixed local volume with capacity/free-space identity.'; return $decision
+        }
+        $drive = $drives[0]
+        $reserve = [int64][math]::Max($p.reserve_free_bytes, [math]::Ceiling($drive.sizeBytes * $p.reserve_free_percent / 100.0))
+        $diskGrowthMB = [int64][math]::Floor(($drive.freeBytes - $reserve) / 1MB)
+        $growth = [int64][math]::Min($growth, $diskGrowthMB)
+        if ($growth -lt 1) { $decision.status='LowDiskSpace'; $decision.reason='Growth would breach absolute or percentage free-disk reserve.'; continue }
+        $decision.eligible=$true; $decision.status='Eligible'; $decision.reason='One existing fixed pagefile can grow within all bounds.'
+        $decision.targetName=$file.name; $decision.target=$file; $decision.drive=$drive
+        $decision.oldInitialSizeMB=[int64]$file.initialSizeMB; $decision.oldMaximumSizeMB=[int64]$file.maximumSizeMB
+        $decision.oldAllocatedMB=[int64]$file.maximumSizeMB; $decision.growthMB=$growth
+        $decision.newInitialSizeMB=[int64]$file.initialSizeMB + $growth
+        $decision.newMaximumSizeMB=[int64]$file.maximumSizeMB + $growth
+        $decision.reserveBytes=$reserve; $decision.diskChargeBytes=[int64]$growth * 1MB
+        return $decision
+    }
+    return $decision
+}
+
+function New-ArkuzoPagefileManagementResult {
+    param($Decision)
+    return [pscustomobject]@{
+        status=$Decision.status; reason=$Decision.reason; decision=$Decision
+        changed=$false; writeAttempted=$false; configurationPersisted=$false
+        pendingReboot=($Decision.status -eq 'PendingReboot'); runtimeGrowthVerified=$false
+        canSuppressRecovery=$false; rebootInitiated=$false; targetName=$Decision.targetName
+        growthMB=$Decision.growthMB; auditPath=$null; journalPath=$null; requestId=$null; error=$null
+    }
+}
+function Update-ArkuzoPagefileStatus {
+    # Observation is separate from recovery; no pagefile result disables the health guard.
+    $status = [pscustomobject]@{
+        status='Disabled'; reason='Pagefile management is opt-in and disabled.'
+        writeAttempted=$false; changed=$false; configurationPersisted=$false
+        pendingReboot=$false; runtimeGrowthVerified=$false; canSuppressRecovery=$false
+        rebootInitiated=$false; targetName=$null; growthMB=0; error=$null
+    }
+    try {
+        if ($null -ne $pagefilePolicy -and (-not $pagefilePolicy.valid -or $pagefilePolicy.enabled)) {
+            if ($script:logFailed) { throw 'Audit logging is unavailable; pagefile requests are blocked.' }
+            $snapshot = Get-ArkuzoPagefileSnapshot
+            $result = Invoke-ArkuzoPagefileManagement -Snapshot $snapshot -Policy $pagefilePolicy `
+                -SystemMemory $systemMemory -MonitorOnly:$MonitorOnly `
+                -OwnsController $ownsControllerMutex -DataDirectory $DataDirectory
+            foreach ($key in @('status','reason','writeAttempted','changed','configurationPersisted',
+                'pendingReboot','runtimeGrowthVerified','targetName','growthMB','error')) {
+                $status.$key = Get-ArkuzoPagefileValue $result $key $status.$key
+            }
+        }
+    } catch {
+        $status.status='ObservationFailed'; $status.reason='Pagefile observation failed; normal recovery remains enabled.'
+        $status.error=[pscustomobject]@{stage='Observation';message=$_.Exception.Message}
+    }
+    $script:pagefileStatus=$status
+    Write-Diagnostic 'PAGEFILE_STATUS' $status
+    if ($status.status -notin @('Disabled','WindowsManaged','BelowTrigger','Active','MonitorOnly','NotController','Cooldown')) {
+        $details = if ($null -ne $status.error) { ' '+$status.error.message } else { '' }
+        Warn-Throttled 'pagefile-management' ('Pagefile '+$status.status+': '+$status.reason+$details)
+    }
+}
+function Read-ArkuzoPagefileSystemMemory {
+    param([hashtable]$Dependencies = @{})
+    $memory = if ($Dependencies.ContainsKey('ReadMemory')) { & $Dependencies.ReadMemory } else { Get-ArkuzoSystemMemory }
+    if (-not (Test-ArkuzoPagefileNumber $memory.commitLimitMB 1 1073741824) -or
+        -not (Test-ArkuzoPagefileNumber $memory.commitUsedMB 0 1073741824) -or
+        -not (Test-ArkuzoPagefileNumber $memory.commitPercent 0 100) -or
+        [math]::Abs((100.0 * $memory.commitUsedMB / $memory.commitLimitMB) - $memory.commitPercent) -gt 0.2) {
+        throw 'OS commit telemetry is missing or inconsistent.'
+    }
+    return $memory
+}
+function Get-ArkuzoPagefileConfigurationRecord {
+    param($Snapshot)
+    return [pscustomobject]@{
+        bootId=$Snapshot.bootId; computerName=$Snapshot.computerName; automaticManagedPagefile=$Snapshot.automaticManagedPagefile
+        settings=@(foreach ($file in @($Snapshot.settings | Sort-Object name)) {
+            [pscustomobject]@{name=$file.name;settingId=$file.settingId;initialSizeMB=$file.initialSizeMB;maximumSizeMB=$file.maximumSizeMB;
+                cimClass=$file.cimClass;cimNamespace=$file.cimNamespace;cimServer=$file.cimServer}
+        })
+    }
+}
+function Assert-ArkuzoPagefileSafePath {
+    param([string]$Path)
+    if (-not [IO.Path]::IsPathRooted($Path) -or $Path -notmatch '^[A-Za-z]:[\\/]') { throw 'Pagefile journal requires an absolute local data path.' }
+    $cursor = [IO.Path]::GetFullPath($Path)
+    while ($cursor) {
+        if ([IO.File]::Exists($cursor) -or [IO.Directory]::Exists($cursor)) {
+            if (([IO.File]::GetAttributes($cursor) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Pagefile persistence refuses reparse-point paths.' }
+        }
+        $parent = [IO.Directory]::GetParent($cursor)
+        $cursor = if ($null -ne $parent) { $parent.FullName } else { $null }
+    }
+}
+function Save-ArkuzoPagefileJson {
+    param([string]$Path, $Data)
+    Assert-ArkuzoPagefileSafePath $Path
+    $text = $Data | ConvertTo-Json -Depth 10 -Compress
+    $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($text)
+    if ($bytes.Length -gt 65536) { throw 'Pagefile audit/journal exceeds its 64 KiB bound.' }
+    $temp = $Path + '.tmp-' + [guid]::NewGuid().ToString('N')
+    $stream = $null
+    try {
+        $stream = New-Object IO.FileStream($temp, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None, 4096, [IO.FileOptions]::WriteThrough)
+        $stream.Write($bytes,0,$bytes.Length); $stream.Flush($true); $stream.Dispose(); $stream=$null
+        if ([IO.File]::Exists($Path)) { [IO.File]::Replace($temp,$Path,[NullString]::Value) }
+        else { [IO.File]::Move($temp,$Path) }
+        if ([IO.File]::ReadAllText($Path) -cne $text) { throw 'Pagefile persistence readback did not match.' }
+    } finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+        if ([IO.File]::Exists($temp)) { [IO.File]::Delete($temp) }
+    }
+}
+function Read-ArkuzoPagefileJournal {
+    param([string]$Path, [string]$BootId)
+    Assert-ArkuzoPagefileSafePath $Path
+    $empty = [pscustomobject]@{schemaVersion=1;bootId=$BootId;requests=@()}
+    if (-not [IO.File]::Exists($Path)) { return $empty }
+    if ((New-Object IO.FileInfo($Path)).Length -gt 65536) { throw 'Pagefile journal exceeds its 64 KiB bound.' }
+    $journal = [IO.File]::ReadAllText($Path) | ConvertFrom-Json -ErrorAction Stop
+    if ($journal.schemaVersion -ne 1 -or $journal.bootId -isnot [string] -or -not $journal.bootId -or
+        $null -eq $journal.PSObject.Properties['requests'] -or @($journal.requests).Count -gt 4) { throw 'Invalid pagefile journal schema or bounds.' }
+    $ids = New-Object 'Collections.Generic.HashSet[string]'
+    foreach ($request in @($journal.requests)) {
+        $time = [datetimeoffset]::MinValue
+        if ($request.id -notmatch '^[a-f0-9]{32}$' -or -not $ids.Add([string]$request.id) -or
+            -not [datetimeoffset]::TryParse([string]$request.requestedUtc, [ref]$time) -or
+            $request.targetName -notmatch '^[A-Za-z]:\\pagefile\.sys$' -or
+            $request.status -notin @('Prepared','PendingReboot','Active','WriteFailed','ReadbackFailed','RaceDetected','RuntimeVerificationFailed') -or
+            -not (Test-ArkuzoPagefileNumber $request.growthMB 1 8192 -Integer) -or
+            -not (Test-ArkuzoPagefileNumber $request.oldAllocatedMB 1 4294967295 -Integer) -or
+            -not (Test-ArkuzoPagefileNumber $request.oldCommitLimitMB 1 1073741824) -or
+            -not (Test-ArkuzoPagefileNumber $request.newMaximumSizeMB 1 4294967295 -Integer)) { throw 'Invalid pagefile request record; refusing to reset a consumed budget.' }
+    }
+    if ($journal.bootId -cne $BootId) { return $empty }
+    return $journal
+}
+function Invoke-ArkuzoPagefileManagement {
+    param($Snapshot, $Policy, $SystemMemory, [switch]$MonitorOnly,
+        $OwnsController = $false, [string]$DataDirectory, [hashtable]$Dependencies = @{})
+    $decision = Get-ArkuzoPagefileGrowthDecision $Snapshot $Policy $SystemMemory
+    $result = New-ArkuzoPagefileManagementResult $decision
+    if (-not $decision.eligible) {
+        if ($decision.status -eq 'SnapshotUnavailable') { $result.error=$Snapshot.error }
+        if ($decision.status -eq 'InvalidPolicy') {
+            $message = if ($decision.validationErrors.Count) { $decision.validationErrors -join '; ' } else { $decision.reason }
+            $result.error=[pscustomobject]@{stage='PolicyValidation';type='PolicyValidationError';message=$message}
+        }
+        return $result
+    }
+    if ($MonitorOnly) { $result.status='MonitorOnly'; $result.reason='Monitor-only operation prohibits pagefile writes.'; return $result }
+    if ($OwnsController -isnot [bool] -or -not $OwnsController) { $result.status='NotController'; $result.reason='Only the singleton controller may request pagefile growth.'; return $result }
+    $lock = $null; $journal = $null; $request = $null; $reservationPersisted = $false; $stage = 'JournalOpen'
+    try {
+        Assert-ArkuzoPagefileSafePath $DataDirectory
+        [IO.Directory]::CreateDirectory($DataDirectory) | Out-Null
+        $result.journalPath = Join-Path $DataDirectory 'Arkuzo-Pagefile-Requests.json'
+        $lockPath = Join-Path $DataDirectory 'Arkuzo-Pagefile-Requests.lock'
+        Assert-ArkuzoPagefileSafePath $lockPath
+        $lock = [IO.File]::Open($lockPath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+        $now = Get-ArkuzoPagefileUtcNow $Dependencies
+        $stage='JournalRead'; $journal = Read-ArkuzoPagefileJournal $result.journalPath $Snapshot.bootId
+        $consumedMB = [int64]0
+        foreach ($entry in @($journal.requests)) { $consumedMB += [int64]$entry.growthMB }
+        if (@($journal.requests).Count -ge $Policy.max_requests_per_boot -or $consumedMB + $decision.growthMB -gt $Policy.max_boot_growth_mb) {
+            $result.status='BootBudgetReached'; $result.reason='Per-boot request/growth budget is consumed; no further request.'; return $result
+        }
+        if (@($journal.requests).Count -gt 0) {
+            $latest = $journal.requests[-1]
+            $age = ($now - ([datetimeoffset]$latest.requestedUtc).UtcDateTime).TotalSeconds
+            if ($age -lt 0 -or $age -lt $Policy.cooldown_sec) {
+                $result.status='Cooldown'; $result.reason='Persisted pagefile cooldown (including clock reversal) prevents another request.'; return $result
+            }
+            if (@($journal.requests | Where-Object {$_.status -in @('Prepared','PendingReboot','ReadbackFailed','RuntimeVerificationFailed')}).Count) {
+                $result.status='PriorRequestUnverified'; $result.reason='An earlier request has unverified activation/outcome; no repeat write.'; return $result
+            }
+        }
+        $index = @($journal.requests).Count + 1
+        $result.requestId = [guid]::NewGuid().ToString('N')
+        $result.auditPath = Join-Path $DataDirectory ("Arkuzo-Pagefile-Backup-$index.json")
+        $oldConfiguration = Get-ArkuzoPagefileConfigurationRecord $Snapshot
+        $request = [pscustomobject]@{
+            id=$result.requestId; requestedUtc=$now.ToString('o'); targetName=$decision.targetName; status='Prepared'
+            growthMB=$decision.growthMB; oldAllocatedMB=$decision.oldAllocatedMB; oldCommitLimitMB=$SystemMemory.commitLimitMB
+            newInitialSizeMB=$decision.newInitialSizeMB; newMaximumSizeMB=$decision.newMaximumSizeMB; error=$null
+        }
+        $stage='AuditBackup'
+        Save-ArkuzoPagefileJson $result.auditPath ([pscustomobject]@{
+            schemaVersion=1;requestedUtc=$request.requestedUtc;requestId=$request.id;oldConfiguration=$oldConfiguration
+            oldRuntime=@($Snapshot.usage);oldDrives=@($Snapshot.drives);oldCommitLimitMB=$SystemMemory.commitLimitMB
+            requestedSetting=[pscustomobject]@{name=$decision.targetName;initialSizeMB=$decision.newInitialSizeMB;maximumSizeMB=$decision.newMaximumSizeMB}
+        })
+        $stage='JournalReserve'; $journal.requests = @($journal.requests) + @($request)
+        Save-ArkuzoPagefileJson $result.journalPath $journal; $reservationPersisted=$true
+        # All audit/reservation IO precedes the final read. No configuration is ever
+        # written from the caller's cached CIM object; re-read exact local identity.
+        $stage='PreWrite'
+        $fresh = Get-ArkuzoPagefileSnapshot -Dependencies $Dependencies
+        if (-not $fresh.available) { throw ('Pre-write snapshot failed: ' + $fresh.error.message) }
+        $beforeMemory = Read-ArkuzoPagefileSystemMemory $Dependencies
+        $freshDecision = Get-ArkuzoPagefileGrowthDecision $fresh $Policy $beforeMemory
+        $freshConfiguration = Get-ArkuzoPagefileConfigurationRecord $fresh
+        $oldText = $oldConfiguration | ConvertTo-Json -Depth 8 -Compress
+        $freshText = $freshConfiguration | ConvertTo-Json -Depth 8 -Compress
+        if (-not $freshDecision.eligible -or $oldText -cne $freshText -or
+            $freshDecision.targetName -cne $decision.targetName -or
+            $freshDecision.newInitialSizeMB -ne $decision.newInitialSizeMB -or $freshDecision.newMaximumSizeMB -ne $decision.newMaximumSizeMB -or
+            $freshDecision.drive.deviceId -cne $decision.drive.deviceId -or $freshDecision.drive.volumeSerial -cne $decision.drive.volumeSerial -or
+            $freshDecision.drive.fileSystem -cne $decision.drive.fileSystem -or $freshDecision.drive.sizeBytes -ne $decision.drive.sizeBytes -or
+            $freshDecision.drive.freeBytes - $decision.diskChargeBytes -lt $freshDecision.reserveBytes -or
+            $beforeMemory.commitLimitMB -ne $request.oldCommitLimitMB) {
+            throw 'Pagefile identity/configuration/boot/privilege/commit/free-space changed before writing; request refused.'
+        }
+        $stage='Write'; $result.writeAttempted=$true; $result.pendingReboot=$true
+        $properties = @{InitialSize=[uint32]$decision.newInitialSizeMB;MaximumSize=[uint32]$decision.newMaximumSizeMB}
+        if ($Dependencies.ContainsKey('WriteCim')) { & $Dependencies.WriteCim $freshDecision.target.instance $properties | Out-Null }
+        else {
+            if ($freshDecision.target.instance -isnot [Microsoft.Management.Infrastructure.CimInstance]) { throw 'Exact local CIM setting instance is required.' }
+            Set-CimInstance -InputObject $freshDecision.target.instance -Property $properties -OperationTimeoutSec 10 -Confirm:$false -ErrorAction Stop | Out-Null
+        }
+        $stage='Readback'
+        $after = Get-ArkuzoPagefileSnapshot -Dependencies $Dependencies
+        if (-not $after.available) { throw ('Persisted CIM readback failed: ' + $after.error.message) }
+        $expected = Get-ArkuzoPagefileConfigurationRecord $fresh
+        foreach ($file in $expected.settings) {
+            if ($file.name -ceq $decision.targetName) { $file.initialSizeMB=$properties.InitialSize; $file.maximumSizeMB=$properties.MaximumSize }
+        }
+        $actualText = Get-ArkuzoPagefileConfigurationRecord $after | ConvertTo-Json -Depth 8 -Compress
+        if (($expected | ConvertTo-Json -Depth 8 -Compress) -cne $actualText) { throw 'Persisted CIM configuration did not match the exact requested setting/identity.' }
+        $afterDrives = @($after.drives | Where-Object {$_.deviceId -ceq $freshDecision.drive.deviceId})
+        if ($afterDrives.Count -ne 1 -or $afterDrives[0].volumeSerial -cne $freshDecision.drive.volumeSerial -or
+            $afterDrives[0].fileSystem -cne $freshDecision.drive.fileSystem -or $afterDrives[0].sizeBytes -ne $freshDecision.drive.sizeBytes -or
+            $afterDrives[0].driveType -ne 3 -or -not (Test-ArkuzoPagefileNumber $afterDrives[0].freeBytes 0 $afterDrives[0].sizeBytes -Integer)) {
+            throw 'Persisted readback target volume identity/capacity is no longer exact.'
+        }
+        $result.changed=$true; $result.configurationPersisted=$true
+        $result.status='PendingReboot'; $result.reason='Growth is persisted for startup, not confirmed active. Recovery stays enabled; no reboot is initiated.'
+        $stage='RuntimeVerification'; $afterMemory = Read-ArkuzoPagefileSystemMemory $Dependencies
+        $active = @($after.usage | Where-Object {$_.name -ceq $decision.targetName})
+        if ($active.Count -eq 1 -and $active[0].temporary -is [bool] -and -not $active[0].temporary -and
+            (Test-ArkuzoPagefileNumber $active[0].allocatedMB 1 4294967295 -Integer) -and
+            $active[0].allocatedMB -ge $decision.newMaximumSizeMB -and $active[0].allocatedMB -gt $decision.oldAllocatedMB -and
+            $afterMemory.commitLimitMB -gt $beforeMemory.commitLimitMB) {
+            $result.status='Active'; $result.reason='Fresh runtime pagefile allocation and OS commit limit both increased. Recovery remains enabled.'
+            $result.runtimeGrowthVerified=$true; $result.pendingReboot=$false
+        }
+        $request.status=$result.status; $stage='JournalOutcome'
+        Save-ArkuzoPagefileJson $result.journalPath $journal
+        return $result
+    } catch {
+        $failure = $_.Exception
+        $result.status = switch ($stage) {
+            'PreWrite' {'RaceDetected'}; 'Write' {'WriteFailed'}; 'Readback' {'ReadbackFailed'}
+            'RuntimeVerification' {'RuntimeVerificationFailed'}; 'AuditBackup' {'AuditFailed'}; default {'JournalFailed'}
+        }
+        $result.reason='Pagefile request failed closed; configuration may require operator review if a write was attempted.'
+        $result.error=[pscustomobject]@{stage=$stage;type=$failure.GetType().FullName;message=$failure.Message;persistenceMessage=$null}
+        if ($reservationPersisted -and $stage -ne 'JournalOutcome') {
+            $request.status=$result.status; $request.error=$result.error
+            try { Save-ArkuzoPagefileJson $result.journalPath $journal }
+            catch { $result.status='JournalFailed'; $result.error.persistenceMessage=$_.Exception.Message }
+        }
+        return $result
+    } finally { if ($null -ne $lock) { $lock.Dispose() } }
+}
+
+function Get-ArkuzoVersionNumber {
+    param([string]$VersionString)
+    if ([string]::IsNullOrWhiteSpace($VersionString)) { return $null }
+    if ($VersionString -match '(?i)^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+        return [version]::new([int]$matches[1], [int]$matches[2], [int]$matches[3])
+    }
+    return $null
+}
+
+function Test-ArkuzoUpdateAvailable {
+    param(
+        [string]$CurrentVersion = $ArkuzoRuntimeVersion,
+        [string]$ApiUrl = 'https://api.github.com/repos/arkuzodev/arkuzo-memory-saver/releases/latest',
+        [scriptblock]$FetchDelegate = $null
+    )
+    $result = [pscustomobject]@{
+        checkedUtc = [datetime]::UtcNow.ToString('o')
+        available = $false
+        currentVersion = $CurrentVersion
+        latestVersion = $null
+        message = $null
+        error = $null
+    }
+    try {
+        $raw = $null
+        if ($null -ne $FetchDelegate) {
+            $raw = & $FetchDelegate
+        } else {
+            $req = [System.Net.HttpWebRequest]::Create($ApiUrl)
+            $req.UserAgent = 'ArkuzoMemorySaver-Watchdog/' + $CurrentVersion
+            $req.Timeout = 8000
+            $req.ReadWriteTimeout = 8000
+            $resp = $req.GetResponse()
+            try {
+                $stream = $resp.GetResponseStream()
+                $reader = New-Object IO.StreamReader($stream, [Text.Encoding]::UTF8)
+                $raw = $reader.ReadToEnd()
+            } finally {
+                if ($null -ne $resp) { $resp.Dispose() }
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($raw)) { return $result }
+        $json = $raw | ConvertFrom-Json
+        if ($null -eq $json -or $null -eq $json.tag_name) { return $result }
+        if ($json.draft -or $json.prerelease) { return $result }
+
+        $remoteTag = [string]$json.tag_name
+        $remoteVer = Get-ArkuzoVersionNumber $remoteTag
+        $currVer = Get-ArkuzoVersionNumber $CurrentVersion
+
+        if ($null -ne $remoteVer -and $null -ne $currVer) {
+            if ($remoteVer -gt $currVer) {
+                $result.available = $true
+                $result.latestVersion = $remoteTag
+                $result.message = "UPDATE: $remoteTag available (restart to update)"
+            }
+        }
+    } catch {
+        $result.error = $_.Exception.Message
+    }
+    return $result
+}
+
+function Update-ArkuzoVersionCheck {
+    param(
+        [string]$CurrentVersion = $ArkuzoRuntimeVersion,
+        [scriptblock]$FetchDelegate = $null
+    )
+    try {
+        $res = Test-ArkuzoUpdateAvailable -CurrentVersion $CurrentVersion -FetchDelegate $FetchDelegate
+        $script:updateAvailableStatus = $res
+        Write-Diagnostic 'VERSION_CHECK' $res
+        if ($res.available) {
+            $script:dashboardIssues['update-available'] = @{
+                Message = $res.message
+                Time = $(if ($script:clock) { $script:clock.Elapsed.TotalSeconds } else { 0 })
+            }
+        }
+    } catch {
+        # Fail-soft, silent
+    }
+}
+
 # === END Arkuzo-Health.ps1 ===
 $configFilePath = Join-Path $DataDirectory 'config.json'
 $loadedConfig = Load-ArkuzoConfigFile -Path $configFilePath
@@ -1198,6 +1768,7 @@ if ($isConfigLocked) {
     }
 }
 $lastConfigText = [IO.File]::ReadAllText($configFilePath)
+$pagefilePolicy = Get-ArkuzoPagefilePolicy -Input $loadedConfig.pagefile -PressurePercent $healthPolicy.pressure_percent
 if ($HardLimit) { $SoftLimit = $false }
 if ($HardLimit -and $PSBoundParameters.ContainsKey('SoftLimit') -and $PSBoundParameters['SoftLimit']) {
     throw 'Use either -HardLimit or -SoftLimit, not both.'
@@ -1238,6 +1809,137 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 namespace Arkuzo {
  public static class MemorySaverNativeV1 {
+  const uint TOKEN_QUERY = 0x0008;
+  const uint SE_PRIVILEGE_ENABLED = 0x0002;
+  const int TokenPrivilegesClass = 3;
+  const int ERROR_INSUFFICIENT_BUFFER = 122;
+  [StructLayout(LayoutKind.Sequential)]
+  struct Luid { public uint LowPart; public int HighPart; }
+  [StructLayout(LayoutKind.Sequential)]
+  struct LuidAndAttributes { public Luid Luid; public uint Attributes; }
+  [StructLayout(LayoutKind.Sequential)]
+  struct TokenPrivileges { public uint Count; public LuidAndAttributes Privilege; }
+  sealed class SafeTokenHandle : Microsoft.Win32.SafeHandles.SafeHandleZeroOrMinusOneIsInvalid {
+   public SafeTokenHandle() : base(true) { }
+   protected override bool ReleaseHandle() { return CloseHandle(handle); }
+  }
+  public sealed class PrivilegeResult {
+   public string Name { get; private set; }
+   public string Status { get; private set; }
+   public bool Succeeded { get; private set; }
+   public bool? Present { get; private set; }
+   public bool Enabled { get; private set; }
+   public int Win32Error { get; private set; }
+   public string Operation { get; private set; }
+   public string Message { get; private set; }
+   public bool? AdjustmentReturnedSuccess { get; private set; }
+   internal PrivilegeResult(string name, string status, bool succeeded, bool? present, bool enabled,
+      int error, string operation, string message, bool? adjustmentReturnedSuccess = null) {
+    Name = name; Status = status; Succeeded = succeeded; Present = present; Enabled = enabled;
+    Win32Error = error; Operation = operation; Message = message; AdjustmentReturnedSuccess = adjustmentReturnedSuccess;
+   }
+  }
+  [DllImport("kernel32.dll")]
+  static extern IntPtr GetCurrentProcess();
+  [DllImport("kernel32.dll", SetLastError=true)]
+  static extern bool CloseHandle(IntPtr handle);
+  [DllImport("advapi32.dll", SetLastError=true)]
+  static extern bool OpenProcessToken(IntPtr process, uint access, out SafeTokenHandle token);
+  [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  static extern bool LookupPrivilegeValue(string system, string name, out Luid luid);
+  [DllImport("advapi32.dll", SetLastError=true)]
+  static extern bool GetTokenInformation(SafeTokenHandle token, int cls, IntPtr data, uint length, out uint needed);
+  static string DescribeFailure(string operation, int error, string guidance) {
+   if (error == 5)
+    guidance += " Access denied (ERROR_ACCESS_DENIED): check the handle's required access rights and verified target ownership. Protected-process and security protections still apply; no automatic elevation is attempted.";
+   return operation + " failed (Win32 " + error + ": " + new Win32Exception(error).Message + "). " + guidance;
+  }
+  static PrivilegeResult PrivilegeFailure(string name, string operation, int error, string guidance) {
+   return new PrivilegeResult(name, "Failed", false, null, false, error, operation, DescribeFailure(operation, error, guidance));
+  }
+  static PrivilegeResult QueryPrivilege(SafeTokenHandle token, string name, Luid luid) {
+   uint needed;
+   bool sized = GetTokenInformation(token, TokenPrivilegesClass, IntPtr.Zero, 0, out needed);
+   int error = Marshal.GetLastWin32Error();
+   if (!sized && error != ERROR_INSUFFICIENT_BUFFER)
+    return PrivilegeFailure(name, "GetTokenInformation", error, "Requires TOKEN_QUERY on the current process token.");
+   int offset = Marshal.OffsetOf(typeof(TokenPrivileges), "Privilege").ToInt32();
+   if (needed < offset || needed > int.MaxValue)
+    return PrivilegeFailure(name, "GetTokenInformation", 13, "Invalid TOKEN_PRIVILEGES buffer length returned.");
+   IntPtr data = Marshal.AllocHGlobal((int)needed);
+   try {
+    uint returned;
+    if (!GetTokenInformation(token, TokenPrivilegesClass, data, needed, out returned)) {
+     error = Marshal.GetLastWin32Error();
+     return PrivilegeFailure(name, "GetTokenInformation", error, "Requires TOKEN_QUERY on the current process token.");
+    }
+    uint count = unchecked((uint)Marshal.ReadInt32(data));
+    int stride = Marshal.SizeOf(typeof(LuidAndAttributes));
+    if (returned < offset || returned > needed || count > (returned - offset) / stride)
+     return PrivilegeFailure(name, "GetTokenInformation", 13, "Invalid TOKEN_PRIVILEGES entry count returned.");
+    for (uint i = 0; i < count; i++) {
+     IntPtr entry = IntPtr.Add(data, offset + checked((int)i * stride));
+     LuidAndAttributes privilege = (LuidAndAttributes)Marshal.PtrToStructure(entry, typeof(LuidAndAttributes));
+     if (privilege.Luid.LowPart == luid.LowPart && privilege.Luid.HighPart == luid.HighPart) {
+      bool enabled = (privilege.Attributes & SE_PRIVILEGE_ENABLED) != 0;
+      return new PrivilegeResult(name, enabled ? "Enabled" : "Disabled", true, true, enabled, 0,
+       "GetTokenInformation", name + (enabled ? " is enabled in the current process token." : " is present but disabled in the current process token."));
+     }
+    }
+    return new PrivilegeResult(name, "NotAssigned", true, false, false, 0, "GetTokenInformation",
+     name + " is absent or removed from the current process token. Enabling cannot add a missing privilege.");
+   } finally { Marshal.FreeHGlobal(data); }
+  }
+  const uint TOKEN_ADJUST_PRIVILEGES = 0x0020;
+  const int ERROR_NOT_ALL_ASSIGNED = 1300;
+  [DllImport("advapi32.dll", SetLastError=true)]
+  static extern bool AdjustTokenPrivileges(SafeTokenHandle token, bool disableAll, ref TokenPrivileges state,
+   uint length, IntPtr previous, IntPtr returned);
+  public static PrivilegeResult EnableCurrentProcessPrivilege(string name) {
+   Luid luid;
+   if (!LookupPrivilegeValue(null, name, out luid)) {
+    int error = Marshal.GetLastWin32Error();
+    return PrivilegeFailure(name, "LookupPrivilegeValue", error, "Use an existing Windows privilege name.");
+   }
+   SafeTokenHandle token;
+   bool opened = OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES, out token);
+   int openError = Marshal.GetLastWin32Error();
+   using (token) {
+    if (!opened) return PrivilegeFailure(name, "OpenProcessToken", openError,
+     "Best-effort enabling requires TOKEN_QUERY and TOKEN_ADJUST_PRIVILEGES on the current process token. No elevation is requested.");
+    TokenPrivileges state = new TokenPrivileges();
+    state.Count = 1; state.Privilege.Luid = luid; state.Privilege.Attributes = SE_PRIVILEGE_ENABLED;
+    bool adjusted = AdjustTokenPrivileges(token, false, ref state, 0, IntPtr.Zero, IntPtr.Zero);
+    // A nonzero BOOL can still mean ERROR_NOT_ALL_ASSIGNED. Capture before any other native call.
+    int adjustmentError = Marshal.GetLastWin32Error();
+    if (adjustmentError == ERROR_NOT_ALL_ASSIGNED)
+     return new PrivilegeResult(name, "NotAssigned", false, false, false, adjustmentError, "AdjustTokenPrivileges",
+      DescribeFailure("AdjustTokenPrivileges", adjustmentError, name + " is absent or removed from this token; enabling cannot add a missing privilege. Continuing best-effort without elevation."), adjusted);
+    if (!adjusted || adjustmentError != 0)
+     return new PrivilegeResult(name, "Failed", false, null, false, adjustmentError, "AdjustTokenPrivileges",
+      DescribeFailure("AdjustTokenPrivileges", adjustmentError, "Requires TOKEN_ADJUST_PRIVILEGES on the current process token; no elevation is requested."), adjusted);
+    PrivilegeResult verified = QueryPrivilege(token, name, luid);
+    if (!verified.Succeeded || !verified.Enabled)
+     return new PrivilegeResult(name, "Failed", false, verified.Present, false, verified.Win32Error, verified.Operation,
+      "AdjustTokenPrivileges returned success (Win32 0), but own-token readback did not verify " + name + " enabled. " + verified.Message, adjusted);
+    return new PrivilegeResult(name, "Enabled", true, true, true, 0, "AdjustTokenPrivileges",
+     name + " is enabled and verified in the current process token. Protected-process and security restrictions still apply.", adjusted);
+   }
+  }
+  public static PrivilegeResult QueryCurrentProcessPrivilege(string name) {
+   Luid luid;
+   if (!LookupPrivilegeValue(null, name, out luid)) {
+    int error = Marshal.GetLastWin32Error();
+    return PrivilegeFailure(name, "LookupPrivilegeValue", error, "Use an existing Windows privilege name.");
+   }
+   SafeTokenHandle token;
+   bool opened = OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, out token);
+   int openError = Marshal.GetLastWin32Error();
+   using (token) {
+    if (!opened) return PrivilegeFailure(name, "OpenProcessToken", openError, "Read-only query requires TOKEN_QUERY on the current process token.");
+    return QueryPrivilege(token, name, luid);
+   }
+  }
   [DllImport("kernel32.dll", SetLastError=true)]
   static extern bool SetProcessWorkingSetSizeEx(IntPtr h, UIntPtr min, UIntPtr max, uint flags);
   [DllImport("kernel32.dll", SetLastError=true)]
@@ -1248,26 +1950,54 @@ namespace Arkuzo {
   static extern bool GetProcessInformation(IntPtr h, int cls, out uint value, uint size);
   [DllImport("psapi.dll", SetLastError=true)]
   static extern bool EmptyWorkingSet(IntPtr h);
-  [DllImport("user32.dll")]
-  public static extern bool ShowWindowAsync(IntPtr h, int command);
-  [DllImport("user32.dll")]
-  public static extern bool IsIconic(IntPtr h);
-  static void Check(bool ok) { if (!ok) throw new Win32Exception(Marshal.GetLastWin32Error()); }
+  [DllImport("kernel32.dll", EntryPoint="SetLastError", SetLastError=true)]
+  static extern void ClearNativeLastError(uint error);
+  [DllImport("user32.dll", EntryPoint="ShowWindowAsync", SetLastError=true)]
+  static extern bool NativeShowWindowAsync(IntPtr h, int command);
+  [DllImport("user32.dll", EntryPoint="IsIconic", SetLastError=true)]
+  static extern bool NativeIsIconic(IntPtr h);
+  public static bool ShowWindowAsync(IntPtr h, int command) {
+   // User32 does not guarantee extended errors here; never reuse a previous token/process error.
+   ClearNativeLastError(0);
+   bool started = NativeShowWindowAsync(h, command);
+   int error = Marshal.GetLastWin32Error();
+   if (!started) {
+    if (error != 0) throw new Win32Exception(error, DescribeFailure("ShowWindowAsync", error, "Check the live HWND and its owning window thread. Request acceptance is not confirmation of the visible window state."));
+    throw new InvalidOperationException("ShowWindowAsync did not start the request (Win32 error not supplied). Check the live HWND and owning window thread; no successful state change is claimed.");
+   }
+   return started;
+  }
+  public static bool IsIconic(IntPtr h) {
+   ClearNativeLastError(0);
+   bool minimized = NativeIsIconic(h);
+   int error = Marshal.GetLastWin32Error();
+   if (!minimized && error != 0)
+    throw new Win32Exception(error, DescribeFailure("IsIconic", error, "Check the live HWND; it may have been destroyed. A non-minimized valid window normally returns false without an error."));
+   return minimized;
+  }
+  static void Check(bool ok, string operation, string guidance) {
+   if (!ok) {
+    int error = Marshal.GetLastWin32Error();
+    throw new Win32Exception(error, DescribeFailure(operation, error, guidance));
+   }
+  }
   public static ulong[] ReadLimits(IntPtr h) {
    UIntPtr min, max; uint flags;
-   Check(GetProcessWorkingSetSizeEx(h, out min, out max, out flags));
+   Check(GetProcessWorkingSetSizeEx(h, out min, out max, out flags), "GetProcessWorkingSetSizeEx", "Requires PROCESS_QUERY_INFORMATION or PROCESS_QUERY_LIMITED_INFORMATION on a live process handle.");
    return new ulong[] { min.ToUInt64(), max.ToUInt64(), flags };
   }
   public static void SetLimits(IntPtr h, ulong min, ulong max, uint flags) {
-   Check(SetProcessWorkingSetSizeEx(h, new UIntPtr(min), new UIntPtr(max), flags));
+   Check(SetProcessWorkingSetSizeEx(h, new UIntPtr(min), new UIntPtr(max), flags), "SetProcessWorkingSetSizeEx", "Requires PROCESS_SET_QUOTA; increasing a working-set bound can require SeIncreaseWorkingSetPrivilege. Hard working-set limits are opt-in, not a private-commit cap.");
   }
   public static uint ReadMemoryPriority(IntPtr h) {
-   uint value; Check(GetProcessInformation(h, 0, out value, 4)); return value;
+   uint value; Check(GetProcessInformation(h, 0, out value, 4), "GetProcessInformation", "Requires PROCESS_QUERY_LIMITED_INFORMATION on a live process handle."); return value;
   }
   public static void SetMemoryPriority(IntPtr h, uint value) {
-   Check(SetProcessInformation(h, 0, ref value, 4));
+   Check(SetProcessInformation(h, 0, ref value, 4), "SetProcessInformation", "Requires PROCESS_SET_INFORMATION on a live process handle.");
   }
-  public static void Trim(IntPtr h) { Check(EmptyWorkingSet(h)); }
+  public static void Trim(IntPtr h) {
+   Check(EmptyWorkingSet(h), "EmptyWorkingSet", "Requires PROCESS_SET_QUOTA and PROCESS_QUERY_INFORMATION or PROCESS_QUERY_LIMITED_INFORMATION. Trimming does not reduce private commit and can cause page faults.");
+  }
   public static IntPtr Affinity(long allowed, int slot, int count) {
    int[] bits = new int[64]; int n = 0; ulong available = unchecked((ulong)allowed);
    for (int b=0; b<64; b++) if ((available & (1UL << b)) != 0) bits[n++] = b;
@@ -1282,58 +2012,138 @@ namespace Arkuzo {
 }
 
 # Only optional local graphics flags; merge rather than erase other settings.
-if ($ApplyGraphicsFlags -and -not $MonitorOnly) {
-    $searchRoots = @(
-        (Join-Path $env:LOCALAPPDATA 'Roblox/Versions'),
-        'C:/ProgramData/roblox/roblox',
-        (Join-Path $env:ProgramData 'roblox/roblox'),
-        (Join-Path ${env:ProgramFiles(x86)} 'Roblox/Versions'),
-        (Join-Path $env:ProgramFiles 'Roblox/Versions')
-    )
-    foreach ($proc in @(Get-Process -Name RobloxPlayerBeta -ErrorAction SilentlyContinue)) {
+function Get-ArkuzoGraphicsInstallDirectories {
+    [CmdletBinding()]
+    param([string[]]$SearchRoots=@(), [string[]]$ProcessImagePaths=@())
+    $candidates = New-Object 'Collections.Generic.List[string]'
+    foreach ($imagePath in $ProcessImagePaths) {
+        if ([string]::IsNullOrWhiteSpace($imagePath)) { continue }
         try {
-            if ($proc.Path) {
-                $procDir = Split-Path -Parent $proc.Path
-                if ($procDir -and -not ($searchRoots -contains $procDir)) { $searchRoots += $procDir }
+            if ([IO.Path]::GetFileName($imagePath) -ieq 'RobloxPlayerBeta.exe') {
+                [void]$candidates.Add([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($imagePath)))
             }
-        } catch {}
+        } catch { continue }
     }
-    $targetDirs = @()
-    foreach ($root in $searchRoots) {
-        if (-not $root -or -not (Test-Path -LiteralPath $root)) { continue }
-        if (Test-Path -LiteralPath (Join-Path $root 'RobloxPlayerBeta.exe')) {
-            $targetDirs += $root
+    foreach ($root in $SearchRoots) {
+        if ([string]::IsNullOrWhiteSpace($root)) { continue }
+        try {
+            if (-not [IO.Directory]::Exists($root)) { continue }
+            [void]$candidates.Add([IO.Path]::GetFullPath($root))
+            foreach ($child in @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction Stop)) {
+                [void]$candidates.Add($child.FullName)
+            }
+        } catch { continue }
+    }
+    $directories = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($candidate in $candidates) {
+        if ([IO.File]::Exists([IO.Path]::Combine($candidate, 'RobloxPlayerBeta.exe'))) { [void]$directories.Add($candidate) }
+    }
+    return @($directories | Sort-Object)
+}
+function Merge-ArkuzoGraphicsFlags {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][string]$SettingsFile)
+    $SettingsFile = [IO.Path]::GetFullPath($SettingsFile)
+    $encoding = New-Object Text.UTF8Encoding($false, $true)
+    $settings = [ordered]@{}
+    $originalBytes = $null
+    $existed = [IO.File]::Exists($SettingsFile)
+    if ($existed) {
+        try {
+            $originalBytes = [IO.File]::ReadAllBytes($SettingsFile)
+            $text = $encoding.GetString($originalBytes).TrimStart([char]0xFEFF)
+            # ConvertFrom-Json unwraps a one-element array in PS 5.1; check the root token too.
+            if ([string]::IsNullOrWhiteSpace($text) -or -not $text.TrimStart().StartsWith('{')) { throw 'Not an object' }
+            $parsed = $text | ConvertFrom-Json -ErrorAction Stop
+            if ($null -eq $parsed -or $parsed -isnot [pscustomobject]) { throw 'Not an object' }
+        } catch { throw 'ClientAppSettings.json must contain a valid UTF-8 JSON object and be readable. File left unchanged.' }
+        foreach ($property in $parsed.PSObject.Properties) { $settings[$property.Name] = $property.Value }
+    }
+    $settings['DFFlagTextureQualityOverrideEnabled'] = 'True'
+    $settings['DFIntTextureQualityOverride'] = '0'
+    $settings['FIntDebugForceMSAASamples'] = '1'
+    $settings['DFIntTaskSchedulerTargetFps'] = [int]15
+    $json = $settings | ConvertTo-Json -Depth 100 -ErrorAction Stop
+    $directory = [IO.Path]::GetDirectoryName($SettingsFile)
+    [void][IO.Directory]::CreateDirectory($directory)
+    $uniqueTag = [guid]::NewGuid().ToString('N')
+    $temporaryFile = $SettingsFile + '.arkuzo-' + $uniqueTag + '.tmp'
+    $backupPath = $null
+    $stream = $null
+    try {
+        $stream = New-Object IO.FileStream($temporaryFile, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $bytes = $encoding.GetBytes($json)
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
+        $stream.Dispose(); $stream = $null
+        if ($existed) {
+            # Refuse an observed concurrent edit instead of clobbering newly added user settings.
+            if (-not [IO.File]::Exists($SettingsFile) -or
+                [Convert]::ToBase64String([IO.File]::ReadAllBytes($SettingsFile)) -cne [Convert]::ToBase64String($originalBytes)) {
+                throw 'ClientAppSettings.json changed during the merge. No replacement performed.'
+            }
+            $backupPath = $SettingsFile + '.arkuzo-' + $uniqueTag + '.bak'
+            # Same-directory atomic replacement creates an exact-byte backup. Never fall back to truncation.
+            [IO.File]::Replace($temporaryFile, $SettingsFile, $backupPath)
         } else {
-            $sub = @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
-                Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'RobloxPlayerBeta.exe') } |
-                ForEach-Object { $_.FullName })
-            $targetDirs += $sub
+            # Move refuses to overwrite a file created by another writer after discovery.
+            [IO.File]::Move($temporaryFile, $SettingsFile)
         }
+    } finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+        if ([IO.File]::Exists($temporaryFile)) { [IO.File]::Delete($temporaryFile) }
     }
-    $targetDirs = @($targetDirs | Select-Object -Unique)
-    if ($targetDirs.Count -gt 0) {
-        foreach ($vDir in $targetDirs) {
-            $settingsDir = Join-Path $vDir 'ClientSettings'
-            $settingsFile = Join-Path $settingsDir 'ClientAppSettings.json'
-            $settings = @{}
-            if (Test-Path -LiteralPath $settingsFile) {
-                try {
-                    $parsed = Get-Content -LiteralPath $settingsFile -Raw | ConvertFrom-Json
-                    if ($null -ne $parsed -and $parsed -is [pscustomobject]) {
-                        foreach ($property in $parsed.PSObject.Properties) { $settings[$property.Name] = $property.Value }
-                        Copy-Item -LiteralPath $settingsFile -Destination ($settingsFile + '.arkuzo-' + [guid]::NewGuid().ToString('N') + '.bak')
-                    }
-                } catch { throw 'ClientAppSettings.json must contain a JSON object. File left unchanged.' }
-            }
-            $settings['DFFlagTextureQualityOverrideEnabled'] = 'True'
-            $settings['DFIntTextureQualityOverride'] = '0'
-            $settings['FIntDebugForceMSAASamples'] = '1'
-            New-Item -Path $settingsDir -ItemType Directory -Force | Out-Null
-            $json = $settings | ConvertTo-Json -Depth 100
-            [IO.File]::WriteAllText($settingsFile, $json, (New-Object Text.UTF8Encoding($false)))
+    return [pscustomobject]@{ SettingsFile=$SettingsFile; BackupPath=$backupPath; Changed=$true; RequestedFps=15; FpsStatus='REQUESTED_ONLY' }
+}
+function Invoke-ArkuzoGraphicsSettings {
+    [CmdletBinding()]
+    param([string[]]$InstallDirectories=@(), [switch]$ApplyGraphicsFlags, [switch]$MonitorOnly)
+    if ($MonitorOnly) { return [pscustomobject]@{ Status='SKIPPED_MONITOR_ONLY'; Files=@(); Message='Graphics settings skipped: monitor-only.' } }
+    if (-not $ApplyGraphicsFlags) { return [pscustomobject]@{ Status='SKIPPED_DISABLED'; Files=@(); Message='Graphics settings disabled.' } }
+    if ($InstallDirectories.Count -eq 0) {
+        return [pscustomobject]@{ Status='SKIPPED_NO_INSTALLATIONS'; Files=@(); Message='Roblox installation not found; graphics settings skipped.' }
+    }
+    $files = @()
+    foreach ($directory in @($InstallDirectories | Select-Object -Unique)) {
+        if ([string]::IsNullOrWhiteSpace($directory) -or -not [IO.File]::Exists([IO.Path]::Combine($directory, 'RobloxPlayerBeta.exe'))) {
+            throw 'Roblox Player installation changed or is unavailable; graphics settings refused.'
         }
-        Write-Host 'Low texture quality/MSAA settings merged. Restart Roblox to apply.'
-    } else { Write-Warning 'Roblox installation not found; graphics settings skipped.' }
+        $settingsFile = Join-Path (Join-Path $directory 'ClientSettings') 'ClientAppSettings.json'
+        $files += Merge-ArkuzoGraphicsFlags -SettingsFile $settingsFile
+    }
+    return [pscustomobject]@{
+        Status='REQUESTED'; Files=@($files)
+        Message='Graphics flags REQUESTED (texture quality 0 / MSAA 1 / 15 FPS). DFIntTaskSchedulerTargetFps is not on the Roblox Player allowlist and is ignored there; actual FPS and rendering are not verified. Restart compatible clients to read requested settings.'
+    }
+}
+function Initialize-ArkuzoGraphicsSettings {
+    if ($MonitorOnly -or -not $ownsControllerMutex -or -not $ApplyGraphicsFlags) { return }
+    try {
+    $graphicsRoots = @()
+    foreach ($graphicsBase in @($env:LOCALAPPDATA, $env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if ([string]::IsNullOrWhiteSpace($graphicsBase)) { continue }
+        $graphicsRoots += Join-Path $graphicsBase 'Roblox/Versions'
+        $graphicsRoots += Join-Path $graphicsBase 'Roblox'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:ProgramData)) {
+        $graphicsRoots += Join-Path $env:ProgramData 'roblox/roblox'
+        $graphicsRoots += Join-Path $env:ProgramData 'Roblox/Versions'
+    }
+    $graphicsImagePaths = @()
+    foreach ($graphicsProcess in @(Get-Process -Name RobloxPlayerBeta -ErrorAction SilentlyContinue)) {
+        try { if ($graphicsProcess.Path) { $graphicsImagePaths += $graphicsProcess.Path } }
+        catch {} finally { $graphicsProcess.Dispose() }
+    }
+    $graphicsDirectories = @(Get-ArkuzoGraphicsInstallDirectories -SearchRoots $graphicsRoots -ProcessImagePaths $graphicsImagePaths)
+    $graphicsReport = Invoke-ArkuzoGraphicsSettings -InstallDirectories $graphicsDirectories -ApplyGraphicsFlags:$ApplyGraphicsFlags -MonitorOnly:$MonitorOnly
+    $script:graphicsStatus=$graphicsReport
+    Write-Diagnostic 'GRAPHICS_STATUS' $graphicsReport
+    if ($graphicsReport.Status -cne 'REQUESTED') { Warn-Throttled 'graphics-settings' $graphicsReport.Message }
+    } catch {
+        $script:graphicsStatus=[pscustomobject]@{Status='FAILED';Files=@();Message=('Graphics settings failed: '+$_.Exception.Message)}
+        Write-Diagnostic 'GRAPHICS_STATUS' $script:graphicsStatus
+        Warn-Throttled 'graphics-settings' $script:graphicsStatus.Message
+    }
 }
 
 $tracked = @{}
@@ -1358,6 +2168,11 @@ $nextLogSample = 0.0
 $nextEventCheck = 0.0
 $seenEventIds = @{}
 $systemMemory = $null
+$pagefileStatus = $null
+$nextPagefileCheck = 0.0
+$updateAvailableStatus = $null
+$nextUpdateCheck = 15.0
+$updateCheckInterval = 1800.0
 $nextHealthSample = 0.0
 $nextVoltCheck = 0.0
 $voltStatus = [pscustomobject]@{ safeToRecycle = $false; reason = 'Not checked' }
@@ -1416,6 +2231,71 @@ function Record-ClientExit([int]$ClientId, $State, [string]$Reason = 'No longer 
         note = 'An exit alone does not prove a crash; correlate with Windows events.'
     }
 }
+# Pure crash-handler authorization; snapshots contain no process operations.
+function Test-ArkuzoCrashHandlerIdentity($Snapshot, [string[]]$TrustedRoots) {
+    try {
+        if ($null -eq $Snapshot -or $Snapshot.Id -isnot [int] -or $Snapshot.Id -le 0 -or
+            $Snapshot.StartTicks -isnot [long] -or $Snapshot.StartTicks -le 0 -or
+            $Snapshot.Handle -isnot [IntPtr] -or $Snapshot.Handle -eq [IntPtr]::Zero -or
+            $Snapshot.HasExited -isnot [bool] -or $Snapshot.HasExited -or
+            $Snapshot.ProcessName -ne 'RobloxCrashHandler' -or $Snapshot.CimName -ne 'RobloxCrashHandler.exe' -or
+            $Snapshot.CimId -ne $Snapshot.Id -or $Snapshot.SignatureStatus -cne 'Valid' -or
+            $Snapshot.SignerSubject -notmatch '(?i)(?:^|,\s*)O=(?:"Roblox Corporation"|Roblox Corporation)(?:,|$)') { return $false }
+        $paths = @($Snapshot.Path, $Snapshot.CimPath, $Snapshot.SignaturePath)
+        foreach ($path in $paths) {
+            if ([string]::IsNullOrWhiteSpace($path) -or $path -notmatch '\A(?:[A-Za-z]:[\\/]|\\\\)') { return $false }
+        }
+        $imagePath = [IO.Path]::GetFullPath($Snapshot.Path)
+        if ([IO.Path]::GetFileName($imagePath) -ne 'RobloxCrashHandler.exe' -or
+            -not [string]::Equals($imagePath, [IO.Path]::GetFullPath($Snapshot.CimPath), [StringComparison]::OrdinalIgnoreCase) -or
+            -not [string]::Equals($imagePath, [IO.Path]::GetFullPath($Snapshot.SignaturePath), [StringComparison]::OrdinalIgnoreCase)) { return $false }
+        foreach ($root in $TrustedRoots) {
+            if ([string]::IsNullOrWhiteSpace($root) -or $root -notmatch '\A(?:[A-Za-z]:[\\/]|\\\\)') { continue }
+            $prefix = [IO.Path]::GetFullPath($root).TrimEnd([char[]]'\/') + [IO.Path]::DirectorySeparatorChar
+            if ($imagePath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+        }
+        return $false
+    } catch { return $false }
+}
+function Get-ArkuzoOrphanHandlerDecision($Handler, $Parent, [datetime]$NowUtc, $Monitor, $OwnsMutex, [string[]]$TrustedRoots, $Expected) {
+    $reason = 'ReadOnly'; $close = $false
+    try {
+        if ($Monitor -is [bool] -and -not $Monitor -and $OwnsMutex -is [bool] -and $OwnsMutex) {
+            $reason = 'IdentityUnverified'
+            if ((Test-ArkuzoCrashHandlerIdentity $Handler $TrustedRoots) -and $null -ne $Expected -and
+                $Handler.Id -eq $Expected.Id -and $Handler.StartTicks -eq $Expected.StartTicks -and $Handler.Handle -eq $Expected.Handle -and
+                [string]::Equals([string]$Handler.Path, [string]$Expected.Path, [StringComparison]::OrdinalIgnoreCase) -and
+                $Handler.ParentId -is [int] -and $Handler.ParentId -gt 0 -and $Handler.ParentId -ne $Handler.Id -and
+                ($null -eq $Expected.ParentId -or $Handler.ParentId -eq $Expected.ParentId)) {
+                $reason = 'YoungHandler'
+                if (($NowUtc.ToUniversalTime().Ticks - $Handler.StartTicks) -gt [TimeSpan]::FromSeconds(60).Ticks) {
+                    $reason = 'ParentUnverified'
+                    if ($null -ne $Parent -and $Parent.QuerySucceeded -is [bool] -and $Parent.QuerySucceeded -and
+                        $Parent.Id -eq $Handler.ParentId -and $Parent.Count -is [int]) {
+                        if ($Parent.Count -eq 0 -and $Parent.AbsenceConfirmed -is [bool] -and $Parent.AbsenceConfirmed) { $close = $true; $reason = 'ParentAbsent' }
+                        elseif ($Parent.Count -eq 1 -and $Parent.HasExited -is [bool] -and -not $Parent.HasExited -and
+                            $Parent.Handle -is [IntPtr] -and $Parent.Handle -ne [IntPtr]::Zero -and
+                            $Parent.CimId -eq $Parent.Id -and $Parent.StartTicks -is [long] -and $Parent.StartTicks -gt 0 -and
+                            $Parent.CimStartTicks -is [long] -and $Parent.CimStartTicks -gt 0 -and
+                            ($Parent.StartTicks - $Parent.CimStartTicks) -ge 0 -and ($Parent.StartTicks - $Parent.CimStartTicks) -lt 10) {
+                            # WMI timestamps have microsecond precision; retain/recheck the exact .NET generation too.
+                            $close = $Parent.StartTicks -gt $Handler.StartTicks
+                            $reason = if ($close) { 'ParentPidReused' } else { 'HealthyParent' }
+                        }
+                    }
+                }
+            }
+        }
+    } catch { $close = $false; $reason = 'ObservationInvalid' }
+    return [pscustomobject]@{ Close = $close; Reason = $reason }
+}
+function Test-ArkuzoOrphanHandlerExit($Expected, $Readback) {
+    return ($null -ne $Expected -and $null -ne $Readback -and
+        $Expected.Id -is [int] -and $Expected.Id -gt 0 -and $Expected.StartTicks -is [long] -and $Expected.StartTicks -gt 0 -and
+        $Expected.Handle -is [IntPtr] -and $Expected.Handle -ne [IntPtr]::Zero -and
+        $Readback.Id -eq $Expected.Id -and $Readback.StartTicks -eq $Expected.StartTicks -and $Readback.Handle -eq $Expected.Handle -and
+        $Readback.WaitConfirmed -is [bool] -and $Readback.WaitConfirmed -and $Readback.HasExited -is [bool] -and $Readback.HasExited)
+}
 function Read-CrashEvents {
     try {
         $systemEvents = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; Id = @(2004); StartTime = (Get-Date).AddSeconds(-90) } -ErrorAction Stop)
@@ -1453,7 +2333,7 @@ function Read-CrashEvents {
     }
 }
 Write-Diagnostic 'SESSION_START' @{
-    version = '1.0.1'; health = $healthPolicy; recovery = $restorePolicy
+    version = $ArkuzoRuntimeVersion; health = $healthPolicy; recovery = $restorePolicy; pagefile = $pagefilePolicy
     mode = $Mode; advisoryMB = $MaxRamMB; softLimit = [bool]$SoftLimit
     trimming = [bool]$EnableTrimming; trimSeconds = $TrimEverySec; priority = $Priority
     logicalCpuPerClient = $CoresPerInstance; monitorOnly = [bool]$MonitorOnly
@@ -1466,6 +2346,48 @@ function Warn-Throttled([string]$Key, [string]$Message) {
         $dashboardIssues[$Key] = @{ Message = $Message; Time = $clock.Elapsed.TotalSeconds }
         $warnings[$Key] = $clock.Elapsed.TotalSeconds
         Write-Diagnostic 'WARNING' @{ key = $Key; message = $Message }
+    }
+}
+
+function Initialize-ArkuzoNativePrivileges {
+    $status = [pscustomobject][ordered]@{
+        attempted = $false; available = $null; reason = 'ControllerMutexNotOwned'; privileges = @()
+        note = 'Only privileges already assigned to the current process token can be enabled. No elevation is requested; target protections still apply. Hard working-set limits remain opt-in.'
+    }
+    if ($MonitorOnly) { $status.reason = 'MonitorOnly' }
+    elseif ($ownsControllerMutex) {
+        $status.attempted = $true; $status.reason = 'Completed'
+        foreach ($name in @('SeDebugPrivilege', 'SeIncreaseWorkingSetPrivilege')) {
+            try { $status.privileges += [Arkuzo.MemorySaverNativeV1]::EnableCurrentProcessPrivilege($name) }
+            catch {
+                # Unexpected managed/PInvoke failures must also remain visible and best-effort.
+                $failure = $_.Exception
+                while ($null -ne $failure.InnerException) { $failure = $failure.InnerException }
+                $code = $null; $message = $failure.Message
+                if ($failure -is [ComponentModel.Win32Exception]) {
+                    $code = $failure.NativeErrorCode
+                    $message = 'Win32 ' + $code + ': ' + $message
+                }
+                $status.privileges += [pscustomobject]@{
+                    Name=$name; Status='Failed'; Succeeded=$false; Present=$null; Enabled=$false
+                    Win32Error=$code; Operation='EnableCurrentProcessPrivilege'; Message=$message; AdjustmentReturnedSuccess=$null
+                }
+            }
+        }
+        $status.available = @($status.privileges | Where-Object { -not $_.Succeeded -or -not $_.Enabled }).Count -eq 0
+    }
+    $script:nativePrivilegeInitialization = $status
+    Write-ArkuzoNativePrivilegeStatus $status
+    return $status
+}
+
+function Write-ArkuzoNativePrivilegeStatus($Status) {
+    Write-Diagnostic 'NATIVE_PRIVILEGES' $Status
+    if (-not $Status.attempted) { return }
+    foreach ($privilege in @($Status.privileges)) {
+        if (-not $privilege.Succeeded -or -not $privilege.Enabled) {
+            Warn-Throttled ('native-privilege-' + $privilege.Name) ($privilege.Name + ' unavailable: ' + $privilege.Message + ' Native operations remain best-effort; process protections still apply.')
+        }
     }
 }
 
@@ -1822,6 +2744,8 @@ try {
         $controllerMutex = New-Object Threading.Mutex($false, 'Local\ArkuzoSaver-ProcessController')
         try { $ownsControllerMutex = $controllerMutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $ownsControllerMutex = $true }
         if (-not $ownsControllerMutex) { throw 'Another ArkuzoSaver controller is already running.' }
+        Initialize-ArkuzoNativePrivileges | Out-Null
+        Initialize-ArkuzoGraphicsSettings
         Initialize-ArkuzoRecoveryJournal
     }
     while ($true) {
@@ -1835,9 +2759,28 @@ try {
             try { $systemMemory = Get-ArkuzoSystemMemory } catch { $systemMemory = $null; Warn-Throttled 'memory-query' 'OS commit telemetry unavailable.' }
             $nextHealthSample = $clock.Elapsed.TotalSeconds + 5
         }
+        if ($clock.Elapsed.TotalSeconds -ge $nextPagefileCheck) {
+            Update-ArkuzoPagefileStatus
+            # Reobserve after potentially slow CIM work or changed commit capacity.
+            # No pagefile result suppresses ordinary recovery.
+            if ($pagefilePolicy.enabled) {
+                try { $systemMemory = Get-ArkuzoSystemMemory } catch { $systemMemory=$null; Warn-Throttled 'memory-query' 'OS commit telemetry unavailable after pagefile observation.' }
+            }
+            $nextPagefileCheck = $clock.Elapsed.TotalSeconds + 30
+        }
         if ($clock.Elapsed.TotalSeconds -ge $nextVoltCheck) {
             Update-VoltRecoveryCapability
             $nextVoltCheck = $clock.Elapsed.TotalSeconds + 15
+        }
+        if ($clock.Elapsed.TotalSeconds -ge $nextUpdateCheck) {
+            Update-ArkuzoVersionCheck
+            $nextUpdateCheck = $clock.Elapsed.TotalSeconds + $updateCheckInterval
+        }
+        if ($null -ne $script:updateAvailableStatus -and $script:updateAvailableStatus.available) {
+            $dashboardIssues['update-available'] = @{
+                Message = $script:updateAvailableStatus.message
+                Time = $clock.Elapsed.TotalSeconds
+            }
         }
         $clients = @(Get-Process -Name RobloxPlayerBeta -ErrorAction SilentlyContinue)
         $liveIds = @($clients | ForEach-Object { $_.Id })
@@ -2051,22 +2994,120 @@ try {
         if ($clock.Elapsed.TotalSeconds -ge $nextEventCheck) {
             Read-CrashEvents
             try {
-                $nowUtc = [DateTime]::UtcNow
-                if (-not $MonitorOnly) {
-                    foreach ($ch in @(Get-Process -Name 'RobloxCrashHandler' -ErrorAction SilentlyContinue)) {
+                # WerFault is Windows-wide crash reporting and is deliberately never enumerated or modified.
+                if (-not $MonitorOnly -and $ownsControllerMutex -and -not $logFailed) {
+                    $trustedHandlerRoots = @()
+                    foreach ($base in @(
+                        @{Path=$env:LOCALAPPDATA;Child='Roblox/Versions'},
+                        @{Path=$env:ProgramData;Child='Roblox/Roblox'},
+                        @{Path=$env:ProgramFiles;Child='Roblox/Versions'},
+                        @{Path=${env:ProgramFiles(x86)};Child='Roblox/Versions'}
+                    )) {
+                        if (-not [string]::IsNullOrWhiteSpace($base.Path)) { $trustedHandlerRoots += Join-Path $base.Path $base.Child }
+                    }
+                    foreach ($listedHandler in @(Get-CimInstance Win32_Process -Filter "Name='RobloxCrashHandler.exe'" -Property ProcessId -ErrorAction Stop)) {
+                        $ch = $null; $owner = $null; $handlerId = $null; $phase = 'OpenHandle'
                         try {
-                            $record = Get-CimInstance Win32_Process -Filter ("ProcessId=" + $ch.Id) -ErrorAction Stop
-                            $parentId = [int]$record.ParentProcessId
-                            $owner = Get-Process -Id $parentId -ErrorAction SilentlyContinue
-                            $orphan = ($null -eq $owner -or $owner.StartTime.ToUniversalTime() -gt $ch.StartTime.ToUniversalTime())
-                            if ($orphan -and ($nowUtc - $ch.StartTime.ToUniversalTime()).TotalSeconds -gt 60) {
-                                $ch.Kill(); Write-Diagnostic 'ORPHAN_CRASH_HANDLER_CLOSED' @{pid=$ch.Id}
+                            $handlerId = [int]$listedHandler.ProcessId
+                            if ($handlerId -le 0) { throw 'Crash handler PID unavailable' }
+                            $ch = Get-Process -Id $handlerId -ErrorAction Stop
+                            if ($null -eq $ch) { throw 'Crash handler no longer available' }
+                            $handle = $ch.Handle # Retain the exact process, never terminate by PID/name.
+                            $ch.Refresh()
+                            $handlerId = [int]$ch.Id
+                            $expected = @{Id=$handlerId;StartTicks=$ch.StartTime.ToUniversalTime().Ticks;Path=$ch.Path;Handle=$handle;ParentId=$null}
+                            $decision = $null
+                            foreach ($verification in 1..2) {
+                                if ($null -ne $owner) { $owner.Dispose(); $owner = $null }
+                                $phase = 'IdentityAndParentVerification'
+                                $records = @(Get-CimInstance Win32_Process -Filter ("ProcessId=" + $handlerId) -Property ProcessId,Name,ExecutablePath,ParentProcessId -ErrorAction Stop)
+                                if ($records.Count -ne 1) { throw 'Crash handler metadata unavailable/ambiguous' }
+                                $record = $records[0]
+                                $signature = Get-AuthenticodeSignature -LiteralPath $expected.Path -ErrorAction Stop
+                                $ch.Refresh()
+                                $handler = @{
+                                    Id=[int]$ch.Id;StartTicks=$ch.StartTime.ToUniversalTime().Ticks;Handle=$ch.Handle;HasExited=$ch.HasExited
+                                    ProcessName=$ch.ProcessName;Path=$ch.Path;CimId=$record.ProcessId;CimName=$record.Name;CimPath=$record.ExecutablePath
+                                    SignatureStatus=[string]$signature.Status;SignerSubject=$signature.SignerCertificate.Subject;SignaturePath=$signature.Path
+                                    ParentId=[int]$record.ParentProcessId
+                                }
+                                if (-not (Test-ArkuzoCrashHandlerIdentity $handler $trustedHandlerRoots)) { throw 'Crash handler executable identity/path unverified' }
+                                $parentId = $handler.ParentId
+                                if ($parentId -le 0 -or $parentId -eq $handlerId) { throw 'Crash handler parent identity unavailable' }
+                                # Only a successful, empty CIM query proves absence. Access errors are unknown.
+                                $parents = @(Get-CimInstance Win32_Process -Filter ("ProcessId=" + $parentId) -Property ProcessId,CreationDate -ErrorAction Stop)
+                                $parent = @{QuerySucceeded=$true;Count=$parents.Count;Id=$parentId}
+                                if ($parents.Count -eq 0) {
+                                    # A missing WMI row alone cannot hide a live/inaccessible parent.
+                                    $parent.AbsenceConfirmed = $false
+                                    try {
+                                        $owner = Get-Process -Id $parentId -ErrorAction Stop
+                                        throw 'Parent absence contradicted/unconfirmed by process lookup'
+                                    } catch {
+                                        if ($_.FullyQualifiedErrorId -notlike 'NoProcessFoundForGivenId*') { throw }
+                                        $parent.AbsenceConfirmed = $true
+                                    }
+                                }
+                                if ($parents.Count -eq 1) {
+                                    if ($parents[0].CreationDate -isnot [datetime]) { throw 'Crash handler parent creation time unavailable' }
+                                    $owner = Get-Process -Id $parentId -ErrorAction Stop
+                                    if ($null -eq $owner) { throw 'Crash handler parent could not be inspected' }
+                                    $parent.Handle = $owner.Handle
+                                    $owner.Refresh()
+                                    $parent.Id = [int]$owner.Id; $parent.HasExited = $owner.HasExited
+                                    $parent.StartTicks = $owner.StartTime.ToUniversalTime().Ticks
+                                    $parent.CimId = $parents[0].ProcessId; $parent.CimStartTicks = $parents[0].CreationDate.ToUniversalTime().Ticks
+                                }
+                                $ch.Refresh()
+                                $handler.Id = [int]$ch.Id; $handler.StartTicks = $ch.StartTime.ToUniversalTime().Ticks; $handler.HasExited = $ch.HasExited
+                                $decision = Get-ArkuzoOrphanHandlerDecision $handler $parent ([datetime]::UtcNow) ([bool]$MonitorOnly) $ownsControllerMutex $trustedHandlerRoots $expected
+                                if (-not $decision.Close) {
+                                    if ($decision.Reason -in @('IdentityUnverified','ParentUnverified','ObservationInvalid')) { throw ('Crash handler cleanup refused: ' + $decision.Reason) }
+                                    break
+                                }
+                                $expected.ParentId = $handler.ParentId
+                                if ($verification -eq 1) {
+                                    Write-Diagnostic 'ORPHAN_CRASH_HANDLER_CLOSE_REQUESTED' @{pid=$handlerId;startTicks=$expected.StartTicks;parentId=$parentId;reason=$decision.Reason}
+                                    if ($logFailed) { throw 'Crash handler cleanup requires functioning audit logging' }
+                                }
                             }
-                            if ($owner) { $owner.Dispose() }
-                        } finally { $ch.Dispose() }
+                            if ($null -eq $decision -or -not $decision.Close) { continue }
+                            $phase = 'FinalIdentityVerification'
+                            if ($null -ne $owner) {
+                                $owner.Refresh()
+                                $parent.Id = [int]$owner.Id; $parent.StartTicks = $owner.StartTime.ToUniversalTime().Ticks; $parent.HasExited = $owner.HasExited
+                            }
+                            $ch.Refresh()
+                            $handler.Id = [int]$ch.Id; $handler.StartTicks = $ch.StartTime.ToUniversalTime().Ticks
+                            $handler.Handle = $ch.Handle; $handler.HasExited = $ch.HasExited; $handler.ProcessName = $ch.ProcessName; $handler.Path = $ch.Path
+                            # No logging/CIM IO between this generation/authority recheck and closure.
+                            $decision = Get-ArkuzoOrphanHandlerDecision $handler $parent ([datetime]::UtcNow) ([bool]$MonitorOnly) $ownsControllerMutex $trustedHandlerRoots $expected
+                            if (-not $decision.Close) { throw ('Crash handler cleanup refused: ' + $decision.Reason) }
+                            if ($logFailed) { throw 'Crash handler cleanup requires functioning audit logging' }
+                            $phase = 'CloseAndReadback'
+                            $ch.Kill()
+                            $waitConfirmed = $ch.WaitForExit(2000)
+                            $ch.Refresh()
+                            $readback = @{Id=[int]$ch.Id;StartTicks=$ch.StartTime.ToUniversalTime().Ticks;Handle=$ch.Handle;HasExited=$ch.HasExited;WaitConfirmed=$waitConfirmed}
+                            if (-not (Test-ArkuzoOrphanHandlerExit $expected $readback)) { throw 'Crash handler exit not verified for the retained generation' }
+                            Write-Diagnostic 'ORPHAN_CRASH_HANDLER_CLOSED' @{pid=$handlerId;startTicks=$expected.StartTicks;parentId=$expected.ParentId;reason=$decision.Reason;exitVerified=$true}
+                        } catch {
+                            Write-Diagnostic 'ORPHAN_CRASH_HANDLER_ERROR' @{pid=$handlerId;phase=$phase;message=$_.Exception.Message}
+                            Warn-Throttled ('orphan-handler-' + $handlerId) ('Orphan crash-handler cleanup refused/failed for PID ' + $handlerId + ': ' + $_.Exception.Message)
+                        } finally {
+                            foreach ($resource in @($owner, $ch)) {
+                                if ($null -eq $resource) { continue }
+                                try { $resource.Dispose() } catch {
+                                    Write-Diagnostic 'ORPHAN_CRASH_HANDLER_ERROR' @{pid=$handlerId;phase='HandleDispose';message=$_.Exception.Message}
+                                }
+                            }
+                        }
                     }
                 }
-            } catch { }
+            } catch {
+                Write-Diagnostic 'ORPHAN_CRASH_HANDLER_ERROR' @{phase='Enumeration';message=$_.Exception.Message}
+                Warn-Throttled 'orphan-handler-enumeration' ('Orphan crash-handler query failed: ' + $_.Exception.Message)
+            }
             $nextEventCheck = $clock.Elapsed.TotalSeconds + 15
         }
         if (($clock.Elapsed.TotalSeconds - $lastHistorySample) -ge 1) {

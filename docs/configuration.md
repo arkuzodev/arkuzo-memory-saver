@@ -31,9 +31,9 @@ Merge these keys into the matching sections of an existing valid configuration. 
   },
   "health": {
     "warmup_sec": 300,
-    "private_limit_mb": 6000,
+    "private_limit_mb": 6500,
     "private_limit_sustain_sec": 60,
-    "pressure_percent": 82
+    "pressure_percent": 88
   },
   "recovery": {
     "relaunch_delay_sec": 30,
@@ -44,7 +44,7 @@ Merge these keys into the matching sections of an existing valid configuration. 
 }
 ```
 
-The tables below describe the v1.0.0 policy. Memory values use the engine's MB convention: bytes divided by 1,048,576. Timings are seconds unless the key explicitly uses milliseconds.
+The tables below describe the current repository defaults in `config/defaults.json`; packaged releases and existing installations may use older values. Memory values use the engine's MB convention: bytes divided by 1,048,576. Timings are seconds unless the key explicitly uses milliseconds.
 
 ## `settings`: ordinary resource management
 
@@ -58,7 +58,7 @@ The tables below describe the v1.0.0 policy. Memory values use the engine's MB c
 | `cores_per_instance` | `2` | Requested per-instance logical-CPU affinity allocation, subject to available hardware. |
 | `poll_ms` | `350` | Main polling interval in milliseconds; some observations run less frequently. |
 | `minimize_on_launch` | `false` | Whether the saver requests client-window minimization. |
-| `apply_graphics_flags` | `false` | Graphics-flag application is not enabled by the default policy. |
+| `apply_graphics_flags` | `true` | Requests graphics-flag application; writing a requested flag does not prove that Roblox honors it. |
 
 Trimming waits for the **individual client's** warmup, checks its current resident memory against the soft target, and requires a present, responsive window without a detected startup-error dialog. Global spacing staggers eligible clients. A trim can cause subsequent page faults as needed pages return to RAM. It does not decommit private allocations or repair the cause of memory growth.
 
@@ -67,21 +67,21 @@ Trimming waits for the **individual client's** warmup, checks its current reside
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | `true` | Enables health evaluation; destructive recovery still requires verified recovery capability. |
-| `private_limit_mb` | `6000` | Private-memory candidate threshold, approximately 6 GB; not an enforced allocation limit. |
+| `private_limit_mb` | `6500` | Private-memory recovery-candidate threshold (6500 MiB); not an enforced allocation limit. |
 | `private_limit_sustain_sec` | `60` | Continuous observation required for an ordinary private-limit violation. |
-| `pressure_percent` | `82` | OS **commit** utilization threshold for pressure-based candidate selection, not physical-RAM usage. |
-| `pressure_min_private_mb` | `2500` | Minimum private footprint for the pressure-selection path. |
+| `pressure_percent` | `88` | OS **commit** utilization threshold for pressure-based candidate selection, not physical-RAM usage. |
+| `pressure_min_private_mb` | `4000` | Minimum private footprint for the pressure-selection path. |
 | `warmup_sec` | `300` | Five-minute per-client startup grace for ordinary trimming and routine health evaluation. |
 | `hang_timeout_sec` | `120` | Continuous unresponsive-window observation before a hang becomes a candidate. |
-| `startup_error_timeout_sec` | `40` | Separate continuous observation grace for a recognized startup-error dialog. |
+| `startup_error_timeout_sec` | `5` | Separate continuous observation grace for a recognized startup-error dialog. |
 | `disconnect_timeout_sec` | `5` | Grace after a detected, correctly bound in-game disconnect or kick. |
-| `cooldown_sec` | `240` | Spacing between budgeted recovery attempts. |
-| `max_recycles_per_hour` | `10` | Hourly recovery-attempt budget; restarting the monitor does not reset persisted accounting. |
+| `cooldown_sec` | `90` | Spacing between budgeted recovery attempts. |
+| `max_recycles_per_hour` | `20` | Hourly recovery-attempt budget; restarting the monitor does not reset persisted accounting. |
 | `trim_spacing_sec` | `2` | Minimum global spacing between successful trim attempts. |
 
 Warmup is not an unconditional ban on all recovery paths. Recognized startup errors and disconnects use their own observation timers. Current OS commit pressure is evaluated separately; the engine also has a critical-pressure path at 90% commit utilization that can bypass ordinary startup grace. Every destructive action still needs valid identity, launcher readiness, audit logging, journal state, and budget checks.
 
-The **82% threshold is a candidate-selection policy, not a guarantee**. OS commit is distinct from physical RAM: a low resident working set does not demonstrate safe commit headroom. Sample gaps or a clock reversal break continuous-observation timers rather than counting unobserved time as proof of a sustained fault.
+The **88% threshold is a candidate-selection policy, not a guarantee**. OS commit is distinct from physical RAM: a low resident working set does not demonstrate safe commit headroom. Sample gaps or a clock reversal break continuous-observation timers rather than counting unobserved time as proof of a sustained fault.
 
 ## `recovery`: Volt handoff and restoration
 
@@ -97,20 +97,24 @@ The **82% threshold is a candidate-selection policy, not a guarantee**. OS commi
 | `ready_stable_sec` | `30` | Continuous restoration-readiness confirmation interval. |
 | `excluded_account_ids` | `[]` | Account identifiers excluded from restoration eligibility. Keep real identifiers private. |
 
-## `pagefile`: guarded virtual memory scaling (opt-in)
+## `pagefile`: guarded virtual memory scaling (bounded)
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `enabled` | `false` | Disabled by default. Only set to `true` if dynamic pagefile expansion is explicitly desired. |
+| `enabled` | `true` | Enabled in production defaults; administrator, ownership, disk-reserve, audit, and per-boot gates still apply. Missing policy remains disabled. |
 | `growth_step_mb` | `4096` | Size to add per growth operation (4 GiB). |
-| `max_file_mb` | `65536` | Maximum size for an individual pagefile (64 GiB). |
-| `max_total_mb` | `131072` | Maximum cumulative pagefile allocation (128 GiB). |
+| `max_file_mb` | `163840` | Maximum managed size for an individual pagefile (160 GiB), including single-volume hosts. |
+| `max_total_mb` | `163840` | Maximum cumulative managed pagefile allocation (160 GiB). |
 | `reserve_free_bytes` | `16106127360` | Minimum free disk space reserve on the pagefile volume (15 GiB). Growth is refused if remaining disk space would drop below this. |
 | `reserve_free_percent` | `10` | Minimum free disk percentage reserve required. |
 | `trigger_percent` | `80` | OS commit utilization trigger percentage evaluated before candidate recycling. |
 | `cooldown_sec` | `3600` | Cooldown period between pagefile modification requests. |
 | `max_requests_per_boot` | `1` | Bounded per-boot growth request limit to prevent runaway expansions. |
 | `max_boot_growth_mb` | `4096` | Maximum total growth permitted within a single Windows boot session. |
+
+The **160 GiB setting is a pagefile ceiling, not an exact OS commit-limit target or an immediate 160-GiB allocation**. OS commit capacity also depends on physical RAM. The existing 4-GiB-per-boot budget and cooldown remain unchanged. Windows-managed pagefiles and pagefiles already larger than the configured ceiling are never reduced or taken over. Disk growth must preserve the greater of 15 GiB and 10% of the target volume. Configuration-only growth is reported as `PendingReboot`; the saver does not reboot Windows.
+
+Existing `data/config.json` files are preserved. To adopt these values, use an engine revision that accepts a 163840-MB per-file ceiling, back up the existing configuration, and merge `health.private_limit_mb: 6500` plus `pagefile.enabled: true`, `pagefile.max_file_mb: 163840`, and `pagefile.max_total_mb: 163840`. A source push alone does not replace a published runtime or an installed user configuration.
 
 
 A larger Volt delay can extend the time before an account becomes provably idle. The adapter verifies the delay using both accessible UI controls and read-only persisted state. **Thirty seconds is not proof that a seat lease has expired or that a launch guard cannot trigger.**

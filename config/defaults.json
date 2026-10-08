@@ -13,7 +13,7 @@
   },
   "health": {
     "enabled": true,
-    "private_limit_mb": 6000,
+    "private_limit_mb": 6500,
     "pressure_percent": 88,
     "pressure_min_private_mb": 4000,
     "warmup_sec": 300,
@@ -37,10 +37,10 @@
     "excluded_account_ids": []
   },
   "pagefile": {
-    "enabled": false,
+    "enabled": true,
     "growth_step_mb": 4096,
-    "max_file_mb": 65536,
-    "max_total_mb": 131072,
+    "max_file_mb": 163840,
+    "max_total_mb": 163840,
     "reserve_free_bytes": 16106127360,
     "reserve_free_percent": 10,
     "trigger_percent": 80,

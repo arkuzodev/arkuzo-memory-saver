@@ -2,6 +2,13 @@
 
 Changes for **Arkuzo Memory Saver with Volt Integration** are recorded here.
 
+## Unreleased — 160-GiB pagefile ceiling and 6500-MB memory guard
+
+- Set the production private-memory recovery-candidate threshold to 6500 MB.
+- Enable bounded pagefile management in production defaults and raise both per-file and total ceilings to 163840 MB (160 GiB).
+- Accept the 160-GiB per-file policy in validation while retaining disk reserves, administrator checks, Windows-managed preservation, no-shrink behavior, and the 4-GiB-per-boot growth budget.
+- Add regression coverage for production loading and large-file ceiling boundaries. Existing installed configurations and published release assets are not overwritten.
+
 ## v1.0.5 — Visible Singleton Launcher, Native Privileges & VoltX Engine Optimizations
 
 - **Visible Singleton Launcher:** When another launcher or running controller is detected, the window displays an informative `[ALREADY RUNNING]` alert and remains open until a key is pressed (in interactive mode), preventing immediate window disappearance.

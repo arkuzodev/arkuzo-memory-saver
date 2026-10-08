@@ -1170,7 +1170,7 @@ function Get-ArkuzoPagefilePolicy {
     # Alias avoids PowerShell's automatic $input enumerator. Input is the pagefile subsection.
     param([Alias('Input')]$Configuration = $null, $PressurePercent = 88)
     $values = [ordered]@{
-        enabled = $false; growth_step_mb = 4096; max_file_mb = 65536; max_total_mb = 131072
+        enabled = $false; growth_step_mb = 4096; max_file_mb = 163840; max_total_mb = 163840
         reserve_free_bytes = [int64]16106127360; reserve_free_percent = 10
         trigger_percent = 80; cooldown_sec = 3600; max_requests_per_boot = 1; max_boot_growth_mb = 4096
     }
@@ -1186,7 +1186,7 @@ function Get-ArkuzoPagefilePolicy {
     }
     if ($values.enabled -isnot [bool]) { $errors.Add('enabled must be a literal boolean.') }
     $bounds = @{
-        growth_step_mb = @(1,8192); max_file_mb = @(1,131072); max_total_mb = @(1,262144)
+        growth_step_mb = @(1,8192); max_file_mb = @(1,163840); max_total_mb = @(1,262144)
         reserve_free_bytes = @([int64]1048576,[int64]1099511627776)
         cooldown_sec = @(60,86400); max_requests_per_boot = @(1,4); max_boot_growth_mb = @(1,32768)
     }
@@ -1199,7 +1199,7 @@ function Get-ArkuzoPagefilePolicy {
     if (-not (Test-ArkuzoPagefileNumber $PressurePercent 2 99)) { $errors.Add('PressurePercent must be in [2, 99].') }
     if (-not (Test-ArkuzoPagefileNumber $values.trigger_percent 1 98)) { $errors.Add('trigger_percent must be in [1, 98].') }
     if ((Test-ArkuzoPagefileNumber $values.max_total_mb 1 262144 -Integer) -and
-        (Test-ArkuzoPagefileNumber $values.max_file_mb 1 131072 -Integer) -and $values.max_total_mb -lt $values.max_file_mb) {
+        (Test-ArkuzoPagefileNumber $values.max_file_mb 1 163840 -Integer) -and $values.max_total_mb -lt $values.max_file_mb) {
         $errors.Add('max_total_mb must be at least max_file_mb.')
     }
     if ((Test-ArkuzoPagefileNumber $values.trigger_percent 1 98) -and

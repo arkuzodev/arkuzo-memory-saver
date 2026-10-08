@@ -1,11 +1,11 @@
 <div align="center">
 
 # Arkuzo Memory Saver
-### Volt Integration · v1.0.5
+### Volt Integration · v1.0.6
 
 A portable Windows memory monitor with guarded, account-aware recovery through Volt.
 
-[![Version](https://img.shields.io/badge/version-1.0.5-6366f1)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.0.6-6366f1)](CHANGELOG.md)
 [![VirusTotal](https://img.shields.io/badge/VirusTotal-0%2F59%20Clean-brightgreen?logo=virustotal)](https://www.virustotal.com/gui/file/68acb79a8f075e308cbed528c724556152897fe151e5b21393d1c2595cd6f855)
 ![Windows x64](https://img.shields.io/badge/platform-Windows_x64-0078D4)
 ![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-5391FE)

@@ -1,7 +1,42 @@
+using System.Runtime.InteropServices;
+
 namespace Launcher;
 
 public static class LauncherUi
 {
+    private const int STD_INPUT_HANDLE = -10;
+    private const uint ENABLE_QUICK_EDIT_MODE = 0x0040;
+    private const uint ENABLE_EXTENDED_FLAGS = 0x0080;
+    private const uint ENABLE_INSERT_MODE = 0x0020;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GetStdHandle(int nStdHandle);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+
+    public static void DisableQuickEdit()
+    {
+        try
+        {
+            var handle = GetStdHandle(STD_INPUT_HANDLE);
+            if (handle != IntPtr.Zero && handle != new IntPtr(-1))
+            {
+                if (GetConsoleMode(handle, out uint mode))
+                {
+                    mode &= ~ENABLE_QUICK_EDIT_MODE;
+                    mode &= ~ENABLE_INSERT_MODE;
+                    mode |= ENABLE_EXTENDED_FLAGS;
+                    SetConsoleMode(handle, mode);
+                }
+            }
+        }
+        catch { }
+    }
+
     private static readonly string[] Logo =
     [
         @"  █████╗ ██████╗ ██╗  ██╗██╗   ██╗███████╗ ██████╗ ",

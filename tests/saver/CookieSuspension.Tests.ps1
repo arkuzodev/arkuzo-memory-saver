@@ -32,11 +32,16 @@ try {
  Write-ArkuzoRuntimeStatus
  $runtime=[IO.File]::ReadAllText((Join-Path $scratch 'runtime-status.json'))|ConvertFrom-Json
  Assert ($runtime.suspendedAccountCount -eq 1 -and @($runtime.suspendedAccounts).Count -eq 1 -and $runtime.missingAccounts -eq 0 -and -not $runtime.missingRecoveryBlocked) 'Heartbeat separates suspension count from missing and active pending gates'
- Initialize-ArkuzoRecoveryJournal
- Assert ($recoveryJournalHealthy -and $suspendedAccounts[$id].pending.retryCount -eq 3) 'Suspended history survives atomic journal restart'
  $dead.cookieStatus='alive';$dead.cookieAlive=$true;$dead.controlReady=$true
  Update-ArkuzoRecoveryOutcomes
  Assert ($suspendedAccounts.Count -eq 0 -and $recoveryPending[$id].retryCount -eq 3 -and $null -eq $recoveryPending[$id].readySinceUtc) 'Precise alive reintegration retains backoff and resets complete game confirmation'
+ # Suspended accounts disappear on restart and are not saved practically
+ $dead.cookieStatus='dead';$dead.cookieAlive=$false;$dead.controlReady=$false
+ Update-ArkuzoRecoveryOutcomes
+ Assert ($suspendedAccounts.Count -eq 1) 'Suspended in session memory'
+ Save-ArkuzoRecoveryJournal
+ Initialize-ArkuzoRecoveryJournal
+ Assert ($recoveryJournalHealthy -and $suspendedAccounts.Count -eq 0) 'Suspended accounts disappear on restart and are not saved practically'
  foreach($case in @('live','unknown','malformed','audit','save')) {
   $script:recoveryJournalHealthy=$true;$script:logFailed=$false;$script:failAudit=$false;$script:suspendedAccounts=@{};$script:recoveryPending=@{};$script:recoveryPending[$id]=New-ArkuzoPendingEntry $id '111'
   $dead.cookieStatus='dead';$dead.cookieAlive=$false;$dead.controlReady=$false;$dead.suspensionSafe=$true;$dead.processId=$null;$dead.accountId=$id;$dead.autoRelaunch=$true

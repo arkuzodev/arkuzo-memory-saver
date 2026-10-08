@@ -9,13 +9,34 @@ public sealed class LauncherLock : IDisposable
 {
  readonly Mutex mutex;
  bool owned;
- public LauncherLock(string root)
+ public LauncherLock(string root, bool verifyOnly = false)
  {
   var id=Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar).ToUpperInvariant())));
   mutex=new Mutex(false,"Global\\ArkuzoMemorySaver-"+id);
-  try { try { owned=mutex.WaitOne(0); } catch(AbandonedMutexException) { owned=true; }
-   if(!owned) throw new AlreadyRunningException("Another launcher is already running for this installation.");
+  try {
+   try { owned=mutex.WaitOne(0); } catch(AbandonedMutexException) { owned=true; }
+   if(!owned) {
+    if (verifyOnly) throw new AlreadyRunningException("Another launcher is already running for this installation.");
+    AutocloseRunningLauncherProcesses();
+    try { owned=mutex.WaitOne(3000); } catch(AbandonedMutexException) { owned=true; }
+    if (!owned) throw new AlreadyRunningException("Another launcher is already running for this installation.");
+   }
   } catch {mutex.Dispose();throw;}
+ }
+ private static void AutocloseRunningLauncherProcesses()
+ {
+  try
+  {
+   var currentPid = Environment.ProcessId;
+   foreach (var proc in Process.GetProcessesByName("ArkuzoMemorySaver"))
+   {
+    if (proc.Id != currentPid)
+    {
+     try { proc.Kill(); proc.WaitForExit(3000); } catch { }
+    }
+   }
+  }
+  catch { }
  }
  public void Dispose() { if(owned) {mutex.ReleaseMutex(); owned=false;} mutex.Dispose(); }
 }
@@ -25,6 +46,7 @@ public static class LauncherEntry
  public static int Run(string[] args,string root) => Run(args,root,ControllerMutexName);
  internal static int Run(string[] args,string root,string controllerMutexName,Action? acknowledgement=null)
  {
+  LauncherUi.DisableQuickEdit();
   void DismissNotice() {
    if(args.Contains("--verify-only")) return;
    if(acknowledgement is null) LauncherUi.WaitForDismissal(false); else acknowledgement();
@@ -32,7 +54,7 @@ public static class LauncherEntry
   if(args.Any(x=>x!="--offline" && x!="--verify-only") || args.Distinct().Count()!=args.Length)
   { Console.Error.WriteLine("Usage: ArkuzoMemorySaver.exe [--offline] [--verify-only]");return 2; }
   try {
-   using var updaterLock=new LauncherLock(root);
+   using var updaterLock=new LauncherLock(root, args.Contains("--verify-only"));
    if (!args.Contains("--verify-only") && ControllerIsRunning(controllerMutexName))
    {
        var rootFull = Path.GetFullPath(root);
@@ -79,7 +101,7 @@ public static class LauncherEntry
            {
                LauncherUi.Step("STOP", $"Signaling existing controller (PID {activePid.Value}) to stop gracefully...", ConsoleColor.Yellow);
            }
-           var gracefulDeadline = DateTime.UtcNow.AddSeconds(10);
+           var gracefulDeadline = DateTime.UtcNow.AddSeconds(5);
            while (DateTime.UtcNow < gracefulDeadline)
            {
                var exited = false;
@@ -98,35 +120,37 @@ public static class LauncherEntry
                        LauncherUi.Step("KILL", $"Controller (PID {activePid.Value}) did not exit gracefully, terminating controller process...", ConsoleColor.Yellow);
                    }
                    activeProc.Kill();
-                   activeProc.WaitForExit(5000);
+                   activeProc.WaitForExit(3000);
                }
            }
            catch { }
-
-           var mutexDeadline = DateTime.UtcNow.AddSeconds(5);
-           while (DateTime.UtcNow < mutexDeadline && ControllerIsRunning(controllerMutexName))
-           {
-               Thread.Sleep(250);
-           }
-
-           if (File.Exists(stopFile))
-           {
-               try { File.Delete(stopFile); } catch { }
-           }
-
-           if (ControllerIsRunning(controllerMutexName))
-           {
-               throw new AlreadyRunningException($"Existing Memory Saver controller (PID {activePid.Value}) mutex was not released.");
-           }
-
-           if (!Console.IsOutputRedirected)
-           {
-               LauncherUi.Step("REPLACE", "Previous controller shut down cleanly. Proceeding with startup.", ConsoleColor.Green);
-           }
        }
-       else
+
+       // Autoclose any lingering saver processes
+       if (ControllerIsRunning(controllerMutexName))
        {
-           throw new AlreadyRunningException("A Memory Saver controller is already running, possibly from another folder or a background watchdog.");
+           AutocloseRunningSaverProcesses();
+       }
+
+       var mutexDeadline = DateTime.UtcNow.AddSeconds(5);
+       while (DateTime.UtcNow < mutexDeadline && ControllerIsRunning(controllerMutexName))
+       {
+           Thread.Sleep(250);
+       }
+
+       if (File.Exists(stopFile))
+       {
+           try { File.Delete(stopFile); } catch { }
+       }
+
+       if (ControllerIsRunning(controllerMutexName))
+       {
+           throw new AlreadyRunningException("Existing Memory Saver controller mutex was not released in time.");
+       }
+
+       if (!Console.IsOutputRedirected)
+       {
+           LauncherUi.Step("REPLACE", "Previous controller shut down cleanly. Proceeding with startup.", ConsoleColor.Green);
        }
    }
    if (!Console.IsOutputRedirected && !args.Contains("--verify-only"))
@@ -192,5 +216,36 @@ public static class LauncherEntry
  {
   using var child=Process.Start(info) ?? throw new InvalidOperationException("Unable to start Windows PowerShell.");
   child.WaitForExit(); return child.ExitCode;
+ }
+ internal static void AutocloseRunningSaverProcesses()
+ {
+  try
+  {
+   foreach (var name in new[] { "powershell", "pwsh" })
+   {
+    foreach (var proc in Process.GetProcessesByName(name))
+    {
+     try
+     {
+      if (!string.IsNullOrEmpty(proc.MainWindowTitle) &&
+          (proc.MainWindowTitle.Contains("ARKUZO", StringComparison.OrdinalIgnoreCase) ||
+           proc.MainWindowTitle.Contains("Memory Saver", StringComparison.OrdinalIgnoreCase)))
+      {
+       proc.Kill();
+       proc.WaitForExit(2000);
+      }
+     }
+     catch { }
+    }
+   }
+   using var cimKill = Process.Start(new ProcessStartInfo("powershell.exe",
+       "-NoProfile -Command \"Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'powershell|pwsh' -and $_.CommandLine -like '*Arkuzo-Memory-Saver*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }\"")
+   {
+       CreateNoWindow = true,
+       UseShellExecute = false
+   });
+   cimKill?.WaitForExit(4000);
+  }
+  catch { }
  }
 }

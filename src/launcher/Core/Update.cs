@@ -76,6 +76,10 @@ public static class Updater
    Console.Error.WriteLine("Network unavailable. Validating known-good local runtime.");
    return store.Validate();
   }
+  if (store.TryGetInstalled(out var current) && Installation.ParseVersion(release.Version) <= Installation.ParseVersion(current.Version))
+  {
+   return store.Validate();
+  }
   return store.Install(release);
  }
  public static ProcessStartInfo ChildStart(string root,string runtime)

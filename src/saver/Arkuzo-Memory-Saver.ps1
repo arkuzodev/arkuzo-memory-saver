@@ -47,7 +47,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$ArkuzoRuntimeVersion = '1.0.6'
+$ArkuzoRuntimeVersion = '1.0.8'
 # Resolve persistent data independently of the versioned program files.
 if ([string]::IsNullOrWhiteSpace($DataDirectory)) { $DataDirectory = $PSScriptRoot }
 $DataDirectory = [IO.Path]::GetFullPath($DataDirectory)
@@ -389,39 +389,89 @@ function ConvertTo-ArkuzoDisplayName([string]$Name) {
 }
 function Get-ArkuzoAccountDisplayLabel([string]$AccountId='', [int]$ProcessId=0, [string]$TrackerId='') {
     if ($ProcessId -gt 0) { return (Resolve-ArkuzoAccountName $ProcessId $TrackerId) + ' (PID ' + $ProcessId + ')' }
-    $fresh = $voltControlStatus.available -and $null -ne $voltControlCheckedUtc -and
-        ([datetime]::UtcNow-$voltControlCheckedUtc).TotalSeconds -ge 0 -and ([datetime]::UtcNow-$voltControlCheckedUtc).TotalSeconds -le 25
-    $rows = @($voltControlStatus.accounts | Where-Object { $_.accountId -ceq $AccountId })
-    if (-not $fresh -or -not $AccountId -or $rows.Count -ne 1) { return 'Unknown account' }
-    return ConvertTo-ArkuzoDisplayName ([string]$rows[0].username)
+    if ($null -eq $script:accountLabelCache) { $script:accountLabelCache = @{} }
+    if ($null -ne $voltControlStatus -and $null -ne $voltControlStatus.accounts) {
+        $rows = @($voltControlStatus.accounts | Where-Object { $_.accountId -ceq $AccountId })
+        if ($rows.Count -eq 1 -and -not [string]::IsNullOrWhiteSpace([string]$rows[0].username)) {
+            $name = ConvertTo-ArkuzoDisplayName ([string]$rows[0].username)
+            if ($name -cne 'Unknown account') {
+                $script:accountLabelCache[$AccountId] = $name
+                return $name
+            }
+        }
+    }
+    if ($script:accountLabelCache.ContainsKey($AccountId)) {
+        return $script:accountLabelCache[$AccountId]
+    }
+    return 'Unknown account'
 }
 function Resolve-ArkuzoAccountName([int]$ProcessId, [string]$TrackerId = $null, [string]$LogPath = $null) {
     if ($null -eq $script:accountNameCache) { $script:accountNameCache = @{} }
-    # Display names never establish recovery authority. Bind even the display
-    # cache to the retained exact process generation and tracker, not PID alone.
+    if ($null -eq $script:trackerNameCache) { $script:trackerNameCache = @{} }
     $state = if ($null -ne $script:tracked -and $script:tracked.ContainsKey($ProcessId)) { $script:tracked[$ProcessId] } else { $null }
-    $fresh = $voltControlStatus.available -and $null -ne $voltControlCheckedUtc -and
-        ([datetime]::UtcNow-$voltControlCheckedUtc).TotalSeconds -ge 0 -and ([datetime]::UtcNow-$voltControlCheckedUtc).TotalSeconds -le 25
-    if ([string]::IsNullOrWhiteSpace($TrackerId) -or $TrackerId -notmatch '\A[0-9]+\z' -or
-        $null -eq $state -or $state.TrackerId -cne $TrackerId -or -not $fresh -or
-        $voltControlCheckedUtc.ToUniversalTime().Ticks -lt $state.StartTicks -or
+
+    if ($null -eq $state -or [string]::IsNullOrWhiteSpace($TrackerId) -or $TrackerId -notmatch '\A[0-9]+\z' -or
+        $state.TrackerId -cne $TrackerId -or
         -not (Test-ArkuzoClientIdentity $state.Watcher $ProcessId $state.StartTicks)) {
-        $script:accountNameCache.Remove($ProcessId)
+        if ($ProcessId -gt 0) { $script:accountNameCache.Remove($ProcessId) }
         return 'Unknown account'
     }
-    $exact = @($voltControlStatus.accounts | Where-Object { $_.trackerId -ceq $TrackerId -and $_.processId -eq $ProcessId })
-    if ($exact.Count -ne 1 -or -not $exact[0].accountId -or
-        @($voltControlStatus.accounts | Where-Object { $_.trackerId -ceq $TrackerId }).Count -ne 1 -or
-        @($voltControlStatus.accounts | Where-Object { $_.processId -eq $ProcessId }).Count -ne 1 -or
-        @($voltControlStatus.accounts | Where-Object { $_.accountId -ceq $exact[0].accountId }).Count -ne 1 -or
-        [string]::IsNullOrWhiteSpace([string]$exact[0].username)) {
-        $script:accountNameCache.Remove($ProcessId)
-        return 'Unknown account'
+
+    # Populate tracker cache from any available Volt status snapshot
+    if ($null -ne $voltControlStatus -and $null -ne $voltControlStatus.accounts) {
+        foreach ($acct in @($voltControlStatus.accounts)) {
+            if ($acct.trackerId -match '\A[0-9]+\z' -and -not [string]::IsNullOrWhiteSpace([string]$acct.username)) {
+                $displayName = ConvertTo-ArkuzoDisplayName ([string]$acct.username)
+                if ($displayName -cne 'Unknown account') {
+                    $script:trackerNameCache[[string]$acct.trackerId] = $displayName
+                }
+            }
+        }
     }
-    $name = ConvertTo-ArkuzoDisplayName ([string]$exact[0].username)
-    if ($name -ceq 'Unknown account') { $script:accountNameCache.Remove($ProcessId); return $name }
-    $script:accountNameCache[$ProcessId] = @{username=$name;startTicks=$state.StartTicks;trackerId=$TrackerId;accountId=$exact[0].accountId}
-    return $name
+
+    # 1. Use cached account name for this verified running process generation
+    if ($script:accountNameCache.ContainsKey($ProcessId)) {
+        $cached = $script:accountNameCache[$ProcessId]
+        if ($cached.startTicks -eq $state.StartTicks -and $cached.trackerId -ceq $TrackerId -and
+            -not [string]::IsNullOrWhiteSpace([string]$cached.username) -and $cached.username -cne 'Unknown account') {
+            return [string]$cached.username
+        }
+    }
+
+    # 2. Try resolving fresh exact match (trackerId + processId)
+    if ($null -ne $voltControlStatus -and $null -ne $voltControlStatus.accounts) {
+        $exact = @($voltControlStatus.accounts | Where-Object { $_.trackerId -ceq $TrackerId -and $_.processId -eq $ProcessId })
+        if ($exact.Count -eq 1 -and -not [string]::IsNullOrWhiteSpace([string]$exact[0].username)) {
+            $name = ConvertTo-ArkuzoDisplayName ([string]$exact[0].username)
+            if ($name -cne 'Unknown account') {
+                $script:accountNameCache[$ProcessId] = @{username=$name;startTicks=$state.StartTicks;trackerId=$TrackerId;accountId=$exact[0].accountId}
+                $script:trackerNameCache[$TrackerId] = $name
+                return $name
+            }
+        }
+
+        # 3. Match by unique trackerId
+        $byTracker = @($voltControlStatus.accounts | Where-Object { $_.trackerId -ceq $TrackerId })
+        if ($byTracker.Count -eq 1 -and -not [string]::IsNullOrWhiteSpace([string]$byTracker[0].username)) {
+            $name = ConvertTo-ArkuzoDisplayName ([string]$byTracker[0].username)
+            if ($name -cne 'Unknown account') {
+                $script:accountNameCache[$ProcessId] = @{username=$name;startTicks=$state.StartTicks;trackerId=$TrackerId;accountId=$byTracker[0].accountId}
+                $script:trackerNameCache[$TrackerId] = $name
+                return $name
+            }
+        }
+    }
+
+    # 4. Fallback to cached tracker name
+    if ($script:trackerNameCache.ContainsKey($TrackerId)) {
+        $cachedName = [string]$script:trackerNameCache[$TrackerId]
+        if (-not [string]::IsNullOrWhiteSpace($cachedName) -and $cachedName -cne 'Unknown account') {
+            $script:accountNameCache[$ProcessId] = @{username=$cachedName;startTicks=$state.StartTicks;trackerId=$TrackerId;accountId=$null}
+            return $cachedName
+        }
+    }
+
+    return 'Unknown account'
 }
 function Read-RobloxLogTail([string]$Path, [ref]$CurrentOffset) {
     if (-not (Test-Path -LiteralPath $Path)) { return $null }
@@ -566,7 +616,7 @@ function Get-ArkuzoVoltRecoveryStatus([string]$Root, [string]$TrackerId) {
     finally { if ($null -ne $child) { $child.Dispose() } }
 }
 function Get-ArkuzoHealthPolicy($Config) {
-    $defaults = @{ enabled = $false; private_limit_mb = 4096; hang_timeout_sec = 120; warmup_sec = 180; pressure_percent = 85; pressure_min_private_mb = 2048; cooldown_sec = 60; max_recycles_per_hour = 20; trim_spacing_sec = 2; startup_error_timeout_sec = 40; disconnect_timeout_sec = 5; private_limit_sustain_sec = 60 }
+    $defaults = @{ enabled = $false; private_limit_mb = 4096; hang_timeout_sec = 120; warmup_sec = 90; pressure_percent = 85; pressure_min_private_mb = 2048; cooldown_sec = 60; max_recycles_per_hour = 20; trim_spacing_sec = 2; startup_error_timeout_sec = 40; disconnect_timeout_sec = 5; private_limit_sustain_sec = 60 }
     if ($null -ne $Config) {
         foreach ($key in @($defaults.Keys)) { if ($null -ne $Config.$key) { $defaults[$key] = $Config.$key } }
     }
@@ -585,9 +635,12 @@ function Clear-VoltRecoveryCapability {
     $script:voltParents = @{}
 }
 function Update-VoltRecoveryCapability {
+    param([switch]$SyncControl = $false)
     Clear-VoltRecoveryCapability
     $script:voltStatus = Get-ArkuzoVoltRecoveryStatus -Root $PSScriptRoot
-    Update-ArkuzoVoltControl
+    if ($SyncControl) {
+        Update-ArkuzoVoltControl
+    }
     foreach ($manager in @(Get-Process -Name tauri-app -ErrorAction SilentlyContinue)) {
         $retained = $false
         try {
@@ -599,9 +652,6 @@ function Update-VoltRecoveryCapability {
                 $retained = $true
             }
         } catch { } finally { if (-not $retained) { try { $manager.Dispose() } catch { } } }
-    }
-    if ($healthPolicy.enabled -and (-not $voltStatus.safeToRecycle -or $voltParents.Count -eq 0)) {
-        Warn-Throttled 'recovery-not-ready' 'Recovery blocked: Volt auto-relaunch/session/manager is not ready. Clients left untouched.'
     }
 }
 function Test-ArkuzoLiveVoltParent($Parent) {
@@ -632,7 +682,7 @@ function Save-ArkuzoRecoveryJournal {
     Save-ArkuzoAtomicJson $recoveryStatePath @{
         schemaVersion = 2; attempts = @($recoveryAttempts | ForEach-Object { $_.ToString('o') })
         launchAttempts = @($launchAttempts | ForEach-Object { $_.ToString('o') })
-        pending = @($recoveryPending.Values); suspendedAccounts = @($script:suspendedAccounts.Values); updatedUtc = $utc.ToString('o')
+        pending = @($recoveryPending.Values); suspendedAccounts = @(); updatedUtc = $utc.ToString('o')
     }
 }
 function Initialize-ArkuzoRecoveryJournal {
@@ -658,27 +708,22 @@ function Initialize-ArkuzoRecoveryJournal {
                 if ($value.missingSinceUtc) { [datetime]$value.missingSinceUtc | Out-Null }
                 # A monitor restart breaks continuity; never inherit a previous healthy timer.
                 $entry.readySinceUtc = $null; $entry.lastObservedUtc = $null
-                $script:recoveryPending[[string]$value.accountId] = $entry
-            }
-            foreach ($value in @($journal.suspendedAccounts)) {
-                if ($null -eq $value) { continue }
-                if ($value.accountId -notmatch '\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\z' -or
-                    $value.reason -ne 'COOKIE_DEAD' -or -not $value.suspendedUtc -or $suspendedAccounts.ContainsKey([string]$value.accountId) -or $recoveryPending.ContainsKey([string]$value.accountId)) { throw 'Invalid suspended account' }
-                [datetime]$value.suspendedUtc | Out-Null
-                $entry=@{}; foreach ($prop in $value.PSObject.Properties) { $entry[$prop.Name]=$prop.Value }
-                if ($null -ne $value.pending) {
-                    if ($value.pending.accountId -ne $value.accountId -or $value.pending.oldTrackerId -notmatch '\A[0-9]+\z' -or $null -eq $value.pending.retryCount -or [int]$value.pending.retryCount -lt 0 -or -not $value.pending.createdUtc) { throw 'Invalid suspended history' }
-                    [datetime]$value.pending.createdUtc | Out-Null
-                    if ($value.pending.nextRetryUtc) { [datetime]$value.pending.nextRetryUtc | Out-Null }
-                    if ($value.pending.closedUtc) { [datetime]$value.pending.closedUtc | Out-Null }
-                    $entry.pending=@{}; foreach ($prop in $value.pending.PSObject.Properties) { $entry.pending[$prop.Name]=$prop.Value }
-                    $entry.pending.readySinceUtc=$null; $entry.pending.lastObservedUtc=$null
+                # Stale or synthetic missing entries without a verified prior process must not trigger auto-launch on startup.
+                if ([int]$value.oldPid -gt 0 -and [long]$value.oldStartTicks -gt 0) {
+                    $script:recoveryPending[[string]$value.accountId] = $entry
                 }
-                $script:suspendedAccounts[[string]$value.accountId]=$entry
             }
+            # Suspended accounts disappear on restart and are not saved practically; start clean
+            $script:suspendedAccounts = @{}
+            $script:recoveryJournalHealthy = $true
+        } else {
+            $script:recoveryJournalHealthy = $true
+            Save-ArkuzoRecoveryJournal
         }
-        $script:recoveryJournalHealthy = $true
-    } catch { $script:recoveryJournalHealthy = $false }
+    } catch {
+        $script:recoveryAttempts = @(); $script:launchAttempts = @(); $script:recoveryPending = @{}; $script:suspendedAccounts = @{}
+        $script:recoveryJournalHealthy = $false
+    }
 }
 function Get-ArkuzoRecoveryHealthSample($Watcher, [string]$Reason, $CurrentState = $null) {
     if ($Reason -ceq 'VOLT_STARTUP_ERROR' -and $null -ne $CurrentState) {
@@ -784,6 +829,16 @@ function Invoke-ArkuzoVoltControl([ValidateSet('Status','Configure','LaunchMissi
         $info.Arguments='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $file + '" -Action ' + $Action + ' -RelaunchDelaySec ' + [int]$restorePolicy.relaunch_delay_sec + ' -MinLaunchAgeSec ' + [int]$restorePolicy.restore_wait_sec
         if ($Action -eq 'LaunchMissing') {
             if ($AccountId -notmatch '\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\z' -or $TrackerId -notmatch '\A[0-9]+\z') { throw 'Invalid non-secret account metadata' }
+            # Prevent launch in any circumstance if cookie is dead or not alive
+            $targetAcct = @($voltControlStatus.accounts | Where-Object { $_.accountId -ceq $AccountId })
+            if ($targetAcct.Count -gt 0) {
+                if ($targetAcct[0].cookieStatus -ceq 'dead' -or $targetAcct[0].cookieStatus -cne 'alive' -or -not $targetAcct[0].cookieAlive) {
+                    throw "Launch blocked in any circumstance: account $AccountId has dead/invalid cookie ($($targetAcct[0].cookieStatus))"
+                }
+            }
+            if ($null -ne $script:suspendedAccounts -and $script:suspendedAccounts.ContainsKey($AccountId)) {
+                throw "Launch blocked in any circumstance: account $AccountId is suspended ($($script:suspendedAccounts[$AccountId].reason))"
+            }
             $info.Arguments+=' -AccountId ' + $AccountId + ' -ExpectedTrackerId ' + $TrackerId
         }
         $info.UseShellExecute=$false;$info.CreateNoWindow=$true;$info.RedirectStandardOutput=$true;$info.RedirectStandardError=$true
@@ -797,6 +852,60 @@ function Invoke-ArkuzoVoltControl([ValidateSet('Status','Configure','LaunchMissi
     } catch { return [pscustomobject]@{available=$false;requestAccepted=$false;reason='Volt background control unavailable/refused';accounts=@()} }
     finally { if ($child) { $child.Dispose() } }
 }
+$script:voltStatusChild = $null
+$script:voltStatusOut = $null
+$script:voltStatusStartSec = 0
+
+function Poll-ArkuzoVoltControlAsync {
+    if ($null -ne $script:voltStatusChild) {
+        if ($script:voltStatusChild.HasExited) {
+            try {
+                if ($script:voltStatusChild.ExitCode -eq 0 -and $null -ne $script:voltStatusOut -and $script:voltStatusOut.IsCompleted) {
+                    $raw = $script:voltStatusOut.Result
+                    $res = $raw | ConvertFrom-Json
+                    if ($res.available -is [bool]) {
+                        $script:voltControlStatus = $res
+                        $script:voltControlCheckedUtc = [datetime]::UtcNow
+                    }
+                }
+            } catch { }
+            finally {
+                try { $script:voltStatusChild.Dispose() } catch { }
+                $script:voltStatusChild = $null
+                $script:voltStatusOut = $null
+            }
+        } elseif ($script:clock -and ($script:clock.Elapsed.TotalSeconds - $script:voltStatusStartSec) -gt 16) {
+            try { $script:voltStatusChild.Kill() } catch { }
+            finally {
+                try { $script:voltStatusChild.Dispose() } catch { }
+                $script:voltStatusChild = $null
+                $script:voltStatusOut = $null
+            }
+        }
+    }
+}
+
+function Start-ArkuzoVoltControlStatusAsync {
+    if ($null -ne $script:voltStatusChild) { return }
+    try {
+        $file = Join-Path $PSScriptRoot 'Arkuzo-Volt-Control.ps1'
+        if (-not (Test-Path -LiteralPath $file)) { return }
+        $delaySec = if ($restorePolicy -and $restorePolicy.relaunch_delay_sec) { [int]$restorePolicy.relaunch_delay_sec } else { 30 }
+        $waitSec = if ($restorePolicy -and $restorePolicy.restore_wait_sec) { [int]$restorePolicy.restore_wait_sec } else { 120 }
+        $info = New-Object Diagnostics.ProcessStartInfo
+        $info.FileName = 'powershell.exe'
+        $info.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$file`" -Action Status -RelaunchDelaySec $delaySec -MinLaunchAgeSec $waitSec"
+        $info.UseShellExecute = $false
+        $info.CreateNoWindow = $true
+        $info.RedirectStandardOutput = $true
+        $info.RedirectStandardError = $false
+        $child = [Diagnostics.Process]::Start($info)
+        $script:voltStatusOut = $child.StandardOutput.ReadToEndAsync()
+        $script:voltStatusChild = $child
+        $script:voltStatusStartSec = if ($script:clock) { $script:clock.Elapsed.TotalSeconds } else { 0 }
+    } catch { }
+}
+
 function Update-ArkuzoVoltControl {
     $script:voltControlStatus=Invoke-ArkuzoVoltControl 'Status'
     $script:voltControlCheckedUtc=[datetime]::UtcNow
@@ -869,14 +978,23 @@ function Update-ArkuzoRecoveryOutcomes {
     $utc=[datetime]::UtcNow
     if (-not $voltControlStatus.available -or $voltControlStatus.globalMappingSafe -isnot [bool] -or -not $voltControlStatus.globalMappingSafe -or ($utc-$voltControlCheckedUtc).TotalSeconds -lt 0 -or ($utc-$voltControlCheckedUtc).TotalSeconds -gt 25) {
         foreach ($entry in $recoveryPending.Values) { $entry.readySinceUtc=$null;$entry.lastObservedUtc=$null }
-        Warn-Throttled 'volt-control' 'Volt account control unavailable. Clients left untouched; missing-account recovery is degraded.'
         return
     }
     try {
         Update-ArkuzoCookieSuspensions
         # Opted-in, previously launched accounts only. Never activate new/unconfigured accounts.
+        if ($null -eq $script:sessionObservedAccounts) { $script:sessionObservedAccounts = @{} }
+        if ($null -eq $script:saverSessionStartEpochMs) { $script:saverSessionStartEpochMs = [long][DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() }
         foreach ($a in @($voltControlStatus.accounts)) {
-            if ($script:suspendedAccounts.ContainsKey([string]$a.accountId) -or $a.cookieStatus -cne 'alive' -or -not $a.autoRelaunch -or -not $a.cookieAlive -or $restorePolicy.excluded_account_ids -contains $a.accountId) { continue }
+            if ($a.cookieStatus -ceq 'dead' -or $a.cookieStatus -cne 'alive' -or -not $a.cookieAlive -or
+                ($null -ne $script:suspendedAccounts -and $script:suspendedAccounts.ContainsKey([string]$a.accountId)) -or
+                -not $a.autoRelaunch -or $restorePolicy.excluded_account_ids -contains $a.accountId) { continue }
+            if ($a.processId -or ([long]$a.lastLaunchAtMs -ge $script:saverSessionStartEpochMs)) {
+                $script:sessionObservedAccounts[[string]$a.accountId] = $true
+            }
+            if (-not $script:sessionObservedAccounts.ContainsKey([string]$a.accountId)) {
+                continue
+            }
             if ($restorePolicy.restore_missing -and -not $a.processId -and $a.uiStatus -eq 'Idle' -and [long]$a.lastLaunchAtMs -gt 0 -and
                 $a.trackerId -match '\A[0-9]+\z' -and -not $recoveryPending.ContainsKey([string]$a.accountId)) {
                 $script:recoveryPending[[string]$a.accountId]=New-ArkuzoPendingEntry $a.accountId $a.trackerId
@@ -934,6 +1052,12 @@ function Update-ArkuzoRecoveryOutcomes {
                 $script:recoveryPending.Remove($key);continue
             }
             if ($decision -eq 'LaunchMissing') {
+                if ($a.cookieStatus -ceq 'dead' -or $a.cookieStatus -cne 'alive' -or -not $a.cookieAlive -or
+                    ($null -ne $script:suspendedAccounts -and $script:suspendedAccounts.ContainsKey($key))) {
+                    Write-Diagnostic 'LAUNCH_REFUSED_DEAD_COOKIE' @{accountId=$key;username=$a.username;cookieStatus=$a.cookieStatus}
+                    $script:recoveryPending.Remove($key)
+                    continue
+                }
                 if (-not (Test-ArkuzoRecoveryBudget $launchAttempts $utc ([int]$restorePolicy.retry_base_sec) ([int]$restorePolicy.retry_max_per_hour))) {
                     Warn-Throttled 'restore-budget' 'Missing-account launch budget/backoff active. Other clients remain protected; automatic retry will resume.';continue
                 }
@@ -1102,7 +1226,7 @@ function Invoke-ClientRecovery([int]$ClientId, $State) {
     # to its original reason; a changed condition needs a new authorized attempt.
     $reason = $State.HealthDecision.Reason
     # Re-read capability immediately before acting, not merely at startup.
-    Update-VoltRecoveryCapability
+    Update-VoltRecoveryCapability -SyncControl
     if (-not $voltStatus.safeToRecycle -or -not (Test-ArkuzoVoltOwnership $State.ParentId $voltParents[$State.ParentId] $State.StartTicks $voltPath)) { return }
     $utc = [DateTime]::UtcNow
     $boundAccount = Get-ArkuzoControlledAccount $State.TrackerId $ClientId
@@ -1974,24 +2098,77 @@ function Test-ArkuzoUpdateAvailable {
     return $result
 }
 
+$script:versionCheckAsync = $null
+$script:versionCheckStartSec = 0
+
+function Poll-ArkuzoVersionCheckAsync {
+    if ($null -ne $script:versionCheckAsync) {
+        if ($script:versionCheckAsync.AsyncResult.IsCompleted) {
+            try {
+                $rawJson = $script:versionCheckAsync.PowerShell.EndInvoke($script:versionCheckAsync.AsyncResult)
+                if ($rawJson -and $rawJson.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace($rawJson[0])) {
+                    $jsonStr = [string]$rawJson[0]
+                    $res = Test-ArkuzoUpdateAvailable -CurrentVersion $ArkuzoRuntimeVersion -FetchDelegate { $jsonStr }
+                    $script:updateAvailableStatus = $res
+                    Write-Diagnostic 'VERSION_CHECK' $script:updateAvailableStatus
+                }
+            } catch { }
+            finally {
+                try { $script:versionCheckAsync.PowerShell.Dispose() } catch { }
+                $script:versionCheckAsync = $null
+            }
+        } elseif ($script:clock -and ($script:clock.Elapsed.TotalSeconds - $script:versionCheckStartSec) -gt 15) {
+            try { $script:versionCheckAsync.PowerShell.Stop() } catch { }
+            try { $script:versionCheckAsync.PowerShell.Dispose() } catch { }
+            $script:versionCheckAsync = $null
+        }
+    }
+}
+
+function Start-ArkuzoVersionCheckAsync {
+    if ($null -ne $script:versionCheckAsync) { return }
+    try {
+        $curVer = $ArkuzoRuntimeVersion
+        $apiUrl = 'https://api.github.com/repos/arkuzodev/arkuzo-memory-saver/releases/latest'
+        $ps = [powershell]::Create()
+        [void]$ps.AddScript({
+            param($curVer, $apiUrl)
+            try {
+                $req = [System.Net.HttpWebRequest]::Create($apiUrl)
+                $req.UserAgent = 'ArkuzoMemorySaver-Watchdog/' + $curVer
+                $req.Timeout = 4000
+                $req.ReadWriteTimeout = 4000
+                $resp = $req.GetResponse()
+                try {
+                    $stream = $resp.GetResponseStream()
+                    $reader = New-Object IO.StreamReader($stream, [Text.Encoding]::UTF8)
+                    return $reader.ReadToEnd()
+                } finally { if ($null -ne $resp) { $resp.Dispose() } }
+            } catch {
+                return $null
+            }
+        }).AddParameter('curVer', $curVer).AddParameter('apiUrl', $apiUrl)
+        $asyncResult = $ps.BeginInvoke()
+        $script:versionCheckAsync = @{
+            PowerShell = $ps
+            AsyncResult = $asyncResult
+        }
+        $script:versionCheckStartSec = if ($script:clock) { $script:clock.Elapsed.TotalSeconds } else { 0 }
+    } catch { }
+}
+
 function Update-ArkuzoVersionCheck {
     param(
         [string]$CurrentVersion = $ArkuzoRuntimeVersion,
         [scriptblock]$FetchDelegate = $null
     )
-    try {
+    if ($null -ne $FetchDelegate) {
         $res = Test-ArkuzoUpdateAvailable -CurrentVersion $CurrentVersion -FetchDelegate $FetchDelegate
         $script:updateAvailableStatus = $res
         Write-Diagnostic 'VERSION_CHECK' $res
-        if ($res.available) {
-            $script:dashboardIssues['update-available'] = @{
-                Message = $res.message
-                Time = $(if ($script:clock) { $script:clock.Elapsed.TotalSeconds } else { 0 })
-            }
-        }
-    } catch {
-        # Fail-soft, silent
+        return
     }
+    Start-ArkuzoVersionCheckAsync
 }
 
 # === END Arkuzo-Health.ps1 ===
@@ -2511,6 +2688,8 @@ $recoveryAttempts = @()
 $recoveryStatePath = Join-Path $DataDirectory 'recovery-state.json'
 $recoveryJournalHealthy = $false # Initialized only while owning the controller lock.
 $recoveryPending = @{}; $suspendedAccounts = @{}; $launchAttempts = @()
+$sessionObservedAccounts = @{}
+$saverSessionStartEpochMs = [long][DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 $voltControlStatus = [pscustomobject]@{available=$false;accounts=@();relaunchDelayMs=0}
 $voltControlCheckedUtc = [datetime]::MinValue
 $nextOutcomeCheck = 0.0; $nextPolicyCheck = 0.0; $nextRuntimeHeartbeat = 0.0
@@ -2869,11 +3048,40 @@ function New-ArkuzoFrame($Model, [int]$Width, [int]$Height) {
     $lines = New-Object 'System.Collections.Generic.List[object]'
     $usable = [Math]::Max(0, $Height - 1) # The last row is always the exit hint.
     $wide = $Width -ge 64 -and $Height -ge 20
+    $updateBadge = if ($Model.UpdateAvailable -and $Model.UpdateVersion) { "[ UPDATE: v$($Model.UpdateVersion) ]" } else { $null }
     if ($wide) {
         foreach ($text in (Get-ArkuzoLogoLines)) { $lines.Add((New-ArkuzoLine $text Cyan $Width)) }
-        $lines.Add((New-ArkuzoLine '  ARKUZO // MEMORY SAVER' White $Width))
+        if ($updateBadge) {
+            $leftText = '  ARKUZO // MEMORY SAVER'
+            $gap = [Math]::Max(1, $Width - $leftText.Length - $updateBadge.Length - 1)
+            $lines.Add([pscustomobject]@{
+                Segments = @(
+                    @{ Text = $leftText; Color = [ConsoleColor]::White },
+                    @{ Text = (' ' * $gap); Color = [ConsoleColor]::Gray },
+                    @{ Text = $updateBadge; Color = [ConsoleColor]::Red }
+                )
+                Text = $leftText + (' ' * $gap) + $updateBadge
+                Color = [ConsoleColor]::White
+            })
+        } else {
+            $lines.Add((New-ArkuzoLine '  ARKUZO // MEMORY SAVER' White $Width))
+        }
     } else {
-        $lines.Add((New-ArkuzoLine '  /\  ARKUZO  // MEMORY SAVER' Cyan $Width))
+        if ($updateBadge) {
+            $leftText = '  /\  ARKUZO  // MEMORY SAVER'
+            $gap = [Math]::Max(1, $Width - $leftText.Length - $updateBadge.Length - 1)
+            $lines.Add([pscustomobject]@{
+                Segments = @(
+                    @{ Text = $leftText; Color = [ConsoleColor]::Cyan },
+                    @{ Text = (' ' * $gap); Color = [ConsoleColor]::Gray },
+                    @{ Text = $updateBadge; Color = [ConsoleColor]::Red }
+                )
+                Text = $leftText + (' ' * $gap) + $updateBadge
+                Color = [ConsoleColor]::Cyan
+            })
+        } else {
+            $lines.Add((New-ArkuzoLine '  /\  ARKUZO  // MEMORY SAVER' Cyan $Width))
+        }
     }
     $mode = ([string]$Model.Mode).ToUpperInvariant()
     if ($Model.MonitorOnly) { $mode = 'MONITOR ONLY' }
@@ -2958,14 +3166,27 @@ function New-ArkuzoFrame($Model, [int]$Width, [int]$Height) {
     }
     if ($lines.Count -lt $usable -and $Height -ge 12) {
         $alertList = if ($Model.Issues) { @($Model.Issues) } elseif ($Model.Notice) { @(@{ Message = $Model.Notice }) } else { @() }
-        if ($alertList.Count -gt 0) {
-            $maxAlerts = [Math]::Min(2, [Math]::Max(1, $usable - $lines.Count - 1))
-            for ($aIdx = 0; $aIdx -lt [Math]::Min($alertList.Count, $maxAlerts); $aIdx++) {
-                $msg = [string]$alertList[$aIdx].Message
-                $alertColor = if ($msg -match '(?i)DISCONNECTED|ERROR|STARTUP|PRESSURE|FAIL|CRITICAL') { [ConsoleColor]::Red } else { [ConsoleColor]::Yellow }
-                $lines.Add((New-ArkuzoLine "  [!] $msg" $alertColor $Width))
+        $validAlerts = [System.Collections.Generic.List[object]]::new()
+        foreach ($item in $alertList) {
+            $rawMsg = if ($null -eq $item) { '' } elseif ($item -is [string]) { $item } elseif ($item.Message) { [string]$item.Message } else { '' }
+            $trimmed = $rawMsg.Trim()
+            if ($trimmed.Length -gt 0) {
+                $isErr = ($trimmed -match '(?i)DISCONNECTED|ERROR|STARTUP|PRESSURE|FAIL|CRITICAL|DEAD')
+                $validAlerts.Add(@{
+                    Message = $trimmed
+                    IsError = $isErr
+                })
             }
-        } else {
+        }
+        if ($validAlerts.Count -gt 0) {
+            $maxAlerts = [Math]::Min(2, [Math]::Max(1, $usable - $lines.Count - 1))
+            for ($aIdx = 0; $aIdx -lt [Math]::Min($validAlerts.Count, $maxAlerts); $aIdx++) {
+                $alert = $validAlerts[$aIdx]
+                $tag = if ($alert.IsError) { '[ERROR]' } else { '[INFO]' }
+                $alertColor = if ($alert.IsError) { [ConsoleColor]::Red } else { [ConsoleColor]::Yellow }
+                $lines.Add((New-ArkuzoLine "  $tag $($alert.Message)" $alertColor $Width))
+            }
+        } elseif ($lines.Count -lt $usable) {
             $lines.Add((New-ArkuzoLine '  NOTE  Working set != private RAM. Guard policy active.' DarkGray $Width))
         }
     }
@@ -3048,6 +3269,25 @@ function Draw-Dashboard($Rows, [int]$Detected, [int64]$Resident, [int64]$Private
             $sizeKey = "$width/$height/$top/$left"
             if ($script:frameSize -ne $sizeKey) { $script:frameCache.Clear(); $script:frameSize = $sizeKey }
             for ($row = 0; $row -lt $height; $row++) {
+                if ($row -lt $frame.Count -and $frame[$row].PSObject.Properties['Segments'] -and $frame[$row].Segments) {
+                    $segs = $frame[$row].Segments
+                    $signature = ($segs | ForEach-Object { "$($_.Color):$($_.Text)" }) -join '|'
+                    if ($script:frameCache[$row] -ne $signature) {
+                        [Console]::SetCursorPosition($left, $top + $row)
+                        $written = 0
+                        foreach ($s in $segs) {
+                            if ($written -ge $width) { break }
+                            $stext = [string]$s.Text
+                            if ($written + $stext.Length -gt $width) { $stext = $stext.Substring(0, $width - $written) }
+                            [Console]::ForegroundColor = [ConsoleColor]$s.Color
+                            [Console]::Write($stext)
+                            $written += $stext.Length
+                        }
+                        if ($written -lt $width) { [Console]::Write(' ' * ($width - $written)) }
+                        $script:frameCache[$row] = $signature
+                    }
+                    continue
+                }
                 $text = ''; $color = [ConsoleColor]::Gray
                 if ($row -lt $frame.Count) { $text = $frame[$row].Text; $color = $frame[$row].Color }
                 $text = (Fit-ArkuzoText $text $width).PadRight($width)
@@ -3083,7 +3323,7 @@ try {
             Write-Diagnostic 'DASHBOARD_STALL' @{ phase='HealthObservation'; durationSec=[math]::Round($swPhase.Elapsed.TotalSeconds,2) }
         }
         if ($RunForSec -gt 0 -and $clock.Elapsed.TotalSeconds -ge $RunForSec) { break }
-        if ($StopFile -and (Test-Path -LiteralPath $StopFile)) { break }
+        if (($StopFile -and (Test-Path -LiteralPath $StopFile)) -or (Test-Path -LiteralPath (Join-Path $DataDirectory 'stop.signal'))) { break }
         if ($clock.Elapsed.TotalSeconds -ge $nextPolicyCheck) {
             $swPhase = [Diagnostics.Stopwatch]::StartNew()
             Update-ArkuzoLivePolicy
@@ -3114,24 +3354,16 @@ try {
             }
             $nextPagefileCheck = $clock.Elapsed.TotalSeconds + 30
         }
+        Poll-ArkuzoVoltControlAsync
         if ($clock.Elapsed.TotalSeconds -ge $nextVoltCheck) {
-            $swPhase = [Diagnostics.Stopwatch]::StartNew()
             Update-VoltRecoveryCapability
-            $swPhase.Stop()
-            if ($swPhase.Elapsed.TotalSeconds -gt 5) {
-                Write-Diagnostic 'DASHBOARD_STALL' @{ phase='VoltCheck'; durationSec=[math]::Round($swPhase.Elapsed.TotalSeconds,2) }
-            }
-            $nextVoltCheck = $clock.Elapsed.TotalSeconds + 15
+            Start-ArkuzoVoltControlStatusAsync
+            $nextVoltCheck = $clock.Elapsed.TotalSeconds + 30
         }
+        Poll-ArkuzoVersionCheckAsync
         if ($clock.Elapsed.TotalSeconds -ge $nextUpdateCheck) {
-            Update-ArkuzoVersionCheck
+            Start-ArkuzoVersionCheckAsync
             $nextUpdateCheck = $clock.Elapsed.TotalSeconds + $updateCheckInterval
-        }
-        if ($null -ne $script:updateAvailableStatus -and $script:updateAvailableStatus.available) {
-            $dashboardIssues['update-available'] = @{
-                Message = $script:updateAvailableStatus.message
-                Time = $clock.Elapsed.TotalSeconds
-            }
         }
         $clients = @(Get-Process -Name RobloxPlayerBeta -ErrorAction SilentlyContinue)
         $liveIds = @($clients | ForEach-Object { $_.Id })
@@ -3185,6 +3417,12 @@ try {
                             $state.TrackerId = Get-ArkuzoBrowserTrackerId $procRecord.CommandLine
                         }
                     } catch { }
+                    if ($state.TrackerId) {
+                        try {
+                            $bound = Get-ArkuzoControlledAccount $state.TrackerId $id
+                            if ($null -ne $bound) { $script:sessionObservedAccounts[[string]$bound.accountId] = $true }
+                        } catch { }
+                    }
                     $tracked[$id] = $state
                     $watcher = $null
                     try {

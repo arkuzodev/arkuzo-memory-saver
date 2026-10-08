@@ -53,14 +53,15 @@ $resErr = Test-ArkuzoUpdateAvailable -CurrentVersion '1.0.5' -FetchDelegate $moc
 Assert ($resErr.available -eq $false) 'Network error must fail soft with available=false'
 Assert ($resErr.error -match 'Simulated network timeout') 'Error must be captured in error property'
 
-# 6. Dashboard issue integration
+# 6. Status tracking integration (badge replaces dashboard issues)
 $script:dashboardIssues = @{}
 $script:clock = [Diagnostics.Stopwatch]::StartNew()
 $script:diagnosticCalls = @()
 function Write-Diagnostic($kind, $data) { $script:diagnosticCalls += @{ kind = $kind; data = $data } }
 
 Update-ArkuzoVersionCheck -FetchDelegate $mockNewer -CurrentVersion '1.0.5'
-Assert ($script:dashboardIssues.ContainsKey('update-available')) 'Dashboard issues must contain update-available'
-Assert ($script:dashboardIssues['update-available'].Message -match 'UPDATE.*v1\.0\.6.*restart to update') 'Dashboard issue message must match update message'
+Assert ($null -ne $script:updateAvailableStatus -and $script:updateAvailableStatus.available) 'updateAvailableStatus must be available for newer version'
+Assert (-not $script:dashboardIssues.ContainsKey('update-available')) 'Dashboard issues must NOT contain update-available banner'
+Assert ($script:updateAvailableStatus.latestVersion -eq 'v1.0.6') 'Latest version must match tag'
 
 Write-Output 'PASS: Version check tests passed completely.'

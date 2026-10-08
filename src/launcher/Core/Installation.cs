@@ -35,6 +35,16 @@ public sealed class Installation(string root)
             return installed;
         } catch (JsonException ex) { throw new InvalidDataException("Invalid install metadata.",ex); }
     }
+    public bool TryGetInstalled(out Installed installed)
+    {
+        try {
+            installed = ReadPointer();
+            return true;
+        } catch {
+            installed = null!;
+            return false;
+        }
+    }
     public Installed Validate()
     {
         var installed=ReadPointer(); ValidateFiles(installed); return installed;

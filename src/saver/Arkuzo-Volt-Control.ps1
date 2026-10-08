@@ -149,7 +149,9 @@ function Test-VoltMissingLaunch($Context, [string]$AccountId, [string]$ExpectedT
         if (@($Context.Inventory.accounts | Where-Object { $_.trackerId -ceq $p.trackerId }).Count -ne 1) { return $false }
     }
     $target=@($Context.Status.accounts | Where-Object { $_.accountId -ceq $AccountId })
-    return ($target.Count -eq 1 -and $target[0].trackerId -ceq $ExpectedTrackerId -and $target[0].controlReady -and $target[0].uiStatus -ceq 'Idle' -and $target[0].lastLaunchAtMs -gt 0 -and $NowMs - $target[0].lastLaunchAtMs -ge ($MinLaunchAgeSec*1000))
+    if ($target.Count -ne 1) { return $false }
+    if ($target[0].cookieStatus -ceq 'dead' -or $target[0].cookieStatus -cne 'alive' -or -not $target[0].cookieAlive) { return $false }
+    return ($target[0].trackerId -ceq $ExpectedTrackerId -and $target[0].controlReady -and $target[0].uiStatus -ceq 'Idle' -and $target[0].lastLaunchAtMs -gt 0 -and $NowMs - $target[0].lastLaunchAtMs -ge ($MinLaunchAgeSec*1000))
 }
 
 function Invoke-VoltControlAction([string]$Action, [hashtable]$Facade, [string]$AccountId, [string]$ExpectedTrackerId, [int]$RelaunchDelaySec=30, [int]$MinLaunchAgeSec=90) {
@@ -177,6 +179,11 @@ function Invoke-VoltControlAction([string]$Action, [hashtable]$Facade, [string]$
     }
     if ($Action -ceq 'LaunchMissing') {
         $result=$context.Status; $result | Add-Member requestAccepted $false -Force
+        $targetAcct=@($context.Status.accounts | Where-Object { $_.accountId -ceq $AccountId })
+        if ($targetAcct.Count -eq 1 -and ($targetAcct[0].cookieStatus -ceq 'dead' -or $targetAcct[0].cookieStatus -cne 'alive' -or -not $targetAcct[0].cookieAlive)) {
+            $result.reason='Refused in any circumstance: account cookie is dead or not alive'
+            return $result
+        }
         if (-not (Test-VoltMissingLaunch $context $AccountId $ExpectedTrackerId (& $Facade.Now) $MinLaunchAgeSec)) { $result.reason='Missing account launch safety checks failed'; return $result }
         $fresh=& $Facade.Read $Facade.Root
         if ($fresh.Status.managerId -ne $result.managerId -or $fresh.Status.managerStartTicks -ne $result.managerStartTicks -or -not (Test-VoltMissingLaunch $fresh $AccountId $ExpectedTrackerId (& $Facade.Now) $MinLaunchAgeSec) -or -not (Test-VoltControlRevalidation $context $fresh) -or -not (& $Facade.Verify $fresh)) { $result.reason='Account or process identity changed before launch'; return $result }

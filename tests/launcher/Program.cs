@@ -154,6 +154,33 @@ try {
  } finally {
   try { if(!helperProc.HasExited) helperProc.Kill(); } catch {}
  }
+ var uncoopControllerName="Local\\ArkuzoLauncher-UncoopTest-"+Guid.NewGuid().ToString("N");
+ var uncoopPsi=new ProcessStartInfo("cmd.exe","/c ping 127.0.0.1 -n 30 > nul") { CreateNoWindow=true, UseShellExecute=false };
+ using var uncoopProc=Process.Start(uncoopPsi)!;
+ try {
+  File.WriteAllText(Path.Combine(takeoverData,"runtime-status.json"),$"{{\"pid\":{uncoopProc.Id}}}");
+  using var uncoopMutexAcquired=new ManualResetEventSlim(false);
+  using var uncoopExit=new ManualResetEventSlim(false);
+  var uncoopTask=Task.Run(() => {
+   using var ucController=new Mutex(false,uncoopControllerName);
+   ucController.WaitOne();
+   uncoopMutexAcquired.Set();
+   while(!uncoopProc.HasExited && !uncoopExit.IsSet) Thread.Sleep(50);
+   ucController.ReleaseMutex();
+  });
+  uncoopMutexAcquired.Wait();
+  try {
+   var uncoopWaits=0;
+   var uncoopExitCode=Task.Run(()=>LauncherEntry.Run(new[]{"--offline"},takeoverTemp,uncoopControllerName,()=>uncoopWaits++)).GetAwaiter().GetResult();
+   Assert(uncoopExitCode==1,"offline run without assets returns 1");
+   Assert(uncoopProc.HasExited,"uncooperative controller must be killed by launcher");
+   uncoopTask.GetAwaiter().GetResult();
+  } finally {
+   uncoopExit.Set();
+  }
+ } finally {
+  try { if(!uncoopProc.HasExited) uncoopProc.Kill(); } catch {}
+ }
  var startupWaits=0;
  var noRuntimeRoot=Path.Combine(entryTemp,"missing-runtime");
  Assert(LauncherEntry.Run(new[]{"--offline"},noRuntimeRoot,controllerName,()=>startupWaits++)==1 && startupWaits==1,"ordinary startup errors remain visible until acknowledged");

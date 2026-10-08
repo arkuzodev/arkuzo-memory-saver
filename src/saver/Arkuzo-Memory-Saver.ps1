@@ -1381,6 +1381,123 @@ function Get-ArkuzoPagefileGrowthDecision {
     return $decision
 }
 
+function Get-ArkuzoPagefileProvisioningDecision {
+    param($Snapshot, $Policy, [string]$TargetDriveLetter = 'C')
+    $decision = [pscustomobject]@{
+        eligible = $false; status = 'InvalidPolicy'; reason = $null
+        targetDrive = $TargetDriveLetter; targetName = "$($TargetDriveLetter):\pagefile.sys"
+        targetSizeMB = 0; diskGrowthMB = 0; freeSpaceAfterMB = 0; error = $null
+    }
+    if ($null -eq $Policy -or -not $Policy.valid) { $decision.reason = 'Valid pagefile policy is required.'; return $decision }
+    if (-not $Policy.enabled) { $decision.status = 'Disabled'; $decision.reason = 'Pagefile management is opt-in and disabled.'; return $decision }
+    if ($null -eq $Snapshot -or -not $Snapshot.available) { $decision.status = 'SnapshotUnavailable'; $decision.reason = 'Pagefile snapshot is unavailable.'; return $decision }
+    if (-not $Snapshot.isAdministrator) { $decision.status = 'NotAdministrator'; $decision.reason = 'Elevated administrator token is required.'; return $decision }
+
+    $targetSize = [int64]$Policy.max_file_mb
+    if ($targetSize -lt 1024 -or $targetSize -gt 163840) { $decision.reason = 'Target size out of bounds.'; return $decision }
+    $decision.targetSizeMB = $targetSize
+
+    # Match target drive
+    $driveId = "$($TargetDriveLetter):"
+    $drive = @($Snapshot.drives | Where-Object { $_.deviceId -ceq $driveId }) | Select-Object -First 1
+    if ($null -eq $drive -or $drive.driveType -ne 3 -or ($drive.fileSystem -cne 'NTFS' -and $drive.fileSystem -cne 'ReFS')) {
+        $decision.status = 'UnsupportedDrive'; $decision.reason = 'Target drive must be a local fixed NTFS or ReFS volume.'; return $decision
+    }
+
+    # Check if already provisioned at or above target size
+    $existing = @($Snapshot.settings | Where-Object { $_.name -like "$($TargetDriveLetter):\pagefile.sys" })
+    if ($existing.Count -gt 0 -and -not $Snapshot.automaticManagedPagefile) {
+        $currentMax = ($existing | Measure-Object -Property maximumSizeMB -Maximum).Maximum
+        if ($currentMax -ge $targetSize) {
+            $decision.status = 'AtOrAboveCeiling'; $decision.reason = 'Existing pagefile is already at or above target ceiling.'; return $decision
+        }
+    }
+
+    # Calculate additional disk allocation needed
+    $currentAllocatedMB = 0
+    $usage = @($Snapshot.usage | Where-Object { $_.name -like "$($TargetDriveLetter):\pagefile.sys" })
+    if ($usage.Count -gt 0) { $currentAllocatedMB = [int64]$usage[0].allocatedMB }
+    elseif ($existing.Count -gt 0) { $currentAllocatedMB = [int64]$existing[0].maximumSizeMB }
+
+    $additionalGrowthMB = [Math]::Max([int64]0, [int64]($targetSize - $currentAllocatedMB))
+    $decision.diskGrowthMB = $additionalGrowthMB
+
+    $reserveBytes = [int64][Math]::Max([int64]$Policy.reserve_free_bytes, [int64][Math]::Ceiling([double]$drive.sizeBytes * [double]$Policy.reserve_free_percent / 100.0))
+    $freeAfterBytes = [int64]$drive.freeBytes - ($additionalGrowthMB * 1MB)
+    $decision.freeSpaceAfterMB = [Math]::Round($freeAfterBytes / 1MB)
+
+    if ($freeAfterBytes -lt $reserveBytes) {
+        $decision.status = 'LowDiskSpace'
+        $decision.reason = "Provisioning requires $additionalGrowthMB MB growth which would breach the $($Policy.reserve_free_percent)%/15GB disk reserve."
+        return $decision
+    }
+
+    $decision.eligible = $true
+    $decision.status = 'Eligible'
+    $decision.reason = "Target drive has sufficient capacity to provision fixed $targetSize MB pagefile."
+    return $decision
+}
+
+function Invoke-ArkuzoPagefileProvisioning {
+    param($Snapshot, $Policy, [string]$TargetDriveLetter = 'C', [switch]$MonitorOnly, [hashtable]$Dependencies = @{})
+    $decision = Get-ArkuzoPagefileProvisioningDecision -Snapshot $Snapshot -Policy $Policy -TargetDriveLetter $TargetDriveLetter
+    $result = [pscustomobject]@{
+        status = $decision.status; reason = $decision.reason; decision = $decision
+        writeAttempted = $false; changed = $false; pendingReboot = $false
+        rebootInitiated = $false; targetName = $decision.targetName; targetSizeMB = $decision.targetSizeMB
+        error = $null
+    }
+    if (-not $decision.eligible) { return $result }
+    if ($MonitorOnly) {
+        $result.status = 'MonitorOnly'; $result.reason = 'Monitor-only mode prohibits pagefile provisioning writes.'; return $result
+    }
+
+    $result.writeAttempted = $true
+    try {
+        if ($Dependencies.ContainsKey('SetProvisionedPagefile')) {
+            & $Dependencies.SetProvisionedPagefile $decision.targetName ([uint32]$decision.targetSizeMB) $false
+        } else {
+            # 1. Update Registry first: PagingFiles multi-string
+            $regPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management'
+            $settingStr = "$($decision.targetName) $($decision.targetSizeMB) $($decision.targetSizeMB)"
+            Set-ItemProperty -Path $regPath -Name 'PagingFiles' -Value @($settingStr) -ErrorAction Stop
+
+            # 2. Update WMI Win32_PageFileSetting if exists or create
+            try {
+                $cimSettings = @(Get-CimInstance Win32_PageFileSetting -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "*pagefile.sys" })
+                if ($cimSettings.Count -gt 0) {
+                    Set-CimInstance -InputObject $cimSettings[0] -Property @{
+                        InitialSize = [uint32]$decision.targetSizeMB
+                        MaximumSize = [uint32]$decision.targetSizeMB
+                    } -ErrorAction SilentlyContinue | Out-Null
+                }
+            } catch { }
+
+            # 3. Disable AutomaticManagedPagefile in WMI and Registry
+            try {
+                $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
+                if ($cs) {
+                    Set-CimInstance -InputObject $cs -Property @{ AutomaticManagedPagefile = $false } -ErrorAction SilentlyContinue | Out-Null
+                }
+            } catch { }
+            Set-ItemProperty -Path $regPath -Name 'AutomaticManagedPagefile' -Value 0 -ErrorAction SilentlyContinue
+        }
+        $result.changed = $true
+        $result.pendingReboot = $true
+        $result.status = 'PendingReboot'
+        $result.reason = "Fixed pagefile of $($decision.targetSizeMB) MB provisioned. Windows requires a reboot for the size to take physical effect."
+    } catch {
+        $result.status = 'WriteFailed'
+        $result.reason = "Pagefile provisioning write failed: $($_.Exception.Message)"
+        $result.error = $_
+        # Failsafe rollback: ensure AutomaticManagedPagefile remains enabled if setting failed
+        try {
+            Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management' -Name 'AutomaticManagedPagefile' -Value 1 -ErrorAction SilentlyContinue
+        } catch { }
+    }
+    return $result
+}
+
 function New-ArkuzoPagefileManagementResult {
     param($Decision)
     return [pscustomobject]@{

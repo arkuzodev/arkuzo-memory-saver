@@ -7,7 +7,8 @@ Changes for **Arkuzo Memory Saver with Volt Integration** are recorded here.
 - Set the production private-memory recovery-candidate threshold to 6500 MB.
 - Enable bounded pagefile management in production defaults and raise both per-file and total ceilings to 163840 MB (160 GiB).
 - Accept the 160-GiB per-file policy in validation while retaining disk reserves, administrator checks, Windows-managed preservation, no-shrink behavior, and the 4-GiB-per-boot growth budget.
-- Add regression coverage for production loading and large-file ceiling boundaries. Existing installed configurations and published release assets are not overwritten.
+- Add safe initial provisioning path (`Get-ArkuzoPagefileProvisioningDecision`, `Invoke-ArkuzoPagefileProvisioning`) enabling transition from Windows-managed to a fixed 160-GiB pagefile with disk reserve safeguards, atomic registry/WMI rollback, and pending-reboot verification.
+- Add regression coverage for production loading, provisioning decisions, and large-file ceiling boundaries. Existing installed configurations and published release assets are not overwritten.
 
 ## v1.0.5 — Visible Singleton Launcher, Native Privileges & VoltX Engine Optimizations
 

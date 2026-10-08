@@ -99,22 +99,38 @@ def read_account_inventory(path):
                 'relaunchDelayMs': None, 'accounts': [], 'reason': 'Volt inventory unavailable'}
 
 
-def read_user_id_map(path):
+def read_account_map(path):
     try:
         with closing(sqlite3.connect(Path(path).resolve().as_uri() + '?mode=ro', uri=True, timeout=0.5)) as db:
             row = db.execute('SELECT value FROM state_documents WHERE name=?', ('accounts',)).fetchone()
             if not row:
-                return {}
+                return {'byTracker': {}, 'byUserId': {}, 'byAccountId': {}}
             document = json.loads(row[0])
-        mapping = {}
+        by_tracker = {}
+        by_uid = {}
+        by_aid = {}
         for a in document.get('accounts') or []:
-            uid = a.get('userId')
             uname = a.get('username')
-            if uid and uname:
-                mapping[str(uid)] = str(uname)
-        return mapping
+            if not uname or not isinstance(uname, str) or not uname.strip():
+                continue
+            uname = uname.strip()
+            bt = a.get('browserTrackerId')
+            if bt is not None and str(bt).strip():
+                by_tracker[str(bt).strip()] = uname
+            uid = a.get('userId')
+            if uid is not None and str(uid).strip():
+                by_uid[str(uid).strip()] = uname
+            aid = a.get('id')
+            if aid is not None and str(aid).strip():
+                by_aid[str(aid).strip()] = uname
+        return {'byTracker': by_tracker, 'byUserId': by_uid, 'byAccountId': by_aid}
     except Exception:
-        return {}
+        return {'byTracker': {}, 'byUserId': {}, 'byAccountId': {}}
+
+
+def read_user_id_map(path):
+    m = read_account_map(path)
+    return m.get('byUserId', {})
 
 
 if __name__ == '__main__':
@@ -123,9 +139,12 @@ if __name__ == '__main__':
     mode.add_argument('--tracker-id', default=_GLOBAL_CHECK)
     mode.add_argument('--inventory', action='store_true')
     mode.add_argument('--user-id')
+    mode.add_argument('--map', action='store_true')
     args = parser.parse_args()
     path = Path(os.environ.get('LOCALAPPDATA', '')) / 'Volt' / 'state.db'
-    if args.user_id:
+    if args.map:
+        result = read_account_map(path)
+    elif args.user_id:
         u_map = read_user_id_map(path)
         uname = u_map.get(str(args.user_id))
         result = {'found': bool(uname), 'username': uname}

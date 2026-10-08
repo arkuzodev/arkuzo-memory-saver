@@ -311,6 +311,52 @@ function Get-VoltUiNodes($Manager, $Records) {
     return [pscustomobject]@{Nodes=$nodes;UiProcessIds=@($uiIds);Root=$root}
 }
 
+function Get-VoltNativeWindows([int]$ProcessId) {
+    if ($null -eq ('ArkuzoVoltNativeWindows' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class ArkuzoVoltNativeWindows {
+    public sealed class Window { public long handle; public int processId; public string title; public string className; }
+    private delegate bool Callback(IntPtr hwnd, IntPtr state);
+    [DllImport("user32.dll")] private static extern bool EnumWindows(Callback callback, IntPtr state);
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int count);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetClassName(IntPtr hwnd, StringBuilder text, int count);
+    public static Window[] Read(int processId) {
+        var result = new List<Window>();
+        Callback callback = (hwnd, state) => {
+            uint owner; GetWindowThreadProcessId(hwnd, out owner);
+            if (owner == processId) {
+                var title = new StringBuilder(256); var kind = new StringBuilder(256);
+                GetWindowText(hwnd, title, title.Capacity); GetClassName(hwnd, kind, kind.Capacity);
+                result.Add(new Window { handle=hwnd.ToInt64(), processId=(int)owner, title=title.ToString(), className=kind.ToString() });
+            }
+            return true;
+        };
+        if (!EnumWindows(callback, IntPtr.Zero)) throw new InvalidOperationException("Native window enumeration unavailable");
+        GC.KeepAlive(callback);
+        return result.ToArray();
+    }
+}
+'@ -ErrorAction Stop
+    }
+    return @([ArkuzoVoltNativeWindows]::Read($ProcessId))
+}
+
+function Get-VoltManagerWindow([int]$ProcessId) {
+    # MainWindowHandle can identify Tao's event target (or zero), not the WebView.
+    # Native ownership and the exact observed window contract select the root;
+    # full account controls and renderer ancestry are still verified separately.
+    $windows=@(Get-VoltNativeWindows $ProcessId | Where-Object {
+        $_.processId -eq $ProcessId -and $_.handle -ne 0 -and $_.className -ceq 'Tauri Window' -and $_.title -ceq 'Volt'
+    })
+    if ($windows.Count -ne 1) { return [long]0 }
+    return [long]$windows[0].handle
+}
+
 function Get-VoltLiveContext([string]$Root) {
     Close-VoltRetainedProcesses
     $context=[pscustomobject]@{Status=(New-VoltUnavailableStatus 'Volt manager, UI or process identity unavailable');Inventory=$null;Manager=$null;Ui=$null;Processes=@()}
@@ -328,7 +374,7 @@ function Get-VoltLiveContext([string]$Root) {
         if (-not $records.ContainsKey([int]$id)) { throw 'manager changed' }
         $retained=Get-VoltRetainedProcess $id $records[[int]$id]
         $retained.Process.Refresh()
-        $manager=[pscustomobject]@{processId=$id;startTicks=$retained.startTicks;path=$retained.path;identityStable=$true;windowHandle=$retained.Process.MainWindowHandle.ToInt64()}
+        $manager=[pscustomobject]@{processId=$id;startTicks=$retained.startTicks;path=$retained.path;identityStable=$true;windowHandle=(Get-VoltManagerWindow $id)}
         if ($manager.windowHandle -eq 0) { $context.Status.reason='Volt Account Manager HWND unavailable; no navigation attempted'; return $context }
         $ui=Get-VoltUiNodes $manager $records
         $processes=Get-VoltRobloxSnapshot $records $manager
@@ -355,7 +401,7 @@ function Test-VoltLiveContext($Context) {
     try {
         if (-not $Context.Status.available -or [string]::IsNullOrEmpty($Context.ProbeRoot) -or -not $script:VoltRetained.ContainsKey([int]$Context.Status.managerId)) { return $false }
         $manager=$Context.Manager; $held=$script:VoltRetained[[int]$manager.processId]
-        if (-not (Test-VoltRetainedProcess $held) -or $held.Process.MainWindowHandle.ToInt64() -ne $manager.windowHandle) { return $false }
+        if (-not (Test-VoltRetainedProcess $held) -or (Get-VoltManagerWindow $manager.processId) -ne $manager.windowHandle) { return $false }
         $managers=@(Get-Process -Name tauri-app -ErrorAction SilentlyContinue)
         try { if ($managers.Count -ne 1 -or $managers[0].Id -ne $manager.processId -or $managers[0].StartTime.ToUniversalTime().Ticks -ne $manager.startTicks) { return $false } }
         finally { foreach($p in $managers) { $p.Dispose() } }

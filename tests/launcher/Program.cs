@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Launcher;
 using System.Security.Cryptography;
 using System.Text;
@@ -115,6 +116,43 @@ try {
     Assert(!Directory.Exists(Path.Combine(entryTemp,"app")) && !Directory.Exists(Path.Combine(entryTemp,"data")),"controller preflight has no runtime/config/log side effects");
    } finally { Console.SetOut(savedOut); }
   } finally { controller.ReleaseMutex(); }
+ }
+ var takeoverTemp=Path.Combine(Environment.GetEnvironmentVariable("TMPDIR")!,"launcher-takeover-tests-"+Guid.NewGuid().ToString("N"));
+ Directory.CreateDirectory(takeoverTemp);
+ var takeoverData=Path.Combine(takeoverTemp,"data");
+ Directory.CreateDirectory(takeoverData);
+ var takeoverControllerName="Local\\ArkuzoLauncher-TakeoverTest-"+Guid.NewGuid().ToString("N");
+ var psi=new ProcessStartInfo("cmd.exe","/c ping 127.0.0.1 -n 30 > nul") { CreateNoWindow=true, UseShellExecute=false };
+ using var helperProc=Process.Start(psi)!;
+ try {
+  File.WriteAllText(Path.Combine(takeoverData,"runtime-status.json"),$"{{\"pid\":{helperProc.Id}}}");
+  var stopFile=Path.Combine(takeoverData,"controller.stop");
+  using var mutexAcquired=new ManualResetEventSlim(false);
+  using var stopReceived=new ManualResetEventSlim(false);
+  var controllerTask=Task.Run(() => {
+   using var takeoverController=new Mutex(false,takeoverControllerName);
+   takeoverController.WaitOne();
+   mutexAcquired.Set();
+   while(!File.Exists(stopFile) && !stopReceived.IsSet) Thread.Sleep(50);
+   if (File.Exists(stopFile)) {
+    try { helperProc.Kill(); helperProc.WaitForExit(); } catch {}
+   }
+   takeoverController.ReleaseMutex();
+  });
+  mutexAcquired.Wait();
+  try {
+   var verifyExit=Task.Run(()=>LauncherEntry.Run(new[]{"--offline","--verify-only"},takeoverTemp,takeoverControllerName)).GetAwaiter().GetResult();
+   Assert(verifyExit==1 && !File.Exists(stopFile),"verify-only does not signal stop to existing controller");
+   var dummyWaits=0;
+   var replaceExit=Task.Run(()=>LauncherEntry.Run(new[]{"--offline"},takeoverTemp,takeoverControllerName,()=>dummyWaits++)).GetAwaiter().GetResult();
+   Assert(replaceExit==1,"offline run without assets returns 1");
+   controllerTask.GetAwaiter().GetResult();
+   Assert(!File.Exists(stopFile),"stop file is cleaned up after takeover");
+  } finally {
+   stopReceived.Set();
+  }
+ } finally {
+  try { if(!helperProc.HasExited) helperProc.Kill(); } catch {}
  }
  var startupWaits=0;
  var noRuntimeRoot=Path.Combine(entryTemp,"missing-runtime");

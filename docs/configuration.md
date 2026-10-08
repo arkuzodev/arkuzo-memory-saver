@@ -30,7 +30,7 @@ Merge these keys into the matching sections of an existing valid configuration. 
     "hard_limit": false
   },
   "health": {
-    "warmup_sec": 300,
+    "warmup_sec": 60,
     "private_limit_mb": 6000,
     "private_limit_sustain_sec": 60,
     "pressure_percent": 82
@@ -71,7 +71,7 @@ Trimming waits for the **individual client's** warmup, checks its current reside
 | `private_limit_sustain_sec` | `60` | Continuous observation required for an ordinary private-limit violation. |
 | `pressure_percent` | `82` | OS **commit** utilization threshold for pressure-based candidate selection, not physical-RAM usage. |
 | `pressure_min_private_mb` | `2500` | Minimum private footprint for the pressure-selection path. |
-| `warmup_sec` | `300` | Five-minute per-client startup grace for ordinary trimming and routine health evaluation. |
+| `warmup_sec` | `60` | One-minute per-client startup grace for ordinary trimming and routine health evaluation. |
 | `hang_timeout_sec` | `120` | Continuous unresponsive-window observation before a hang becomes a candidate. |
 | `startup_error_timeout_sec` | `40` | Separate continuous observation grace for a recognized startup-error dialog. |
 | `disconnect_timeout_sec` | `5` | Grace after a detected, correctly bound in-game disconnect or kick. |
@@ -97,11 +97,11 @@ The **82% threshold is a candidate-selection policy, not a guarantee**. OS commi
 | `ready_stable_sec` | `30` | Continuous restoration-readiness confirmation interval. |
 | `excluded_account_ids` | `[]` | Account identifiers excluded from restoration eligibility. Keep real identifiers private. |
 
-## `pagefile`: guarded virtual memory scaling (opt-in)
+## `pagefile`: guarded virtual memory scaling (bounded)
 
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `enabled` | `false` | Disabled by default. Only set to `true` if dynamic pagefile expansion is explicitly desired. |
+| Key | Default | Notes |
+| :--- | :--- | :--- |
+| `enabled` | `true` | Enabled by default with strict 15 GiB disk headroom safeguards and audit logging. |
 | `growth_step_mb` | `4096` | Size to add per growth operation (4 GiB). |
 | `max_file_mb` | `65536` | Maximum size for an individual pagefile (64 GiB). |
 | `max_total_mb` | `131072` | Maximum cumulative pagefile allocation (128 GiB). |

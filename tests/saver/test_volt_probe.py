@@ -181,5 +181,20 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(result.stderr,'')
         self.assertNotIn('SECRET',result.stdout)
 
+    def test_cli_map_mode_returns_mappings(self):
+        self.valid_inventory()
+        self.save()
+        volt = Path(self.temp.name) / 'Volt'
+        volt.mkdir(exist_ok=True)
+        (volt / 'state.db').write_bytes(self.path.read_bytes())
+        result = subprocess.run([sys.executable, '-B', str(Path(__file__).resolve().parents[2]/'src'/'saver'/'Arkuzo-Volt-Probe.py'), '--map'],
+                                env=dict(os.environ, LOCALAPPDATA=self.temp.name), capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0)
+        data = json.loads(result.stdout)
+        self.assertIn('byTracker', data)
+        self.assertIn('byUserId', data)
+        self.assertIn('byAccountId', data)
+        self.assertEqual(data['byTracker'].get('12345'), 'alpha')
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

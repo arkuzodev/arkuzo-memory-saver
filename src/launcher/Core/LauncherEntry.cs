@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 namespace Launcher;
 internal sealed class AlreadyRunningException(string message) : InvalidOperationException(message);
 // The synchronous entry point keeps Windows mutex ownership on one thread through child exit.
@@ -33,7 +34,101 @@ public static class LauncherEntry
   try {
    using var updaterLock=new LauncherLock(root);
    if (!args.Contains("--verify-only") && ControllerIsRunning(controllerMutexName))
-       throw new AlreadyRunningException("A Memory Saver controller is already running, possibly from another folder or a background watchdog.");
+   {
+       var rootFull = Path.GetFullPath(root);
+       var dataDir = Directory.Exists(Path.Combine(rootFull, "data")) ? Path.Combine(rootFull, "data") : rootFull;
+       var statusPath = File.Exists(Path.Combine(dataDir, "runtime-status.json"))
+           ? Path.Combine(dataDir, "runtime-status.json")
+           : Path.Combine(rootFull, "runtime-status.json");
+       var targetDir = File.Exists(statusPath) ? Path.GetDirectoryName(statusPath)! : dataDir;
+       var stopFile = Path.Combine(targetDir, "controller.stop");
+
+       int? activePid = null;
+       Process? activeProc = null;
+       if (File.Exists(statusPath))
+       {
+           try
+           {
+               using var doc = JsonDocument.Parse(File.ReadAllBytes(statusPath));
+               if (doc.RootElement.TryGetProperty("pid", out var pidProp) && pidProp.TryGetInt32(out var p))
+               {
+                   try
+                   {
+                       var proc = Process.GetProcessById(p);
+                       if (!proc.HasExited)
+                       {
+                           var pName = proc.ProcessName.ToLowerInvariant();
+                           if (pName.Contains("powershell") || pName.Contains("pwsh") || pName.Contains("cmd"))
+                           {
+                               activePid = p;
+                               activeProc = proc;
+                           }
+                       }
+                   }
+                   catch { }
+               }
+           }
+           catch { }
+       }
+
+       if (activePid.HasValue && activeProc != null)
+       {
+           Directory.CreateDirectory(targetDir);
+           File.WriteAllText(stopFile, "Graceful stop signaled by launcher.");
+           if (!Console.IsOutputRedirected)
+           {
+               LauncherUi.Step("STOP", $"Signaling existing controller (PID {activePid.Value}) to stop gracefully...", ConsoleColor.Yellow);
+           }
+           var gracefulDeadline = DateTime.UtcNow.AddSeconds(10);
+           while (DateTime.UtcNow < gracefulDeadline)
+           {
+               var exited = false;
+               try { exited = activeProc.HasExited; } catch { exited = true; }
+               if (exited && !ControllerIsRunning(controllerMutexName))
+                   break;
+               Thread.Sleep(250);
+           }
+
+           try
+           {
+               if (!activeProc.HasExited)
+               {
+                   if (!Console.IsOutputRedirected)
+                   {
+                       LauncherUi.Step("KILL", $"Controller (PID {activePid.Value}) did not exit gracefully, terminating controller process...", ConsoleColor.Yellow);
+                   }
+                   activeProc.Kill();
+                   activeProc.WaitForExit(5000);
+               }
+           }
+           catch { }
+
+           var mutexDeadline = DateTime.UtcNow.AddSeconds(5);
+           while (DateTime.UtcNow < mutexDeadline && ControllerIsRunning(controllerMutexName))
+           {
+               Thread.Sleep(250);
+           }
+
+           if (File.Exists(stopFile))
+           {
+               try { File.Delete(stopFile); } catch { }
+           }
+
+           if (ControllerIsRunning(controllerMutexName))
+           {
+               throw new AlreadyRunningException($"Existing Memory Saver controller (PID {activePid.Value}) mutex was not released.");
+           }
+
+           if (!Console.IsOutputRedirected)
+           {
+               LauncherUi.Step("REPLACE", "Previous controller shut down cleanly. Proceeding with startup.", ConsoleColor.Green);
+           }
+       }
+       else
+       {
+           throw new AlreadyRunningException("A Memory Saver controller is already running, possibly from another folder or a background watchdog.");
+       }
+   }
    if (!Console.IsOutputRedirected && !args.Contains("--verify-only"))
    {
        LauncherUi.ShowBanner();

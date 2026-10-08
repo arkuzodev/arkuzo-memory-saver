@@ -16,7 +16,7 @@
     "private_limit_mb": 6000,
     "pressure_percent": 88,
     "pressure_min_private_mb": 4000,
-    "warmup_sec": 300,
+    "warmup_sec": 60,
     "hang_timeout_sec": 120,
     "startup_error_timeout_sec": 5,
     "disconnect_timeout_sec": 5,
@@ -37,7 +37,7 @@
     "excluded_account_ids": []
   },
   "pagefile": {
-    "enabled": false,
+    "enabled": true,
     "growth_step_mb": 4096,
     "max_file_mb": 65536,
     "max_total_mb": 131072,

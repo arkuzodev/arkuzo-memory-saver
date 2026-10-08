@@ -99,15 +99,9 @@ The **88% threshold is a candidate-selection policy, not a guarantee**. OS commi
 
 ## `pagefile`: guarded virtual memory scaling (bounded)
 
-<<<<<<< HEAD
-| Key | Default | Notes |
-| :--- | :--- | :--- |
-| `enabled` | `true` | Enabled by default with strict 15 GiB disk headroom safeguards and audit logging. |
-=======
 | Key | Default | Meaning |
-| --- | --- | --- |
+| :--- | :--- | :--- |
 | `enabled` | `true` | Enabled in production defaults; administrator, ownership, disk-reserve, audit, and per-boot gates still apply. Missing policy remains disabled. |
->>>>>>> origin/main
 | `growth_step_mb` | `4096` | Size to add per growth operation (4 GiB). |
 | `max_file_mb` | `163840` | Maximum managed size for an individual pagefile (160 GiB), including single-volume hosts. |
 | `max_total_mb` | `163840` | Maximum cumulative managed pagefile allocation (160 GiB). |

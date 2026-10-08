@@ -17,6 +17,8 @@ SHA-256 values for each release are published in that release's **`SHA256SUMS.tx
 The release binary `ArkuzoMemorySaver.exe` (`68acb79a8f075e308cbed528c724556152897fe151e5b21393d1c2595cd6f855`) was scanned on VirusTotal and verified **0/59 Clean** with zero detections:
 - **VirusTotal Scan:** [https://www.virustotal.com/gui/file/68acb79a8f075e308cbed528c724556152897fe151e5b21393d1c2595cd6f855](https://www.virustotal.com/gui/file/68acb79a8f075e308cbed528c724556152897fe151e5b21393d1c2595cd6f855)
 
+The v1.0.6 release reuses the **byte-identical v1.0.5 launcher**; its embedded executable version remains 1.0.5, while the separately verified runtime identifies as 1.0.6. The existing VirusTotal report was checked again on October 8, 2026 and still shows zero detections. This scan covers that launcher hash, not all runtime scripts.
+
 Checksums and antivirus scans are not signatures or guarantees. Keep Windows Defender, SmartScreen, and Windows Error Reporting enabled.
 
 ## Volt integration

@@ -2,7 +2,16 @@
 
 Changes for **Arkuzo Memory Saver with Volt Integration** are recorded here.
 
-## Unreleased — 160-GiB pagefile ceiling and 6500-MB memory guard
+## v1.0.6 — Recovery observation continuity and memory policy
+
+- Keep real, generation-bound health observations flowing during slow Volt probe waits and between clients; preserve the strict greater-than-five-second observation-gap reset.
+- Prevent oversized-memory grace from masking an independently sustained hang; retain confirmed memory/OS-pressure priority.
+- Recheck completed child probes before observation work and at expired deadlines to avoid false timeout refusals.
+- Bind the original recovery reason through revalidation; preserve identity, audit, budget, journal rollback and serialized account-handoff gates.
+- Add fixture-only recovery-timing, healthy-rebound, true-gap, changed-generation and probe-exit regression coverage. No destructive live-client tests were used.
+- Keep the byte-identical v1.0.5 launcher (SHA-256 `68acb79a8f075e308cbed528c724556152897fe151e5b21393d1c2595cd6f855`); only the separately versioned runtime advances. The live notifier advertises the new stable release without restarting or installing into a running controller.
+
+### Previously committed memory-policy changes included in this release
 
 - Set the production private-memory recovery-candidate threshold to 6500 MB.
 - Enable bounded pagefile management in production defaults and raise both per-file and total ceilings to 163840 MB (160 GiB).

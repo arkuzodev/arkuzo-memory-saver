@@ -47,7 +47,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$ArkuzoRuntimeVersion = '1.0.5'
+$ArkuzoRuntimeVersion = '1.0.6'
 # Resolve persistent data independently of the versioned program files.
 if ([string]::IsNullOrWhiteSpace($DataDirectory)) { $DataDirectory = $PSScriptRoot }
 $DataDirectory = [IO.Path]::GetFullPath($DataDirectory)
@@ -489,6 +489,60 @@ function Get-RobloxLogDisconnectReason([string]$NewText) {
     }
     return $null
 }
+function Invoke-ArkuzoHealthObservation {
+    # Cooperative, read-only service: never perform launcher/log/name IO here.
+    # Round-robin and a half-second work slice prevent a large client set from
+    # monopolizing a probe wait. Oversized sets still fail closed on real gaps.
+    if ($script:observationBusy -or $null -eq $script:tracked -or $null -eq $clock) { return }
+    $script:observationBusy = $true
+    $work = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        $ids = @($script:tracked.Keys | Sort-Object)
+        if ($ids.Count -eq 0) { return }
+        for ($i=0; $i -lt $ids.Count -and $work.Elapsed.TotalMilliseconds -lt 500; $i++) {
+            $index = [int]$script:observationCursor % $ids.Count
+            $script:observationCursor = ($index + 1) % $ids.Count
+            $id = [int]$ids[$index]; $state = $script:tracked[$id]
+            $now = $clock.Elapsed.TotalSeconds
+            if ($state.RecoveryRequested -or ($null -ne $state.LastHealthSampleTime -and
+                $now -ge [double]$state.LastHealthSampleTime -and ($now - [double]$state.LastHealthSampleTime) -lt 1)) { continue }
+            try {
+                if (-not (Test-ArkuzoClientIdentity $state.Watcher $id $state.StartTicks)) { Reset-ArkuzoHealthSample $state; continue }
+                $reason = if ($state.isDisconnected) { 'IN_GAME_DISCONNECT' } else { '' }
+                $sample = Get-ArkuzoRecoveryHealthSample $state.Watcher $reason $state
+                if (-not (Test-ArkuzoClientIdentity $state.Watcher $id $state.StartTicks)) { Reset-ArkuzoHealthSample $state; continue }
+                $sample.systemCommitPercent = if ($null -ne $systemMemory) { $systemMemory.commitPercent } else { 0 }
+                $sample.eligible = (-not $MonitorOnly -and $healthPolicy.enabled -and $voltStatus.safeToRecycle -and
+                    (Test-ArkuzoVoltOwnership $state.ParentId $voltParents[$state.ParentId] $state.StartTicks $voltPath))
+                # Timestamp after collecting; never replay or synthesize missed samples.
+                $state.HealthDecision = Get-ArkuzoHealthDecision $state $sample $healthPolicy $clock.Elapsed.TotalSeconds
+                if (-not $sample.windowPresent -or -not $sample.responding -or $sample.launchError -or
+                    $sample.isDisconnected -or -not $state.GameReady) { Clear-ArkuzoOutcomeObservation $state }
+                if ($null -eq $state.LastSnapshot) { $state.LastSnapshot = @{pid=$id} }
+                foreach ($key in $sample.Keys) { $state.LastSnapshot[$key] = $sample[$key] }
+                $state.LastSnapshot.state = $state.HealthDecision.Status
+                $state.LastSnapshot.sampleTime = [datetime]::UtcNow.ToString('o')
+                # Do not advance outcome freshness: this service has not tailed
+                # the game log. Only the complete main-loop sample can do that.
+            } catch { Reset-ArkuzoHealthSample $state }
+        }
+    } finally { $work.Stop(); $script:observationBusy = $false }
+}
+function Wait-ArkuzoObservedProcess($Process, [int]$TimeoutMs) {
+    # Keep the original total timeout, including observation work. No asynchronous
+    # runspace owns client handles and disposal never waits for a background task.
+    $deadline = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        while ($deadline.Elapsed.TotalMilliseconds -lt $TimeoutMs) {
+            if ($Process.WaitForExit(0)) { return $true }
+            Invoke-ArkuzoHealthObservation
+            $remaining = $TimeoutMs - [int][math]::Ceiling($deadline.Elapsed.TotalMilliseconds)
+            if ($remaining -le 0) { return $Process.WaitForExit(0) }
+            if ($Process.WaitForExit([math]::Min(100, $remaining))) { return $true }
+        }
+        return $Process.WaitForExit(0)
+    } finally { $deadline.Stop() }
+}
 function Get-ArkuzoVoltRecoveryStatus([string]$Root, [string]$TrackerId) {
     $child = $null
     try {
@@ -505,7 +559,7 @@ function Get-ArkuzoVoltRecoveryStatus([string]$Root, [string]$TrackerId) {
         $info.UseShellExecute = $false; $info.CreateNoWindow = $true
         $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
         $child = [Diagnostics.Process]::Start($info)
-        if (-not $child.WaitForExit(3000)) { $child.Kill(); throw 'Probe timeout' }
+        if (-not (Wait-ArkuzoObservedProcess $child 3000)) { $child.Kill(); throw 'Probe timeout' }
         if ($child.ExitCode -ne 0) { throw 'Probe failed' }
         $result = $child.StandardOutput.ReadToEnd() | ConvertFrom-Json
         if ($null -eq $result.safeToRecycle) { throw 'Invalid probe result' }
@@ -715,7 +769,7 @@ function Invoke-ArkuzoVoltControl([ValidateSet('Status','Configure','LaunchMissi
         $info.UseShellExecute=$false;$info.CreateNoWindow=$true;$info.RedirectStandardOutput=$true;$info.RedirectStandardError=$true
         $child=[Diagnostics.Process]::Start($info)
         $out=$child.StandardOutput.ReadToEndAsync();$err=$child.StandardError.ReadToEndAsync()
-        if (-not $child.WaitForExit(15000)) { $child.Kill();throw 'Volt UI adapter timeout' }
+        if (-not (Wait-ArkuzoObservedProcess $child 15000)) { $child.Kill();throw 'Volt UI adapter timeout' }
         if ($child.ExitCode -ne 0) { throw 'Volt UI adapter refused request' }
         $result=$out.Result|ConvertFrom-Json
         if ($result.available -isnot [bool]) { throw 'Invalid control snapshot' }
@@ -974,6 +1028,9 @@ function Invoke-ClientRecovery([int]$ClientId, $State) {
     if ($MonitorOnly -or -not $healthPolicy.enabled -or -not $ownsControllerMutex -or $State.RecoveryRequested -or -not $State.HealthDecision.Recycle) { return }
     if (-not $restorePolicy.enabled) { Warn-Throttled 'restore-disabled' 'Account outcome recovery disabled; destructive recovery blocked.'; return }
     if (-not $recoveryJournalHealthy) { Warn-Throttled 'recovery-journal' 'Recovery blocked: invalid recovery journal. Clients left untouched.'; return }
+    # Observation service can update the decision during IO. Bind this attempt
+    # to its original reason; a changed condition needs a new authorized attempt.
+    $reason = $State.HealthDecision.Reason
     # Re-read capability immediately before acting, not merely at startup.
     Update-VoltRecoveryCapability
     if (-not $voltStatus.safeToRecycle -or -not (Test-ArkuzoVoltOwnership $State.ParentId $voltParents[$State.ParentId] $State.StartTicks $voltPath)) { return }
@@ -981,7 +1038,7 @@ function Invoke-ClientRecovery([int]$ClientId, $State) {
     $boundAccount = Get-ArkuzoControlledAccount $State.TrackerId $ClientId
     if ($null -eq $boundAccount -or $voltControlStatus.managerId -ne $State.ParentId -or $voltControlStatus.managerStartTicks -ne $voltParents[$State.ParentId].StartTicks) { return }
     if (-not (Test-ArkuzoRecoveryHandoff ([string]$boundAccount.accountId))) { Warn-Throttled 'recovery-handoff' 'Waiting for exact account restoration/backoff. Other accounts left untouched.'; return }
-    $effectiveCooldown = if ($State.HealthDecision.Reason -eq 'VOLT_STARTUP_ERROR') { [math]::Min(5, $healthPolicy.cooldown_sec) } else { $healthPolicy.cooldown_sec }
+    $effectiveCooldown = if ($reason -eq 'VOLT_STARTUP_ERROR') { [math]::Min(5, $healthPolicy.cooldown_sec) } else { $healthPolicy.cooldown_sec }
     if (-not (Test-ArkuzoRecoveryBudget $recoveryAttempts $utc $effectiveCooldown $healthPolicy.max_recycles_per_hour)) {
         Warn-Throttled 'recovery-budget' 'Recovery cooldown/hourly budget reached. No restart storm.'; return
     }
@@ -1003,11 +1060,10 @@ function Invoke-ClientRecovery([int]$ClientId, $State) {
         $script:recoveryPending[$handoffKey] = $entry
         $reserved = $true
         Save-ArkuzoRecoveryJournal
-        Write-Diagnostic 'RECOVERY_REQUESTED' @{ accountId = $handoffKey; pid = $ClientId; startTicks = $State.StartTicks; reason = $State.HealthDecision.Reason; lastSample = $State.LastSnapshot; systemMemory = $systemMemory; relaunchOwner = 'Volt account manager' }
+        Write-Diagnostic 'RECOVERY_REQUESTED' @{ accountId = $handoffKey; pid = $ClientId; startTicks = $State.StartTicks; reason = $reason; lastSample = $State.LastSnapshot; systemMemory = $systemMemory; relaunchOwner = 'Volt account manager' }
         if ($logFailed) { throw 'Recovery requires functioning audit logging' }
         if (-not (Test-ArkuzoTargetRecovery $watcher $ClientId $State.StartTicks)) { return }
         # The triggering condition may have cleared while probing/persisting/logging.
-        $reason = $State.HealthDecision.Reason
         try { $freshSample = Get-ArkuzoRecoveryHealthSample $watcher $reason $State }
         catch { Reset-ArkuzoHealthSample $State; throw }
         $State.HealthDecision = Get-ArkuzoHealthDecision $State $freshSample $healthPolicy $clock.Elapsed.TotalSeconds
@@ -1052,7 +1108,7 @@ function Invoke-ClientRecovery([int]$ClientId, $State) {
         }
     }
 }
-function Reset-ArkuzoHealthSample($State) {
+function Clear-ArkuzoOutcomeObservation($State) {
     if ($null -eq $State) { return }
     # Latch the observation break now: a successful sample may overwrite the
     # cleared snapshot before outcomes run. Only reset this tracked generation.
@@ -1067,6 +1123,10 @@ function Reset-ArkuzoHealthSample($State) {
             }
         }
     }
+}
+function Reset-ArkuzoHealthSample($State) {
+    if ($null -eq $State) { return }
+    Clear-ArkuzoOutcomeObservation $State
     $State.HealthDecision = $null
     $State.LastSnapshot = $null
     $State.HealthSnapshotUtc = $null
@@ -1136,12 +1196,15 @@ function Get-ArkuzoHealthDecision($State, $Sample, $Policy, [double]$Now) {
     } elseif ([double]$Sample.systemCommitPercent -ge [double]$Policy.pressure_percent -and
               [double]$Sample.privateMB -ge [double]$Policy.pressure_min_private_mb) {
         $reason = 'SYSTEM_COMMIT_PRESSURE'; $status = 'COMMIT PRESSURE'
-    } elseif ($Sample.windowPresent -and -not $Sample.responding) {
+    }
+    # Memory grace is not a recovery reason: an independently mature hang
+    # remains actionable. Confirmed memory/pressure retains its precedence.
+    if (-not $reason -and $Sample.windowPresent -and -not $Sample.responding) {
         $status = 'HANG GRACE'
         if (($Now - [double]$State.HangSince) -ge [double]$Policy.hang_timeout_sec) {
             $reason = 'SUSTAINED_HANG'; $status = 'STUCK CLIENT'
         }
-    } else { $State.HangSince = -1.0 }
+    }
     return [pscustomobject]@{ Reason = $reason; Recycle = ([bool]$Sample.eligible -and $reason -ne ''); Status = $status }
 }
 
@@ -2264,6 +2327,8 @@ function Initialize-ArkuzoGraphicsSettings {
 }
 
 $tracked = @{}
+$script:observationBusy = $false
+$script:observationCursor = 0
 $dashboardIssues = @{}
 $trimCount = 0
 $cpuThreads = [Math]::Max(1, [Environment]::ProcessorCount)
@@ -2866,6 +2931,7 @@ try {
         Initialize-ArkuzoRecoveryJournal
     }
     while ($true) {
+        Invoke-ArkuzoHealthObservation
         if ($RunForSec -gt 0 -and $clock.Elapsed.TotalSeconds -ge $RunForSec) { break }
         if ($StopFile -and (Test-Path -LiteralPath $StopFile)) { break }
         if ($clock.Elapsed.TotalSeconds -ge $nextPolicyCheck) {
@@ -2909,6 +2975,7 @@ try {
         $totalResident = [int64]0
         $totalPrivate = [int64]0
         foreach ($client in $clients) {
+            Invoke-ArkuzoHealthObservation
             $id = $null
             try {
                 $id = $client.Id
@@ -3039,16 +3106,14 @@ try {
                         }
                     }
                 }
-                $healthSample = @{
-                    privateMB = $client.PrivateMemorySize64 / 1MB; residentMB = $client.WorkingSet64 / 1MB
-                    responding = $isResponding; windowPresent = ($window -ne [IntPtr]::Zero)
-                    ageSec = ([DateTime]::UtcNow - $client.StartTime.ToUniversalTime()).TotalSeconds
-                    systemCommitPercent = $(if ($null -ne $systemMemory) { $systemMemory.commitPercent } else { 0 })
-                    eligible = (-not $MonitorOnly -and $healthPolicy.enabled -and $voltStatus.safeToRecycle -and (Test-ArkuzoVoltOwnership $state.ParentId $voltParents[$state.ParentId] $state.StartTicks $voltPath))
-                    launchError = $launchError
-                    isDisconnected = [bool]$state.isDisconnected
-                    disconnectReason = $state.DisconnectReason
-                }
+                # Log discovery/tailing may have been slow. Recollect window/memory
+                # evidence and timestamp it after IO, never reuse the earlier probe.
+                $healthSample = Get-ArkuzoRecoveryHealthSample $client $(if ($state.isDisconnected) { 'IN_GAME_DISCONNECT' } else { '' }) $state
+                $healthSample.systemCommitPercent = if ($null -ne $systemMemory) { $systemMemory.commitPercent } else { 0 }
+                $healthSample.eligible = (-not $MonitorOnly -and $healthPolicy.enabled -and $voltStatus.safeToRecycle -and (Test-ArkuzoVoltOwnership $state.ParentId $voltParents[$state.ParentId] $state.StartTicks $voltPath))
+                $sampleTime = $clock.Elapsed.TotalSeconds
+                $isResponding = $healthSample.responding; $launchError = $healthSample.launchError
+                $window = $client.MainWindowHandle
                 $state.HealthDecision = Get-ArkuzoHealthDecision $state $healthSample $healthPolicy $sampleTime
                 if ($state.HealthDecision.Status) { $status = $state.HealthDecision.Status }
                 $clientAgeSec = ([DateTime]::UtcNow - $client.StartTime.ToUniversalTime()).TotalSeconds

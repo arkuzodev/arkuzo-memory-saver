@@ -1,12 +1,12 @@
 <div align="center">
 
 # Arkuzo Memory Saver
-### Volt Integration · v1.0.6
+### Volt Integration · v1.1.0 (Stable Baseline)
 
 A portable Windows memory monitor with guarded, account-aware recovery through Volt.
 
-[![Version](https://img.shields.io/badge/version-1.0.6-6366f1)](CHANGELOG.md)
-[![VirusTotal](https://img.shields.io/badge/VirusTotal-0%2F59%20Clean-brightgreen?logo=virustotal)](https://www.virustotal.com/gui/file/68acb79a8f075e308cbed528c724556152897fe151e5b21393d1c2595cd6f855)
+[![Version](https://img.shields.io/badge/version-1.1.0-6366f1)](CHANGELOG.md)
+[![VirusTotal](https://img.shields.io/badge/VirusTotal-0%2F67%20Clean-brightgreen?logo=virustotal)](https://www.virustotal.com/gui/file/96d43820ea2361be00c0c3096fc774484c4bf1a7b56c478abf7e4cbf668a3072)
 ![Windows x64](https://img.shields.io/badge/platform-Windows_x64-0078D4)
 ![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-5391FE)
 ![Volt integration](https://img.shields.io/badge/Volt-integration-22c55e)
@@ -87,9 +87,9 @@ All official release artifacts are scanned and verified clean against **VirusTot
 
 | File | SHA-256 Checksum | VirusTotal Result |
 | :--- | :--- | :--- |
-| **`ArkuzoMemorySaver.exe`** | `68acb79a8f075e308cbed528c724556152897fe151e5b21393d1c2595cd6f855` | [![0/59 Clean](https://img.shields.io/badge/VirusTotal-0%2F59%20Clean-brightgreen)](https://www.virustotal.com/gui/file/68acb79a8f075e308cbed528c724556152897fe151e5b21393d1c2595cd6f855) |
-| **`ArkuzoMemorySaver-runtime.zip`** | `b109e16cb6e39b5b6afbf7cff5fca0230e412b27a4c4fea07b091f0c08739d25` | Verified release payload |
-| **`ArkuzoMemorySaver-v1.0.5-win-x64.zip`** | `cd3a5aa6b03cc43ee473f28bbd7f2aaed004e730eca602e22db1c439424dd1a5` | Verified portable archive |
+| **`ArkuzoMemorySaver.exe`** | `96d43820ea2361be00c0c3096fc774484c4bf1a7b56c478abf7e4cbf668a3072` | [![0/67 Clean](https://img.shields.io/badge/VirusTotal-0%2F67%20Clean-brightgreen)](https://www.virustotal.com/gui/file/96d43820ea2361be00c0c3096fc774484c4bf1a7b56c478abf7e4cbf668a3072) |
+| **`ArkuzoMemorySaver-runtime.zip`** | `7f07c8da696dcb69b3cab1b304d627bbc5f981f7d0b686f1fa9d03dcce89608d` | [![0/46 Clean](https://img.shields.io/badge/VirusTotal-0%2F46%20Clean-brightgreen)](https://www.virustotal.com/gui/file/7f07c8da696dcb69b3cab1b304d627bbc5f981f7d0b686f1fa9d03dcce89608d) |
+| **`ArkuzoMemorySaver-v1.1.0-win-x64.zip`** | `12670c4607fd93bd0ded959c5125efc2316a6b6c438ef9058192ec9fed338e95` | [![Clean](https://img.shields.io/badge/VirusTotal-Clean-brightgreen)](https://www.virustotal.com/gui/file/12670c4607fd93bd0ded959c5125efc2316a6b6c438ef9058192ec9fed338e95) |
 
 The exact release publishes **`SHA256SUMS.txt`** for its executable and archives, plus **`ArkuzoMemorySaver-runtime.sha256`** for updater validation. The launcher verifies downloaded bytes and available GitHub asset digests. See [security and privacy](SECURITY.md).
 

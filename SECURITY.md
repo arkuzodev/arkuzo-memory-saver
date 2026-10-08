@@ -14,10 +14,12 @@ Arkuzo Memory Saver runs locally. The public launcher reads release metadata and
 
 SHA-256 values for each release are published in that release's **`SHA256SUMS.txt`** and **`ArkuzoMemorySaver-runtime.sha256`** assets. The launcher validates runtime bytes and available GitHub asset digests before installation or repair. Use checksums from the exact release you downloaded, not a previous version.
 
-The release binary `ArkuzoMemorySaver.exe` (`68acb79a8f075e308cbed528c724556152897fe151e5b21393d1c2595cd6f855`) was scanned on VirusTotal and verified **0/59 Clean** with zero detections:
-- **VirusTotal Scan:** [https://www.virustotal.com/gui/file/68acb79a8f075e308cbed528c724556152897fe151e5b21393d1c2595cd6f855](https://www.virustotal.com/gui/file/68acb79a8f075e308cbed528c724556152897fe151e5b21393d1c2595cd6f855)
+The release binary `ArkuzoMemorySaver.exe` (`96d43820ea2361be00c0c3096fc774484c4bf1a7b56c478abf7e4cbf668a3072`) was scanned on VirusTotal and verified **0/67 Clean** with zero detections:
+- **VirusTotal Scan (Executable):** [https://www.virustotal.com/gui/file/96d43820ea2361be00c0c3096fc774484c4bf1a7b56c478abf7e4cbf668a3072](https://www.virustotal.com/gui/file/96d43820ea2361be00c0c3096fc774484c4bf1a7b56c478abf7e4cbf668a3072)
+- **VirusTotal Scan (Runtime Zip):** [https://www.virustotal.com/gui/file/7f07c8da696dcb69b3cab1b304d627bbc5f981f7d0b686f1fa9d03dcce89608d](https://www.virustotal.com/gui/file/7f07c8da696dcb69b3cab1b304d627bbc5f981f7d0b686f1fa9d03dcce89608d)
+- **VirusTotal Scan (Release Archive):** [https://www.virustotal.com/gui/file/12670c4607fd93bd0ded959c5125efc2316a6b6c438ef9058192ec9fed338e95](https://www.virustotal.com/gui/file/12670c4607fd93bd0ded959c5125efc2316a6b6c438ef9058192ec9fed338e95)
 
-The v1.0.6 release reuses the **byte-identical v1.0.5 launcher**; its embedded executable version remains 1.0.5, while the separately verified runtime identifies as 1.0.6. The existing VirusTotal report was checked again on October 8, 2026 and still shows zero detections. This scan covers that launcher hash, not all runtime scripts.
+The **v1.1.0 Stable Baseline Release** includes an updated launcher executable with built-in WMI controller takeover, automated stale process cleanup, and persistent process-bound account name caching. All release artifacts were submitted to and verified clean by VirusTotal on October 8, 2026.
 
 Checksums and antivirus scans are not signatures or guarantees. Keep Windows Defender, SmartScreen, and Windows Error Reporting enabled.
 

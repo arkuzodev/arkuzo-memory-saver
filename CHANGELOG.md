@@ -2,7 +2,21 @@
 
 Changes for **Arkuzo Memory Saver with Volt Integration** are recorded here.
 
-## v1.0.6 — Recovery observation continuity and memory policy
+## v1.1.0 — Stable Baseline Release
+
+Official stable baseline release for the Arkuzo Memory Saver (AMS) architecture with complete Volt integration.
+
+### Core Improvements & Stability
+- **Launcher Auto-Takeover & Process Autoclose:** Automatically detects and terminates existing launcher and headless saver controller instances (`Local\ArkuzoSaver-ProcessController`) via WMI process tree matching to allow seamless restarts without mutex contention.
+- **Clean Restart & Ghost Account Elimination:** Suspended and "COOKIE DEAD" accounts are no longer persisted across restarts (`suspendedAccounts = @()`), completely preventing ghost rows and unauthorized launch triggers on reboot.
+- **Persistent Account Name Caching:** Caches discovered Roblox account names across Volt polling cycles and observation pauses, eliminating intermittent "Unknown account" table flicker.
+- **Clean Dashboard UI:**
+  - Ambiguous `(!)` indicators replaced with clean `[INFO]` and `[ERROR]` alert badges.
+  - Eliminated initial transient warning messages (`volt-control unavailable`, `Volt account recovery bridge is not available`) on clean startup.
+- **Strict Launch Guards:** Strict four-layer launch blocking preventing any attempt to launch accounts with dead cookies, missing credentials, or unobserved sessions.
+- **Verified Clean:** 0/67 clean scan verified on VirusTotal for the release executable (`96d43820ea2361be00c0c3096fc774484c4bf1a7b56c478abf7e4cbf668a3072`) and release archives.
+
+## v1.0.7 — QuickEdit Freeze Fix, Launcher Auto-Takeover & Extended Retry Limits
 
 - Keep real, generation-bound health observations flowing during slow Volt probe waits and between clients; preserve the strict greater-than-five-second observation-gap reset.
 - Prevent oversized-memory grace from masking an independently sustained hang; retain confirmed memory/OS-pressure priority.

@@ -10,16 +10,16 @@ function Assert($Condition, $Message) {
 
 Write-Output 'Testing Get-ArkuzoVersionNumber...'
 Assert ((Get-ArkuzoVersionNumber 'v1.0.7') -eq [version]'1.0.7') 'v1.0.7 parsed'
-Assert ((Get-ArkuzoVersionNumber '1.0.8') -eq [version]'1.0.8') '1.0.8 parsed'
+Assert ((Get-ArkuzoVersionNumber '1.1.0') -eq [version]'1.1.0') '1.1.0 parsed'
 Assert ((Get-ArkuzoVersionNumber '') -eq $null) 'empty string returns null'
 
 Write-Output 'Testing Test-ArkuzoUpdateAvailable version comparison...'
 
-# Case 1: Running 1.0.8, remote is v1.0.7 -> available should be FALSE
-$res1 = Test-ArkuzoUpdateAvailable -CurrentVersion '1.0.8' -FetchDelegate {
+# Case 1: Running 1.1.0, remote is v1.0.7 -> available should be FALSE
+$res1 = Test-ArkuzoUpdateAvailable -CurrentVersion '1.1.0' -FetchDelegate {
     '{"tag_name": "v1.0.7", "draft": false, "prerelease": false}'
 }
-Assert (-not $res1.available) 'Running 1.0.8 with remote v1.0.7 must not trigger update notice'
+Assert (-not $res1.available) 'Running 1.1.0 with remote v1.0.7 must not trigger update notice'
 
 # Case 2: Running 1.0.7, remote is v1.0.7 -> available should be FALSE
 $res2 = Test-ArkuzoUpdateAvailable -CurrentVersion '1.0.7' -FetchDelegate {
@@ -34,11 +34,11 @@ $res3 = Test-ArkuzoUpdateAvailable -CurrentVersion '1.0.6' -FetchDelegate {
 Assert ($res3.available) 'Running 1.0.6 with remote v1.0.7 must trigger update notice'
 Assert ($res3.latestVersion -eq 'v1.0.7') 'Latest version tag preserved'
 
-# Case 4: Running 1.0.8, remote is v1.0.9 -> available should be TRUE
-$res4 = Test-ArkuzoUpdateAvailable -CurrentVersion '1.0.8' -FetchDelegate {
-    '{"tag_name": "v1.0.9", "draft": false, "prerelease": false}'
+# Case 4: Running 1.1.0, remote is v1.1.1 -> available should be TRUE
+$res4 = Test-ArkuzoUpdateAvailable -CurrentVersion '1.1.0' -FetchDelegate {
+    '{"tag_name": "v1.1.1", "draft": false, "prerelease": false}'
 }
-Assert ($res4.available) 'Running 1.0.8 with remote v1.0.9 must trigger update notice'
+Assert ($res4.available) 'Running 1.1.0 with remote v1.1.1 must trigger update notice'
 
 Write-Output 'Testing New-ArkuzoFrame top-right update badge...'
 $modelWithUpdate = @{

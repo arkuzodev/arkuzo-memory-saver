@@ -155,6 +155,18 @@ function Test-VoltMissingLaunch($Context, [string]$AccountId, [string]$ExpectedT
 }
 
 function Invoke-VoltControlAction([string]$Action, [hashtable]$Facade, [string]$AccountId, [string]$ExpectedTrackerId, [int]$RelaunchDelaySec=30, [int]$MinLaunchAgeSec=90) {
+    if ($Action -ceq 'CleanDeadCookies') {
+        $probeScript = Join-Path $PSScriptRoot "Arkuzo-Volt-Probe.py"
+        if (-not (Test-Path $probeScript)) {
+            $probeScript = Join-Path (Split-Path -Parent $PSScriptRoot) "saver\Arkuzo-Volt-Probe.py"
+        }
+        $out = & python -B $probeScript --clean-dead-cookies 2>$null
+        try {
+            return ($out | ConvertFrom-Json)
+        } catch {
+            return [pscustomobject]@{ status = 'ERROR'; reason = 'Probe execution failed'; removedCount = 0; removed = @() }
+        }
+    }
     $context=& $Facade.Read $Facade.Root
     if ($Action -ceq 'Status') {
         if (-not $context.Status.available) { return $context.Status }

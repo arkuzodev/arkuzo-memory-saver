@@ -305,6 +305,15 @@ function Get-ArkuzoSystemMemory {
     }
 }
 function Test-ArkuzoVoltOwnership([int]$ParentId, $Parent, [long]$ClientStartTicks, [string]$VoltPath) {
+    if ($null -eq $Parent) {
+        if ($ParentId -gt 0 -and $null -ne $script:voltParents -and $script:voltParents.ContainsKey($ParentId)) {
+            $Parent = $script:voltParents[$ParentId]
+        } elseif ($ParentId -le 0 -and $null -ne $script:voltParents -and $script:voltParents.Count -eq 1) {
+            $singleId = [int](@($script:voltParents.Keys)[0])
+            $Parent = $script:voltParents[$singleId]
+            $ParentId = $singleId
+        }
+    }
     if ($null -eq $Parent -or $ParentId -ne [int]$Parent.Id -or
         [long]$Parent.StartTicks -ge $ClientStartTicks -or [string]::IsNullOrWhiteSpace($VoltPath)) { return $false }
     return [string]::Equals([string]$Parent.Path, $VoltPath, [StringComparison]::OrdinalIgnoreCase)
@@ -333,12 +342,11 @@ function Find-RobloxProcessLog([int]$TargetProcessId, [string]$TrackerId = $null
                 try {
                     if ($f.Name -notmatch '_(\d{8}T\d{6}Z)_Player_') { continue }
                     $fTime = [DateTime]::ParseExact($matches[1], 'yyyyMMdd\THHmmss\Z', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal).ToUniversalTime()
-                    if ([Math]::Abs(($fTime - $StartTimeUtc.ToUniversalTime()).TotalSeconds) -gt 5) { continue }
-                    $lines = Get-Content -LiteralPath $f.FullName -TotalCount 50 -ErrorAction SilentlyContinue
-                    foreach ($l in $lines) {
-                        if ($l -match "websiteBTId is\s*(\d+)" -or $l -match "BTID is overriden to\s*(\d+)") {
-                            if ($matches[1] -eq $TrackerId) { return $f.FullName }
-                        }
+                    if ([Math]::Abs(($fTime - $StartTimeUtc.ToUniversalTime()).TotalSeconds) -gt 30) { continue }
+                    $lines = Get-Content -LiteralPath $f.FullName -TotalCount 100 -ErrorAction SilentlyContinue
+                    $content = $lines -join "`n"
+                    if ($content -match "websiteBTId is\s*(\d+)" -or $content -match "BTID is overriden to\s*(\d+)") {
+                        if ($matches[1] -eq $TrackerId) { return $f.FullName }
                     }
                 } catch { }
             }
@@ -537,6 +545,297 @@ function Get-RobloxLogDisconnectReason([string]$NewText) {
     }
     return $null
 }
+
+function Get-ArkuzoExecutorSignalDirectories {
+    $dirs = @()
+    if ($env:LOCALAPPDATA) {
+        $dirs += Join-Path $env:LOCALAPPDATA "Volt\workspace"
+        $dirs += Join-Path $env:LOCALAPPDATA "Potassium\workspace"
+    }
+    return @($dirs | Where-Object { Test-Path $_ })
+}
+
+function Read-ArkuzoExecutorSignals {
+    $signals = @()
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $workspaces = Get-ArkuzoExecutorSignalDirectories
+    foreach ($ws in $workspaces) {
+        $candidateFiles = @()
+        $sub = Join-Path $ws "arkuzo_signals"
+        if (Test-Path $sub) {
+            $candidateFiles += @(Get-ChildItem -Path $sub -Filter "*.json" -ErrorAction SilentlyContinue)
+        }
+        $candidateFiles += @(Get-ChildItem -Path $ws -Filter "arkuzo_signals_*.json" -ErrorAction SilentlyContinue)
+        $candidateFiles += @(Get-ChildItem -Path $ws -Filter "arkuzo_signals_latest.json" -ErrorAction SilentlyContinue)
+        foreach ($f in $candidateFiles) {
+            try {
+                $raw = [IO.File]::ReadAllText($f.FullName)
+                $sig = $raw | ConvertFrom-Json
+                if ($null -ne $sig -and $sig.username) {
+                    $sigAge = if ($sig.timestamp) { $now - [long]$sig.timestamp } else { 0 }
+                    if ($sigAge -ge -15 -and $sigAge -le 180) {
+                        $signals += [pscustomobject]@{
+                            Username = [string]$sig.username
+                            UserId = [string]$sig.userId
+                            Reason = [string]$sig.reason
+                            ErrorCode = [int]$sig.errorCode
+                            Source = [string]$sig.source
+                            FilePath = $f.FullName
+                        }
+                    }
+                }
+                Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
+            } catch { }
+        }
+    }
+    return $signals
+}
+
+$script:ArkuzoAutoexecLuauContent = @'
+--[[
+    Arkuzo Saver - Autonomous Ingame Kick & Disconnect Signal Transmitter
+    Automatically installed into executor autoexec by Arkuzo Saver.
+    Catches kicks, bans, error prompts, disconnects, and teleports, writing instant signals to workspace.
+]]--
+
+local Players = game:GetService("Players")
+local GuiService = game:GetService("GuiService")
+local HttpService = game:GetService("HttpService")
+local CoreGui = game:GetService("CoreGui")
+local RunService = game:GetService("RunService")
+local TeleportService = game:GetService("TeleportService")
+
+local fired = false
+
+local function sendSignal(reason, errorCode, source)
+    if fired then return end
+    fired = true
+
+    local username = "Unknown"
+    local userId = 0
+    pcall(function()
+        if Players.LocalPlayer then
+            username = Players.LocalPlayer.Name
+            userId = Players.LocalPlayer.UserId
+        end
+    end)
+
+    local payload = {
+        username = username,
+        userId = userId,
+        placeId = game.PlaceId,
+        jobId = game.JobId,
+        reason = tostring(reason or "Unknown Kick/Disconnect"),
+        errorCode = tonumber(errorCode) or 0,
+        source = source or "ArkuzoAutoexecSignal",
+        timestamp = os.time()
+    }
+
+    local jsonStr = nil
+    pcall(function()
+        jsonStr = HttpService:JSONEncode(payload)
+    end)
+    if not jsonStr then return end
+
+    -- Write signal files into executor workspace
+    pcall(function()
+        if writefile then
+            pcall(function()
+                if makefolder and not isfolder("arkuzo_signals") then
+                    makefolder("arkuzo_signals")
+                end
+                writefile("arkuzo_signals/" .. tostring(userId) .. ".json", jsonStr)
+            end)
+            pcall(function()
+                writefile("arkuzo_signals_" .. tostring(username) .. ".json", jsonStr)
+            end)
+            pcall(function()
+                writefile("arkuzo_signals_latest.json", jsonStr)
+            end)
+        end
+    end)
+end
+
+-- 1. GuiService Error Message Changed (Standard Roblox Disconnect / Kick Code 267, 277, etc.)
+pcall(function()
+    GuiService.ErrorMessageChanged:Connect(function(errorMessage)
+        if errorMessage and errorMessage ~= "" then
+            local code = 0
+            pcall(function()
+                code = GuiService:GetErrorCode().Value
+            end)
+            sendSignal(errorMessage, code, "GuiService.ErrorMessageChanged")
+        end
+    end)
+end)
+
+-- 2. CoreGui Error Prompt Overlay (Catches custom kick UIs and error modals)
+pcall(function()
+    local promptGui = CoreGui:WaitForChild("RobloxPromptGui", 5)
+    if promptGui then
+        local promptOverlay = promptGui:WaitForChild("promptOverlay", 5)
+        if promptOverlay then
+            promptOverlay.ChildAdded:Connect(function(child)
+                if child.Name == "ErrorPrompt" then
+                    local code = 0
+                    pcall(function() code = GuiService:GetErrorCode().Value end)
+                    local msg = ""
+                    pcall(function()
+                        local msgArea = child:FindFirstChild("MessageArea")
+                        if msgArea then
+                            local errorFrame = msgArea:FindFirstChild("ErrorFrame")
+                            local errorMsg = errorFrame and errorFrame:FindFirstChild("ErrorMessage")
+                            if errorMsg and errorMsg:IsA("TextLabel") then
+                                msg = errorMsg.Text
+                            end
+                        end
+                    end)
+                    sendSignal(msg ~= "" and msg or "ErrorPrompt displayed", code, "RobloxPromptGui.ErrorPrompt")
+                end
+            end)
+        end
+    end
+end)
+
+-- 3. NetworkClient Disconnection (ClientReplicator dropped)
+pcall(function()
+    local nc = game:GetService("NetworkClient")
+    nc.ChildRemoved:Connect(function(child)
+        if child:IsA("ClientReplicator") then
+            sendSignal("ClientReplicator disconnected", 277, "NetworkClient.ChildRemoved")
+        end
+    end)
+end)
+
+-- 4. Teleport Init Failed (Teleport Disconnect)
+pcall(function()
+    TeleportService.TeleportInitFailed:Connect(function(player, result, errorMessage)
+        sendSignal("TeleportInitFailed: " .. tostring(errorMessage), 279, "TeleportService.TeleportInitFailed")
+    end)
+end)
+
+-- 5. Fallback periodic check
+task.spawn(function()
+    while not fired do
+        task.wait(1.5)
+        pcall(function()
+            local code = 0
+            pcall(function() code = GuiService:GetErrorCode().Value end)
+            if code ~= 0 then
+                local msg = ""
+                pcall(function() msg = GuiService:GetErrorMessage() end)
+                sendSignal(msg ~= "" and msg or ("Error code " .. tostring(code)), code, "PeriodicWatchdog")
+            end
+        end)
+    end
+end)
+'@
+
+function Sync-ArkuzoAutoexecSignals {
+    $scriptContent = $script:ArkuzoAutoexecLuauContent
+    if (-not [string]::IsNullOrEmpty($PSScriptRoot)) {
+        $scriptSource = Join-Path $PSScriptRoot "00-arkuzo-signal.luau"
+        if (Test-Path $scriptSource) {
+            try { $scriptContent = [IO.File]::ReadAllText($scriptSource) } catch { }
+        }
+    }
+    # ONLY direct autoexec directories, NEVER subfolders
+    $executorRoots = @()
+    if ($env:LOCALAPPDATA) {
+        $executorRoots += Join-Path $env:LOCALAPPDATA "Volt"
+        $executorRoots += Join-Path $env:LOCALAPPDATA "Potassium"
+    }
+    foreach ($root in $executorRoots) {
+        if (Test-Path $root) {
+            $autoexecDir = Join-Path $root "autoexec"
+            if (-not (Test-Path $autoexecDir)) {
+                try { [IO.Directory]::CreateDirectory($autoexecDir) | Out-Null } catch { }
+            }
+            if (Test-Path $autoexecDir) {
+                # Clean up any accidental subfolder duplicates
+                Get-ChildItem -Path $autoexecDir -Recurse -Depth 3 -Filter "00-arkuzo-signal.luau" -ErrorAction SilentlyContinue | ForEach-Object {
+                    if ($_.DirectoryName -ne $autoexecDir) {
+                        try { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue } catch { }
+                    }
+                }
+                # Write only to the root autoexec folder
+                $dest = Join-Path $autoexecDir "00-arkuzo-signal.luau"
+                $needWrite = $true
+                if (Test-Path $dest) {
+                    try {
+                        $existing = [IO.File]::ReadAllText($dest)
+                        if ($existing.Trim() -eq $scriptContent.Trim()) { $needWrite = $false }
+                    } catch { }
+                }
+                if ($needWrite) {
+                    try {
+                        [IO.File]::WriteAllText($dest, $scriptContent, [Text.Encoding]::UTF8)
+                        Write-Diagnostic 'AUTOEXEC_SIGNAL_SCRIPT_SYNCED' @{ destination = $dest }
+                    } catch { }
+                }
+            }
+        }
+    }
+}
+
+function Process-ArkuzoExecutorSignals {
+    try {
+        $signals = Read-ArkuzoExecutorSignals
+        foreach ($sig in $signals) {
+            $matchedPid = $null
+            foreach ($kv in $script:tracked.GetEnumerator()) {
+                $checkPid = $kv.Key
+                $st = $kv.Value
+                $name = Resolve-ArkuzoAccountName -ProcessId $checkPid -TrackerId $st.TrackerId -LogPath $st.LogPath
+                if ($name -and ($name.TrimStart('@') -ieq $sig.Username -or $name -ieq $sig.Username)) {
+                    $matchedPid = $checkPid; break
+                }
+            }
+            if ($null -eq $matchedPid -and $script:tracked.Count -eq 1) {
+                $matchedPid = @($script:tracked.Keys)[0]
+            }
+            if ($null -ne $matchedPid -and $script:tracked.ContainsKey($matchedPid)) {
+                $targetState = $script:tracked[$matchedPid]
+                $targetState.isDisconnected = $true
+                $targetState.GameReady = $false
+                $targetState.DisconnectReason = "Executor Signal: $($sig.Reason) (Code $($sig.ErrorCode))"
+                Write-Diagnostic 'EXECUTOR_KICK_SIGNAL_TRIGGERED' @{
+                    pid = $matchedPid
+                    username = $sig.Username
+                    reason = $sig.Reason
+                    errorCode = $sig.ErrorCode
+                    source = $sig.Source
+                }
+            }
+        }
+    } catch { }
+}
+
+function Invoke-ArkuzoDeadCookieCleanup {
+    try {
+        $res = Invoke-ArkuzoVoltControl 'CleanDeadCookies'
+        if ($null -ne $res -and $res.cleaned -and $res.removedCount -gt 0) {
+            Write-Diagnostic 'DEAD_COOKIES_REMOVED_FROM_VOLT' @{
+                removedCount = $res.removedCount
+                removed = $res.removed
+            }
+            if ($null -ne $script:suspendedAccounts) {
+                foreach ($item in @($res.removed)) {
+                    $key = [string]$item.id
+                    if ($script:suspendedAccounts.ContainsKey($key)) {
+                        $script:suspendedAccounts.Remove($key)
+                    }
+                    if ($null -ne $recoveryPending -and $recoveryPending.ContainsKey($key)) {
+                        $recoveryPending.Remove($key)
+                    }
+                }
+            }
+            return $true
+        }
+    } catch { }
+    return $false
+}
+
 function Invoke-ArkuzoHealthObservation {
     # Cooperative, read-only service: never perform launcher/log/name IO here.
     # Round-robin and a half-second work slice prevent a large client set from
@@ -551,6 +850,9 @@ function Invoke-ArkuzoHealthObservation {
             $index = [int]$script:observationCursor % $ids.Count
             $script:observationCursor = ($index + 1) % $ids.Count
             $id = [int]$ids[$index]; $state = $script:tracked[$id]
+            if ($state.ParentId -le 0 -and $null -ne $script:voltParents -and $script:voltParents.Count -eq 1) {
+                $state.ParentId = [int](@($script:voltParents.Keys)[0])
+            }
             $now = $clock.Elapsed.TotalSeconds
             if ($state.RecoveryRequested -or ($null -ne $state.LastHealthSampleTime -and
                 $now -ge [double]$state.LastHealthSampleTime -and ($now - [double]$state.LastHealthSampleTime) -lt 1)) { continue }
@@ -561,7 +863,7 @@ function Invoke-ArkuzoHealthObservation {
                 if (-not (Test-ArkuzoClientIdentity $state.Watcher $id $state.StartTicks)) { Reset-ArkuzoHealthSample $state; continue }
                 $sample.systemCommitPercent = if ($null -ne $systemMemory) { $systemMemory.commitPercent } else { 0 }
                 $sample.eligible = (-not $MonitorOnly -and $healthPolicy.enabled -and $voltStatus.safeToRecycle -and
-                    (Test-ArkuzoVoltOwnership $state.ParentId $voltParents[$state.ParentId] $state.StartTicks $voltPath))
+                    (Test-ArkuzoVoltOwnership $state.ParentId $script:voltParents[$state.ParentId] $state.StartTicks $voltPath))
                 # Timestamp after collecting; never replay or synthesize missed samples.
                 $state.HealthDecision = Get-ArkuzoHealthDecision $state $sample $healthPolicy $clock.Elapsed.TotalSeconds
                 if (-not $sample.windowPresent -or -not $sample.responding -or $sample.launchError -or
@@ -789,9 +1091,19 @@ function Get-ArkuzoBrowserTrackerId([string]$CommandLine) {
 function Test-ArkuzoTargetRecovery($Watcher, [int]$ClientId, [long]$StartTicks) {
     try {
         if (-not (Test-ArkuzoClientIdentity $Watcher $ClientId $StartTicks)) { return $false }
-        $records = @(Get-CimInstance Win32_Process -Filter "ProcessId=$ClientId" -ErrorAction Stop)
-        if ($records.Count -ne 1 -or $records[0].ProcessId -ne $ClientId -or $records[0].Name -ne 'RobloxPlayerBeta.exe' -or $records[0].CommandLine -isnot [string]) { return $false }
-        $trackerId = Get-ArkuzoBrowserTrackerId $records[0].CommandLine
+        $trackerId = $null
+        try {
+            $records = @(Get-CimInstance Win32_Process -Filter "ProcessId=$ClientId" -ErrorAction Stop)
+            if ($records.Count -eq 1 -and $records[0].ProcessId -eq $ClientId -and $records[0].Name -eq 'RobloxPlayerBeta.exe' -and $records[0].CommandLine -is [string]) {
+                $trackerId = Get-ArkuzoBrowserTrackerId $records[0].CommandLine
+            }
+        } catch { }
+        if ([string]::IsNullOrEmpty($trackerId) -and $null -ne $voltControlStatus -and $voltControlStatus.available -and $null -ne $voltControlStatus.accounts) {
+            $m = @($voltControlStatus.accounts | Where-Object { [int]$_.processId -eq $ClientId })
+            if ($m.Count -eq 1 -and -not [string]::IsNullOrEmpty($m[0].trackerId)) {
+                $trackerId = [string]$m[0].trackerId
+            }
+        }
         # A retained exact process alive on both sides of the metadata query
         # binds the PID query to this generation, without timestamp/slot guesses.
         if ([string]::IsNullOrEmpty($trackerId) -or -not (Test-ArkuzoClientIdentity $Watcher $ClientId $StartTicks)) { return $false }
@@ -907,6 +1219,7 @@ function Start-ArkuzoVoltControlStatusAsync {
 }
 
 function Update-ArkuzoVoltControl {
+    $null = Invoke-ArkuzoDeadCookieCleanup
     $script:voltControlStatus=Invoke-ArkuzoVoltControl 'Status'
     $script:voltControlCheckedUtc=[datetime]::UtcNow
     if (-not $MonitorOnly -and $restorePolicy.enabled -and $voltControlStatus.available -and
@@ -932,9 +1245,13 @@ function Get-ArkuzoControlledAccount([string]$TrackerId, [int]$ClientId) {
         $a=$rows[0]
         if ($a.cookieStatus -cne 'dead' -or $a.suspensionSafe -isnot [bool] -or -not $a.suspensionSafe -or $a.uiStatus -cne 'Idle' -or $a.processId) { return $null }
     }
-    $matches=@($voltControlStatus.accounts|Where-Object { $_.trackerId -eq $TrackerId -and $_.processId -eq $ClientId -and $_.controlReady -is [bool] -and $_.controlReady })
-    if ($matches.Count -ne 1 -or $matches[0].cookieStatus -ceq 'dead' -or ($null -ne $script:suspendedAccounts -and $script:suspendedAccounts.ContainsKey([string]$matches[0].accountId)) -or $restorePolicy.excluded_account_ids -contains $matches[0].accountId) { return $null }
-    return $matches[0]
+    $matchedAccounts = @($voltControlStatus.accounts | Where-Object {
+        ( [string]::IsNullOrWhiteSpace($TrackerId) -or $_.trackerId -eq $TrackerId ) -and
+        $_.processId -eq $ClientId -and
+        $_.controlReady -is [bool] -and $_.controlReady
+    })
+    if ($matchedAccounts.Count -ne 1 -or $matchedAccounts[0].cookieStatus -ceq 'dead' -or ($null -ne $script:suspendedAccounts -and $script:suspendedAccounts.ContainsKey([string]$matchedAccounts[0].accountId)) -or $restorePolicy.excluded_account_ids -contains $matchedAccounts[0].accountId) { return $null }
+    return $matchedAccounts[0]
 }
 function New-ArkuzoPendingEntry([string]$AccountId,[string]$TrackerId,[int]$OldId=0,[long]$OldTicks=0) {
     return @{accountId=$AccountId;oldTrackerId=$TrackerId;oldPid=$OldId;oldStartTicks=$OldTicks;createdUtc=[datetime]::UtcNow.ToString('o');closedUtc=$null;status='AwaitingReplacement';retryCount=0;nextRetryUtc=$null;readySinceUtc=$null;lastObservedUtc=$null;replacementPid=0;replacementStartTicks=0}
@@ -989,7 +1306,8 @@ function Update-ArkuzoRecoveryOutcomes {
             if ($a.cookieStatus -ceq 'dead' -or $a.cookieStatus -cne 'alive' -or -not $a.cookieAlive -or
                 ($null -ne $script:suspendedAccounts -and $script:suspendedAccounts.ContainsKey([string]$a.accountId)) -or
                 -not $a.autoRelaunch -or $restorePolicy.excluded_account_ids -contains $a.accountId) { continue }
-            if ($a.processId -or ([long]$a.lastLaunchAtMs -ge $script:saverSessionStartEpochMs)) {
+            $recentLaunch = [long]$a.lastLaunchAtMs -gt 0 -and ([long][DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - [long]$a.lastLaunchAtMs) -le 14400000 # within 4 hours
+            if ($a.processId -or ([long]$a.lastLaunchAtMs -ge $script:saverSessionStartEpochMs) -or $recentLaunch) {
                 $script:sessionObservedAccounts[[string]$a.accountId] = $true
             }
             if (-not $script:sessionObservedAccounts.ContainsKey([string]$a.accountId)) {
@@ -1154,7 +1472,7 @@ function Get-ArkuzoOutcomeDecision($Entry, $Account, [datetime]$NowUtc, $Policy)
         if ($Entry.lastObservedUtc) {
             $gap = ($observed - ([datetime]$Entry.lastObservedUtc).ToUniversalTime()).TotalSeconds
             if ($healthy -and $same -and $Entry.readySinceUtc -and $gap -eq 0) { return 'Observing' } # Never extend from replay.
-            $continuous = $gap -gt 0 -and $gap -le 15
+            $continuous = $gap -gt 0 -and $gap -le 30
         }
         if (-not $healthy -or -not $same -or -not $continuous) { $Entry.readySinceUtc = $null }
         $Entry.replacementPid = [int]$Account.processId; $Entry.replacementStartTicks = [long]$Account.startTicks
@@ -1173,13 +1491,11 @@ function Get-ArkuzoOutcomeDecision($Entry, $Account, [datetime]$NowUtc, $Policy)
     return 'LaunchMissing'
 }
 function Test-ArkuzoStartupIsolation($State, [string]$Reason, $Sample) {
-    # UNKNOWN is not VERIFIED_NEVER_READY. The available log header and file
-    # timestamp cannot prove complete, unrotated history for an exact process
-    # generation (even a full current-file read cannot prove no prior truncation).
-    # No production source currently provides that proof. Keep the collateral
-    # exception disabled rather than infer authorization from initialized false.
-    if ($null -ne $State) { $State.StartupGameHistory = 'UNKNOWN' }
-    return $false
+    if ($null -eq $State -or $Reason -cne 'VOLT_STARTUP_ERROR') { return $false }
+    if ($null -eq $Sample -or $Sample.launchError -isnot [bool] -or -not $Sample.launchError) { return $false }
+    if ($State.GameReady -or $State.EverGameReady) { return $false }
+    $State.StartupGameHistory = 'MODAL_STARTUP_ERROR'
+    return $true
 }
 function Test-ArkuzoRecoveryHandoff([string]$AccountId, $State = $null, [string]$Reason = '', $Sample = $null) {
     # No collateral closures while an account is missing. A confirmed unhealthy
@@ -1227,10 +1543,21 @@ function Invoke-ClientRecovery([int]$ClientId, $State) {
     $reason = $State.HealthDecision.Reason
     # Re-read capability immediately before acting, not merely at startup.
     Update-VoltRecoveryCapability -SyncControl
-    if (-not $voltStatus.safeToRecycle -or -not (Test-ArkuzoVoltOwnership $State.ParentId $voltParents[$State.ParentId] $State.StartTicks $voltPath)) { return }
+    if (-not $voltStatus.safeToRecycle -or -not (Test-ArkuzoVoltOwnership $State.ParentId $script:voltParents[$State.ParentId] $State.StartTicks $voltPath)) { return }
     $utc = [DateTime]::UtcNow
     $boundAccount = Get-ArkuzoControlledAccount $State.TrackerId $ClientId
-    if ($null -eq $boundAccount -or $voltControlStatus.managerId -ne $State.ParentId -or $voltControlStatus.managerStartTicks -ne $voltParents[$State.ParentId].StartTicks) { return }
+    if ($null -eq $boundAccount) {
+        # A mature health decision is not permission to bypass unknown or removed
+        # suspended identities. Expose this pre-request refusal instead of leaving
+        # the operator with a zero trim countdown and no recovery explanation.
+        Warn-Throttled 'recovery-mapping' 'Recovery blocked: exact Volt account mapping or suspended-account safety cannot be verified. Clients left untouched.'
+        return
+    }
+    if ($State.ParentId -le 0 -and $script:voltParents.Count -eq 1) {
+        $singleId = [int](@($script:voltParents.Keys)[0])
+        $State.ParentId = $singleId
+    }
+    if ($voltControlStatus.managerId -ne $State.ParentId -or $voltControlStatus.managerStartTicks -ne $script:voltParents[$State.ParentId].StartTicks) { return }
     $handoffSample = $null
     if ($recoveryPending.Count -gt 0) {
         # Refreshing launcher authority temporarily clears retained parents.
@@ -1284,7 +1611,7 @@ function Invoke-ClientRecovery([int]$ClientId, $State) {
             Update-ArkuzoVoltControl
             $freshAccount = Get-ArkuzoControlledAccount $State.TrackerId $ClientId
             if ($null -eq $freshAccount -or $freshAccount.accountId -cne $handoffKey -or
-                $voltControlStatus.managerId -ne $State.ParentId -or $voltControlStatus.managerStartTicks -ne $voltParents[$State.ParentId].StartTicks -or
+                $voltControlStatus.managerId -ne $State.ParentId -or $voltControlStatus.managerStartTicks -ne $script:voltParents[$State.ParentId].StartTicks -or
                 $freshAccount.autoRelaunch -isnot [bool] -or -not $freshAccount.autoRelaunch -or $freshAccount.cookieAlive -isnot [bool] -or -not $freshAccount.cookieAlive) { return }
         }
         # The triggering condition may have cleared while probing/persisting/logging.
@@ -1297,7 +1624,7 @@ function Invoke-ClientRecovery([int]$ClientId, $State) {
         if (-not (Test-ArkuzoClientIdentity $watcher $ClientId $State.StartTicks)) { Reset-ArkuzoHealthSample $State; return }
         # Check the retained exact owner after IO, immediately before termination.
         # This narrows the race; it cannot make two processes' lifetimes atomic.
-        if (-not (Test-ArkuzoLiveVoltParent $voltParents[$State.ParentId])) { return }
+        if (-not (Test-ArkuzoLiveVoltParent $script:voltParents[$State.ParentId])) { return }
         $rebound = Get-ArkuzoControlledAccount $State.TrackerId $ClientId
         if ($null -eq $rebound -or $rebound.accountId -ne $handoffKey) { return }
         if ($logFailed -or -not $recoveryJournalHealthy) { return }
@@ -2726,6 +3053,31 @@ function Write-Diagnostic([string]$Kind, $Data) {
         if ($null -ne $script:logWriter) { try { $script:logWriter.Dispose() } catch { }; $script:logWriter = $null }
     }
 }
+function Write-ArkuzoFailureDiagnostic([string]$Kind, [Management.Automation.ErrorRecord]$Failure) {
+    # Error messages, source text and invocation arguments can contain launch
+    # tickets/cookies. Retain only bounded structural metadata, never raw text.
+    try {
+        $type = [string]$Failure.Exception.GetType().FullName
+        if ($type.Length -gt 256) { $type = $type.Substring(0, 256) }
+        $data = [ordered]@{
+            pid = $PID; startTicks = $controllerStartTicks
+            exceptionType = $type; hresult = $Failure.Exception.HResult
+            category = [int]$Failure.CategoryInfo.Category
+            line = $Failure.InvocationInfo.ScriptLineNumber
+            column = $Failure.InvocationInfo.OffsetInLine
+        }
+        try { Write-Diagnostic $Kind $data } catch { $script:logFailed = $true }
+        if ($script:logFailed) {
+            # Two fixed overwritten files bound storage independently of the
+            # rotating writer and keep cleanup from replacing fatal evidence.
+            # Failure here must never replace the original terminating error.
+            $record = [ordered]@{time=(Get-Date).ToString('o');session=$sessionTag;event=$Kind;data=$data}
+            $text = $record | ConvertTo-Json -Depth 4 -Compress
+            $file = if ($Kind -eq 'SAVER_FATAL_ERROR') { 'controller-failure.json' } else { 'controller-cleanup-failure.json' }
+            [IO.File]::WriteAllText((Join-Path $LogDirectory $file), $text, (New-Object Text.UTF8Encoding($false)))
+        }
+    } catch { }
+}
 function Record-ClientExit([int]$ClientId, $State, [string]$Reason = 'No longer listed') {
     $exitCode = $null
     if ($null -ne $State.Watcher) {
@@ -3313,8 +3665,10 @@ try {
         Initialize-ArkuzoNativePrivileges | Out-Null
         Initialize-ArkuzoGraphicsSettings
         Initialize-ArkuzoRecoveryJournal
+        Sync-ArkuzoAutoexecSignals
     }
     while ($true) {
+        Process-ArkuzoExecutorSignals
         $swPhase = [Diagnostics.Stopwatch]::StartNew()
         Invoke-ArkuzoHealthObservation
         $swPhase.Stop()
@@ -3327,6 +3681,7 @@ try {
         if ($clock.Elapsed.TotalSeconds -ge $nextPolicyCheck) {
             $swPhase = [Diagnostics.Stopwatch]::StartNew()
             Update-ArkuzoLivePolicy
+            Sync-ArkuzoAutoexecSignals
             $swPhase.Stop()
             if ($swPhase.Elapsed.TotalSeconds -gt 5) {
                 Write-Diagnostic 'DASHBOARD_STALL' @{ phase='PolicyCheck'; durationSec=[math]::Round($swPhase.Elapsed.TotalSeconds,2) }
@@ -3358,7 +3713,7 @@ try {
         if ($clock.Elapsed.TotalSeconds -ge $nextVoltCheck) {
             Update-VoltRecoveryCapability
             Start-ArkuzoVoltControlStatusAsync
-            $nextVoltCheck = $clock.Elapsed.TotalSeconds + 30
+            $nextVoltCheck = $clock.Elapsed.TotalSeconds + 15
         }
         Poll-ArkuzoVersionCheckAsync
         if ($clock.Elapsed.TotalSeconds -ge $nextUpdateCheck) {
@@ -3437,6 +3792,38 @@ try {
                     }
                 }
                 $state = $tracked[$id]
+                if ($state.ParentId -le 0 -or [string]::IsNullOrWhiteSpace($state.TrackerId)) {
+                    if ($null -ne $voltControlStatus -and $voltControlStatus.available -and $null -ne $voltControlStatus.accounts) {
+                        $matchedAcct = @($voltControlStatus.accounts | Where-Object { [int]$_.processId -eq $id })
+                        if ($matchedAcct.Count -eq 1) {
+                            if ($state.ParentId -le 0 -and $null -ne $voltControlStatus.managerId -and [int]$voltControlStatus.managerId -gt 0) {
+                                $state.ParentId = [int]$voltControlStatus.managerId
+                            }
+                            if ([string]::IsNullOrWhiteSpace($state.TrackerId) -and -not [string]::IsNullOrWhiteSpace($matchedAcct[0].trackerId)) {
+                                $state.TrackerId = [string]$matchedAcct[0].trackerId
+                            }
+                        }
+                    }
+                    if ($state.ParentId -le 0) {
+                        try {
+                            $procRecord = Get-CimInstance Win32_Process -Filter "ProcessId=$id" -ErrorAction Stop
+                            $state.ParentId = [int]$procRecord.ParentProcessId
+                            if ($procRecord.CommandLine -and [string]::IsNullOrWhiteSpace($state.TrackerId)) {
+                                $state.TrackerId = Get-ArkuzoBrowserTrackerId $procRecord.CommandLine
+                            }
+                        } catch { }
+                    }
+                    if ($state.ParentId -le 0 -and $null -ne $script:voltParents -and $script:voltParents.Count -eq 1) {
+                        $singleParentId = [int](@($script:voltParents.Keys)[0])
+                        if ($singleParentId -gt 0) { $state.ParentId = $singleParentId }
+                    }
+                    if ($state.TrackerId) {
+                        try {
+                            $bound = Get-ArkuzoControlledAccount $state.TrackerId $id
+                            if ($null -ne $bound) { $script:sessionObservedAccounts[[string]$bound.accountId] = $true }
+                        } catch { }
+                    }
+                }
                 $now = $clock.Elapsed.TotalSeconds
                 # Reapply periodically without hammering native setters on each poll.
                 if (-not $MonitorOnly -and ($now - $state.LastConfig) -ge 10) {
@@ -3496,6 +3883,15 @@ try {
                 if (-not $isResponding -and $window -ne [IntPtr]::Zero) { $status = 'NOT RESPONDING' }
                 if ($null -eq $state.LogPath) {
                     $state.LogPath = Find-RobloxProcessLog -TargetProcessId $id -TrackerId $state.TrackerId -StartTimeUtc $client.StartTime.ToUniversalTime()
+                    if ($null -ne $state.LogPath) {
+                        try {
+                            $headLines = @(Get-Content -LiteralPath $state.LogPath -TotalCount 350 -ErrorAction SilentlyContinue)
+                            $headText = $headLines -join "`n"
+                            if ($headText -match '(?i)\[DFLog::NetworkClient\] Connection accepted from') {
+                                $state.GameReady = $true; $state.EverGameReady = $true
+                            }
+                        } catch { }
+                    }
                 }
                 if ($null -ne $state.LogPath) {
                     $logOffsetRef = [ref]$state.LogOffset
@@ -3516,7 +3912,7 @@ try {
                 # evidence and timestamp it after IO, never reuse the earlier probe.
                 $healthSample = Get-ArkuzoRecoveryHealthSample $client $(if ($state.isDisconnected) { 'IN_GAME_DISCONNECT' } else { '' }) $state
                 $healthSample.systemCommitPercent = if ($null -ne $systemMemory) { $systemMemory.commitPercent } else { 0 }
-                $healthSample.eligible = (-not $MonitorOnly -and $healthPolicy.enabled -and $voltStatus.safeToRecycle -and (Test-ArkuzoVoltOwnership $state.ParentId $voltParents[$state.ParentId] $state.StartTicks $voltPath))
+                $healthSample.eligible = (-not $MonitorOnly -and $healthPolicy.enabled -and $voltStatus.safeToRecycle -and (Test-ArkuzoVoltOwnership $state.ParentId $script:voltParents[$state.ParentId] $state.StartTicks $voltPath))
                 $sampleTime = $clock.Elapsed.TotalSeconds
                 $isResponding = $healthSample.responding; $launchError = $healthSample.launchError
                 $window = $client.MainWindowHandle
@@ -3531,6 +3927,7 @@ try {
                     privateMB = [Math]::Round($client.PrivateMemorySize64 / 1MB, 1)
                     responding = $isResponding; windowPresent = ($window -ne [IntPtr]::Zero); launchError = $launchError
                     state = $status; sampleTime = (Get-Date).ToString('o')
+                    eligible = [bool]$healthSample.eligible; isDisconnected = [bool]$state.isDisconnected; parentId = [int]$state.ParentId
                 }
                 $state.HealthSnapshotUtc=[datetime]::UtcNow.ToString('o')
                 if ($state.LastStatus -ne $status) {
@@ -3721,33 +4118,40 @@ try {
         Start-Sleep -Milliseconds $PollMs
     }
 } catch {
-    Write-Diagnostic 'SAVER_FATAL_ERROR' @{ message = $_.Exception.Message; stack = $_.ScriptStackTrace }
+    Write-ArkuzoFailureDiagnostic 'SAVER_FATAL_ERROR' $_
     throw
 } finally {
-    if ($consoleReady) {
-        try {
-            [Console]::SetCursorPosition(0, [Console]::WindowTop)
-            [Console]::Clear()
-            [Console]::CursorVisible = $oldCursorVisible
-            if ($null -ne $oldTitle) { [Console]::Title = $oldTitle }
-        } catch { }
+    try {
+        if ($consoleReady) {
+            try {
+                [Console]::SetCursorPosition(0, [Console]::WindowTop)
+                [Console]::Clear()
+                [Console]::CursorVisible = $oldCursorVisible
+                if ($null -ne $oldTitle) { [Console]::Title = $oldTitle }
+            } catch { }
+        }
+        Write-Host 'Arkuzo Memory Saver stopped. Restoring Roblox settings...' -ForegroundColor Cyan
+        foreach ($id in @($tracked.Keys)) {
+            $client = Get-Process -Id $id -ErrorAction SilentlyContinue
+            if ($null -eq $client) { continue }
+            try { Restore-Client $client $tracked[$id] }
+            catch { Write-Warning "PID ${id}: restoration unavailable: $($_.Exception.Message)" }
+            finally { $client.Dispose() }
+        }
+        foreach ($state in $tracked.Values) {
+            if ($null -ne $state.Watcher) { try { $state.Watcher.Dispose() } catch { } }
+        }
+        Clear-VoltRecoveryCapability
+    } catch {
+        Write-ArkuzoFailureDiagnostic 'SAVER_CLEANUP_ERROR' $_
+    } finally {
+        # Cleanup/console failures must not mask the fatal error or skip lock and
+        # diagnostic finalization. These independent best-effort steps never throw.
+        try { Write-Diagnostic 'SESSION_STOP' @{ uptimeSeconds = [Math]::Round($clock.Elapsed.TotalSeconds, 1); trims = $trimCount } } catch { Write-ArkuzoFailureDiagnostic 'SAVER_CLEANUP_ERROR' $_ }
+        try { if ($ownsControllerMutex -and $null -ne $controllerMutex) { $controllerMutex.ReleaseMutex() } } catch { Write-ArkuzoFailureDiagnostic 'SAVER_CLEANUP_ERROR' $_ }
+        try { if ($null -ne $controllerMutex) { $controllerMutex.Dispose() } } catch { Write-ArkuzoFailureDiagnostic 'SAVER_CLEANUP_ERROR' $_ }
+        if ($null -ne $logWriter) { try { $logWriter.Dispose() } catch { } }
+        try { if (-not $logFailed) { Write-Host "Diagnostics saved: $logPath" -ForegroundColor Cyan } } catch { }
+        $clock.Stop()
     }
-    Write-Host 'Arkuzo Memory Saver stopped. Restoring Roblox settings...' -ForegroundColor Cyan
-    foreach ($id in @($tracked.Keys)) {
-        $client = Get-Process -Id $id -ErrorAction SilentlyContinue
-        if ($null -eq $client) { continue }
-        try { Restore-Client $client $tracked[$id] }
-        catch { Write-Warning "PID ${id}: restoration unavailable: $($_.Exception.Message)" }
-        finally { $client.Dispose() }
-    }
-    foreach ($state in $tracked.Values) {
-        if ($null -ne $state.Watcher) { try { $state.Watcher.Dispose() } catch { } }
-    }
-    Clear-VoltRecoveryCapability
-    Write-Diagnostic 'SESSION_STOP' @{ uptimeSeconds = [Math]::Round($clock.Elapsed.TotalSeconds, 1); trims = $trimCount }
-    if ($ownsControllerMutex -and $null -ne $controllerMutex) { $controllerMutex.ReleaseMutex() }
-    if ($null -ne $controllerMutex) { $controllerMutex.Dispose() }
-    if ($null -ne $logWriter) { try { $logWriter.Dispose() } catch { } }
-    if (-not $logFailed) { Write-Host "Diagnostics saved: $logPath" -ForegroundColor Cyan }
-    $clock.Stop()
 }

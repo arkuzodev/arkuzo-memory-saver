@@ -15,7 +15,7 @@ $dist = Join-Path $root 'dist'
 $staging = Join-Path $dist ('runtime-' + [guid]::NewGuid().ToString('N'))
 [IO.Directory]::CreateDirectory($staging) | Out-Null
 try {
-    foreach ($name in @('Arkuzo-Memory-Saver.ps1', 'Arkuzo-Volt-Control.ps1', 'Arkuzo-Volt-Probe.py')) {
+    foreach ($name in @('Arkuzo-Memory-Saver.ps1', 'Arkuzo-Volt-Control.ps1', 'Arkuzo-Volt-Probe.py', '00-arkuzo-signal.luau')) {
         Copy-Item -LiteralPath (Join-Path $root ('src/saver/' + $name)) -Destination (Join-Path $staging $name)
     }
     Copy-Item -LiteralPath (Join-Path $root 'config/defaults.json') -Destination (Join-Path $staging 'defaults.json')

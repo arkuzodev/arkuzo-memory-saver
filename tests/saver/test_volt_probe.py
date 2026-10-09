@@ -196,5 +196,49 @@ class ProbeTests(unittest.TestCase):
         self.assertIn('byAccountId', data)
         self.assertEqual(data['byTracker'].get('12345'), 'alpha')
 
+    def test_clean_dead_cookie_removes_account(self):
+        self.doc['accounts'] = [
+            {'id': '11111111-1111-1111-1111-111111111111', 'username': 'alive_user', 'cookieStatus': 'alive', 'encryptedCookie': 'SECRET_1', 'autoRelaunch': True},
+            {'id': '22222222-2222-2222-2222-222222222222', 'username': 'dead_user', 'cookieStatus': 'dead', 'encryptedCookie': 'SECRET_2', 'autoRelaunch': True}
+        ]
+        self.save()
+        res = probe.clean_dead_or_deleted_accounts(self.path)
+        self.assertTrue(res['cleaned'])
+        self.assertEqual(res['removedCount'], 1)
+        self.assertEqual(res['removed'][0]['username'], 'dead_user')
+        # Check persisted database
+        with closing(sqlite3.connect(self.path)) as db:
+            row = db.execute('SELECT value FROM state_documents WHERE name=?', ('accounts',)).fetchone()
+            doc = json.loads(row[0])
+            self.assertEqual(len(doc['accounts']), 1)
+            self.assertEqual(doc['accounts'][0]['username'], 'alive_user')
+
+    def test_clean_empty_cookie_removes_account(self):
+        self.doc['accounts'] = [
+            {'id': '11111111-1111-1111-1111-111111111111', 'username': 'alive_user', 'cookieStatus': 'alive', 'encryptedCookie': 'VALID_SECRET', 'autoRelaunch': True},
+            {'id': '33333333-3333-3333-3333-333333333333', 'username': 'empty_cookie_user', 'cookieStatus': 'alive', 'encryptedCookie': '', 'autoRelaunch': True}
+        ]
+        self.save()
+        res = probe.clean_dead_or_deleted_accounts(self.path)
+        self.assertTrue(res['cleaned'])
+        self.assertEqual(res['removedCount'], 1)
+        self.assertEqual(res['removed'][0]['username'], 'empty_cookie_user')
+
+    def test_clean_dead_cookies_cli(self):
+        self.doc['accounts'] = [
+            {'id': '11111111-1111-1111-1111-111111111111', 'username': 'alive_user', 'cookieStatus': 'alive', 'encryptedCookie': 'SECRET_1', 'autoRelaunch': True},
+            {'id': '22222222-2222-2222-2222-222222222222', 'username': 'dead_user', 'cookieStatus': 'dead', 'encryptedCookie': 'SECRET_2', 'autoRelaunch': True}
+        ]
+        self.save()
+        volt = Path(self.temp.name) / 'Volt'
+        volt.mkdir(exist_ok=True)
+        (volt / 'state.db').write_bytes(self.path.read_bytes())
+        result = subprocess.run([sys.executable, '-B', str(Path(__file__).resolve().parents[2]/'src'/'saver'/'Arkuzo-Volt-Probe.py'), '--clean-dead-cookies'],
+                                env=dict(os.environ, LOCALAPPDATA=self.temp.name), capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0)
+        data = json.loads(result.stdout)
+        self.assertTrue(data.get('cleaned'))
+        self.assertEqual(data.get('removedCount'), 1)
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

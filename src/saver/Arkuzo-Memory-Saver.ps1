@@ -367,7 +367,10 @@ function Get-ArkuzoAccountByUserId([string]$UserId) {
         $dir = if ($PSScriptRoot) { $PSScriptRoot } elseif ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { [AppDomain]::CurrentDomain.BaseDirectory }
         $probeScript = Join-Path $dir 'Arkuzo-Volt-Probe.py'
         if (-not (Test-Path -LiteralPath $probeScript)) {
-            $probeScript = 'C:/Users/Philip/Desktop/arkuzo-memory-saver/src/saver/Arkuzo-Volt-Probe.py'
+            $probeScript = Join-Path (Split-Path -Parent $dir) 'saver\Arkuzo-Volt-Probe.py'
+        }
+        if (-not (Test-Path -LiteralPath $probeScript)) {
+            $probeScript = Join-Path $dir 'src\saver\Arkuzo-Volt-Probe.py'
         }
         if (Test-Path -LiteralPath $probeScript) {
             $raw = & python $probeScript --user-id $UserId 2>$null
@@ -546,13 +549,66 @@ function Get-RobloxLogDisconnectReason([string]$NewText) {
     return $null
 }
 
-function Get-ArkuzoExecutorSignalDirectories {
-    $dirs = @()
+function Get-ArkuzoExecutorRoots {
+    $roots = New-Object System.Collections.Generic.HashSet[string]
     if ($env:LOCALAPPDATA) {
-        $dirs += Join-Path $env:LOCALAPPDATA "Volt\workspace"
-        $dirs += Join-Path $env:LOCALAPPDATA "Potassium\workspace"
+        $roots.Add((Join-Path $env:LOCALAPPDATA 'Volt')) | Out-Null
+        $roots.Add((Join-Path $env:LOCALAPPDATA 'Potassium')) | Out-Null
+        $roots.Add((Join-Path $env:LOCALAPPDATA 'com.volt.editor')) | Out-Null
+        $roots.Add((Join-Path $env:LOCALAPPDATA 'com.pot.potassium-tauri')) | Out-Null
     }
-    return @($dirs | Where-Object { Test-Path $_ })
+    if ($env:APPDATA) {
+        $roots.Add((Join-Path $env:APPDATA 'Volt')) | Out-Null
+        $roots.Add((Join-Path $env:APPDATA 'Potassium')) | Out-Null
+    }
+    $desktop = [Environment]::GetFolderPath('Desktop')
+    $userProfile = [Environment]::GetFolderPath('UserProfile')
+    $progFiles = [Environment]::GetFolderPath('ProgramFiles')
+    $progFilesX86 = [Environment]::GetFolderPath('ProgramFilesX86')
+    foreach ($base in @($desktop, $userProfile, $progFiles, $progFilesX86)) {
+        if ($base -and (Test-Path -LiteralPath $base)) {
+            foreach ($sub in @('Volt', 'VoltX', 'Potassium', 'Tools & Mods\Volt', 'Tools & Mods\VoltX', 'Tools & Mods\potass', 'Tools & Mods\potae')) {
+                $cand = Join-Path $base $sub
+                if (Test-Path -LiteralPath $cand) { $roots.Add($cand) | Out-Null }
+            }
+        }
+    }
+    $baseDir = if ($PSScriptRoot) { $PSScriptRoot } elseif ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { [AppDomain]::CurrentDomain.BaseDirectory }
+    if ($baseDir) {
+        foreach ($cand in @((Join-Path $baseDir 'Volt'), (Join-Path $baseDir 'VoltX'), (Join-Path $baseDir 'Potassium'),
+                            (Join-Path (Split-Path -Parent $baseDir) 'Volt'), (Join-Path (Split-Path -Parent $baseDir) 'VoltX'), (Join-Path (Split-Path -Parent $baseDir) 'Potassium'))) {
+            if ($cand -and (Test-Path -LiteralPath $cand)) { $roots.Add($cand) | Out-Null }
+        }
+    }
+    try {
+        Get-Process | Where-Object { $_.ProcessName -match '(?i)\A(volt|potassium|tauri-app)' } | ForEach-Object {
+            try {
+                $pPath = $_.Path
+                if (-not $pPath -and $_.MainModule) { $pPath = $_.MainModule.FileName }
+                if ($pPath) {
+                    $pDir = Split-Path -Parent $pPath
+                    $roots.Add($pDir) | Out-Null
+                    $parentDir = Split-Path -Parent $pDir
+                    if ($parentDir) { $roots.Add($parentDir) | Out-Null }
+                }
+            } catch { }
+        }
+    } catch { }
+    return @($roots | Where-Object { $_ -and (Test-Path -LiteralPath $_) })
+}
+
+function Get-ArkuzoExecutorSignalDirectories {
+    $dirs = New-Object System.Collections.Generic.HashSet[string]
+    $roots = Get-ArkuzoExecutorRoots
+    foreach ($r in $roots) {
+        if ((Split-Path -Leaf $r) -ieq 'workspace') {
+            $dirs.Add($r) | Out-Null
+        } else {
+            $ws = Join-Path $r 'workspace'
+            if (Test-Path -LiteralPath $ws) { $dirs.Add($ws) | Out-Null }
+        }
+    }
+    return @($dirs | Where-Object { $_ -and (Test-Path -LiteralPath $_) })
 }
 
 function Read-ArkuzoExecutorSignals {
@@ -740,39 +796,33 @@ function Sync-ArkuzoAutoexecSignals {
         }
     }
     # ONLY direct autoexec directories, NEVER subfolders
-    $executorRoots = @()
-    if ($env:LOCALAPPDATA) {
-        $executorRoots += Join-Path $env:LOCALAPPDATA "Volt"
-        $executorRoots += Join-Path $env:LOCALAPPDATA "Potassium"
-    }
+    $executorRoots = Get-ArkuzoExecutorRoots
     foreach ($root in $executorRoots) {
-        if (Test-Path $root) {
-            $autoexecDir = Join-Path $root "autoexec"
-            if (-not (Test-Path $autoexecDir)) {
-                try { [IO.Directory]::CreateDirectory($autoexecDir) | Out-Null } catch { }
+        $autoexecDir = if ((Split-Path -Leaf $root) -ieq 'autoexec') { $root } else { Join-Path $root 'autoexec' }
+        if (-not (Test-Path -LiteralPath $autoexecDir) -and (Split-Path -Leaf $root) -imatch '(?i)\A(Volt|VoltX|Potassium|com\.volt\.editor)\z') {
+            try { [IO.Directory]::CreateDirectory($autoexecDir) | Out-Null } catch { }
+        }
+        if (Test-Path -LiteralPath $autoexecDir) {
+            # Clean up any accidental subfolder duplicates
+            Get-ChildItem -LiteralPath $autoexecDir -Recurse -Depth 3 -Filter "00-arkuzo-signal.luau" -ErrorAction SilentlyContinue | ForEach-Object {
+                if ($_.DirectoryName -ne $autoexecDir) {
+                    try { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue } catch { }
+                }
             }
-            if (Test-Path $autoexecDir) {
-                # Clean up any accidental subfolder duplicates
-                Get-ChildItem -Path $autoexecDir -Recurse -Depth 3 -Filter "00-arkuzo-signal.luau" -ErrorAction SilentlyContinue | ForEach-Object {
-                    if ($_.DirectoryName -ne $autoexecDir) {
-                        try { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue } catch { }
-                    }
-                }
-                # Write only to the root autoexec folder
-                $dest = Join-Path $autoexecDir "00-arkuzo-signal.luau"
-                $needWrite = $true
-                if (Test-Path $dest) {
-                    try {
-                        $existing = [IO.File]::ReadAllText($dest)
-                        if ($existing.Trim() -eq $scriptContent.Trim()) { $needWrite = $false }
-                    } catch { }
-                }
-                if ($needWrite) {
-                    try {
-                        [IO.File]::WriteAllText($dest, $scriptContent, [Text.Encoding]::UTF8)
-                        Write-Diagnostic 'AUTOEXEC_SIGNAL_SCRIPT_SYNCED' @{ destination = $dest }
-                    } catch { }
-                }
+            # Write only to the root autoexec folder
+            $dest = Join-Path $autoexecDir "00-arkuzo-signal.luau"
+            $needWrite = $true
+            if (Test-Path -LiteralPath $dest) {
+                try {
+                    $existing = [IO.File]::ReadAllText($dest)
+                    if ($existing.Trim() -eq $scriptContent.Trim()) { $needWrite = $false }
+                } catch { }
+            }
+            if ($needWrite) {
+                try {
+                    [IO.File]::WriteAllText($dest, $scriptContent, [Text.Encoding]::UTF8)
+                    Write-Diagnostic 'AUTOEXEC_SIGNAL_SCRIPT_SYNCED' @{ destination = $dest }
+                } catch { }
             }
         }
     }

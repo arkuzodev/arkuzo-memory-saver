@@ -172,8 +172,32 @@ def clean_dead_or_deleted_accounts(path):
         return {'status': 'ERROR', 'reason': str(e), 'removedCount': 0, 'removed': []}
 
 
+def find_volt_state_db(explicit_path=None):
+    if explicit_path:
+        p = Path(explicit_path).resolve()
+        if p.is_file():
+            return p
+    candidates = []
+    local_app = os.environ.get('LOCALAPPDATA')
+    if local_app:
+        candidates.append(Path(local_app) / 'Volt' / 'state.db')
+        candidates.append(Path(local_app) / 'com.volt.editor' / 'state.db')
+    app_data = os.environ.get('APPDATA')
+    if app_data:
+        candidates.append(Path(app_data) / 'Volt' / 'state.db')
+    user_home = Path.home()
+    candidates.append(user_home / 'Desktop' / 'Volt' / 'state.db')
+    candidates.append(user_home / 'Desktop' / 'VoltX' / 'state.db')
+    candidates.append(user_home / 'Volt' / 'state.db')
+    for c in candidates:
+        if c.is_file():
+            return c
+    return candidates[0] if candidates else Path('state.db')
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--db-path', help='Explicit path to state.db')
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--tracker-id', default=_GLOBAL_CHECK)
     mode.add_argument('--inventory', action='store_true')
@@ -181,7 +205,7 @@ if __name__ == '__main__':
     mode.add_argument('--map', action='store_true')
     mode.add_argument('--clean-dead-cookies', action='store_true')
     args = parser.parse_args()
-    path = Path(os.environ.get('LOCALAPPDATA', '')) / 'Volt' / 'state.db'
+    path = find_volt_state_db(args.db_path)
     if args.clean_dead_cookies:
         result = clean_dead_or_deleted_accounts(path)
     elif args.map:

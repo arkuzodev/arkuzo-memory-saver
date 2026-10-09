@@ -872,6 +872,7 @@ function Invoke-ArkuzoDeadCookieCleanup {
             if ($null -ne $script:suspendedAccounts) {
                 foreach ($item in @($res.removed)) {
                     $key = [string]$item.id
+                    Warn-Throttled "dead-cookie-$key" "[DEAD/INVALID COOKIE] $($item.username)"
                     if ($script:suspendedAccounts.ContainsKey($key)) {
                         $script:suspendedAccounts.Remove($key)
                     }
@@ -3559,10 +3560,9 @@ function New-ArkuzoFrame($Model, [int]$Width, [int]$Height) {
         if ($paused.Count -gt $room -and $room -gt 1) { $shown=$room-1 }
         for ($i=0;$i -lt $shown;$i++) {
             $a=$paused[$i]
-            $label=if ($a.unverified) { 'COOKIE DEAD / LAST KNOWN UNVERIFIED' } else { 'COOKIE DEAD' }
-            $nameWidth=[Math]::Max(1,$Width-16)
-            $name=Fit-ArkuzoText (ConvertTo-ArkuzoDisplayName ([string]$a.username)) $nameWidth
-            $lines.Add((New-ArkuzoLine ("  $name  $label") Red $Width))
+            $name = ConvertTo-ArkuzoDisplayName ([string]$a.username)
+            $rowText = if ($a.unverified) { "  [DEAD/INVALID COOKIE] $name (UNVERIFIED)" } else { "  [DEAD/INVALID COOKIE] $name" }
+            $lines.Add((New-ArkuzoLine (Fit-ArkuzoText $rowText $Width) Red $Width))
         }
         if ($paused.Count -gt $shown -and $lines.Count -lt $usable) { $lines.Add((New-ArkuzoLine "  + $($paused.Count-$shown) paused accounts" Red $Width)) }
     }

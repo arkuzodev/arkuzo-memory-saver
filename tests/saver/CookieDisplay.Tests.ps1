@@ -11,7 +11,7 @@ $script:voltControlStatus=[pscustomobject]@{available=$true;accounts=@($dead)}
 $model=@{Mode='normal';TargetMB=1200;SoftLimit=$false;TrimEnabled=$true;TrimSeconds=60;Managed=0;Detected=0;Uptime=[timespan]::Zero;History=@();Rows=@();Now=Get-Date;SuspendedAccounts=@($dead)}
 foreach($size in @(@(110,30),@(64,20),@(40,12),@(32,7))) {
  $frame=@(New-ArkuzoFrame $model $size[0] $size[1])
- Assert (@($frame|Where-Object{$_.Color -eq [ConsoleColor]::Red -and $_.Text -match 'DeadUser' -and $_.Text -match 'COOKIE DEAD'}).Count -eq 1) "Explicit dead unlaunched red row at $($size -join 'x')"
+ Assert (@($frame|Where-Object{$_.Color -eq [ConsoleColor]::Red -and $_.Text -match '\[DEAD/INVALID COOKIE\] DeadUser'}).Count -eq 1) "Explicit dead unlaunched red row at $($size -join 'x')"
  Assert ($frame.Count -le $size[1] -and @($frame|Where-Object{$_.Text.Length -gt $size[0]}).Count -eq 0 -and $frame[-1].Text -match 'Q:') 'Bounded frame always reserves exit footer'
 }
 foreach($size in @(@(20,1),@(24,2),@(24,3),@(24,4))) {

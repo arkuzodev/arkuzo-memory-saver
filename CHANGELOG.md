@@ -14,7 +14,9 @@ Official stable baseline release for the Arkuzo Memory Saver (AMS) architecture 
   - Ambiguous `(!)` indicators replaced with clean `[INFO]` and `[ERROR]` alert badges.
   - Eliminated initial transient warning messages (`volt-control unavailable`, `Volt account recovery bridge is not available`) on clean startup.
 - **Strict Launch Guards:** Strict four-layer launch blocking preventing any attempt to launch accounts with dead cookies, missing credentials, or unobserved sessions.
-- **Verified Clean:** 0/67 clean scan verified on VirusTotal for the release executable (`96d43820ea2361be00c0c3096fc774484c4bf1a7b56c478abf7e4cbf668a3072`) and release archives.
+- **Volt State DB Safety & Universal Discovery:** Strictly read-only Volt SQLite state access, universal PC directory discovery for autoexec and state.db across drives and installations, and disabled automatic missing account relaunching to safeguard active client seats.
+- **Account Data Formatting:** Preserves SQLite BLOB account typing matching native Volt schema, and updates cookie status display to `[DEAD/INVALID COOKIE] Username`.
+- **Verified Clean:** 0/71 clean scan verified on VirusTotal for the release executable (`6b2a7347bb288b11509aebb7cf4cd37e6ef190618cb8bed47a55b72b038f03ef`) and release archives.
 
 ## v1.0.7 — QuickEdit Freeze Fix, Launcher Auto-Takeover & Extended Retry Limits
 

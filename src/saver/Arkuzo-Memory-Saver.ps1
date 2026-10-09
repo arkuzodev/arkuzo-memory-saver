@@ -861,32 +861,6 @@ function Process-ArkuzoExecutorSignals {
     } catch { }
 }
 
-function Invoke-ArkuzoDeadCookieCleanup {
-    try {
-        $res = Invoke-ArkuzoVoltControl 'CleanDeadCookies'
-        if ($null -ne $res -and $res.cleaned -and $res.removedCount -gt 0) {
-            Write-Diagnostic 'DEAD_COOKIES_REMOVED_FROM_VOLT' @{
-                removedCount = $res.removedCount
-                removed = $res.removed
-            }
-            if ($null -ne $script:suspendedAccounts) {
-                foreach ($item in @($res.removed)) {
-                    $key = [string]$item.id
-                    Warn-Throttled "dead-cookie-$key" "[DEAD/INVALID COOKIE] $($item.username)"
-                    if ($script:suspendedAccounts.ContainsKey($key)) {
-                        $script:suspendedAccounts.Remove($key)
-                    }
-                    if ($null -ne $recoveryPending -and $recoveryPending.ContainsKey($key)) {
-                        $recoveryPending.Remove($key)
-                    }
-                }
-            }
-            return $true
-        }
-    } catch { }
-    return $false
-}
-
 function Invoke-ArkuzoHealthObservation {
     # Cooperative, read-only service: never perform launcher/log/name IO here.
     # Round-robin and a half-second work slice prevent a large client set from
@@ -1166,7 +1140,7 @@ function Test-ArkuzoTargetRecovery($Watcher, [int]$ClientId, [long]$StartTicks) 
     } catch { return $false } # Never expose command lines, tickets, or account state in errors.
 }
 function Get-ArkuzoRestorePolicy($Config) {
-    $p = @{ enabled=$false; restore_missing=$true; restore_wait_sec=90; relaunch_delay_sec=30; retry_base_sec=90; retry_max_sec=900; retry_max_per_hour=6; ready_stable_sec=30; excluded_account_ids=@() }
+    $p = @{ enabled=$false; restore_missing=$false; restore_wait_sec=90; relaunch_delay_sec=30; retry_base_sec=90; retry_max_sec=900; retry_max_per_hour=6; ready_stable_sec=30; excluded_account_ids=@() }
     if ($null -ne $Config) { foreach ($k in @($p.Keys)) { if ($null -ne $Config.$k) { $p[$k]=$Config.$k } } }
     foreach ($b in @('enabled','restore_missing')) { if ($p[$b] -isnot [bool]) { throw "recovery.$b must be a JSON boolean" } }
     $ranges=@{ restore_wait_sec=@(90,900); relaunch_delay_sec=@(30,120); retry_base_sec=@(90,900); retry_max_sec=@(180,3600); retry_max_per_hour=@(1,500); ready_stable_sec=@(30,300) }
@@ -1270,7 +1244,6 @@ function Start-ArkuzoVoltControlStatusAsync {
 }
 
 function Update-ArkuzoVoltControl {
-    $null = Invoke-ArkuzoDeadCookieCleanup
     $script:voltControlStatus=Invoke-ArkuzoVoltControl 'Status'
     $script:voltControlCheckedUtc=[datetime]::UtcNow
     if (-not $MonitorOnly -and $restorePolicy.enabled -and $voltControlStatus.available -and
@@ -1350,15 +1323,14 @@ function Update-ArkuzoRecoveryOutcomes {
     }
     try {
         Update-ArkuzoCookieSuspensions
-        # Opted-in, previously launched accounts only. Never activate new/unconfigured accounts.
+        # Opted-in, previously launched accounts only. Never activate unlaunched accounts.
         if ($null -eq $script:sessionObservedAccounts) { $script:sessionObservedAccounts = @{} }
         if ($null -eq $script:saverSessionStartEpochMs) { $script:saverSessionStartEpochMs = [long][DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() }
         foreach ($a in @($voltControlStatus.accounts)) {
             if ($a.cookieStatus -ceq 'dead' -or $a.cookieStatus -cne 'alive' -or -not $a.cookieAlive -or
                 ($null -ne $script:suspendedAccounts -and $script:suspendedAccounts.ContainsKey([string]$a.accountId)) -or
                 -not $a.autoRelaunch -or $restorePolicy.excluded_account_ids -contains $a.accountId) { continue }
-            $recentLaunch = [long]$a.lastLaunchAtMs -gt 0 -and ([long][DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - [long]$a.lastLaunchAtMs) -le 14400000 # within 4 hours
-            if ($a.processId -or ([long]$a.lastLaunchAtMs -ge $script:saverSessionStartEpochMs) -or $recentLaunch) {
+            if ($a.processId -or ([long]$a.lastLaunchAtMs -ge $script:saverSessionStartEpochMs)) {
                 $script:sessionObservedAccounts[[string]$a.accountId] = $true
             }
             if (-not $script:sessionObservedAccounts.ContainsKey([string]$a.accountId)) {

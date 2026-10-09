@@ -85,31 +85,7 @@ try {
     Assert ($staleSignals.Count -eq 0) "Stale signals (>180s) must not be returned"
     Assert (-not (Test-Path $staleFile)) "Stale signal file should still be cleaned up"
 
-    # Test 4: Dead cookie cleanup mock integration
-    function script:Invoke-ArkuzoVoltControl {
-        param($Action)
-        if ($Action -eq 'CleanDeadCookies') {
-            return [pscustomobject]@{
-                status = 'OK'
-                cleaned = $true
-                removedCount = 1
-                removed = @([pscustomobject]@{ id = 'dead-1111'; username = 'DeadAccount' })
-                remainingCount = 2
-            }
-        }
-        if ($Action -eq 'Status') {
-            return [pscustomobject]@{ available = $true; accounts = @() }
-        }
-    }
-    $script:suspendedAccounts = @{ 'dead-1111' = @{ reason = 'COOKIE_DEAD' } }
-    $script:recoveryPending = @{ 'dead-1111' = @{ status = 'AwaitingReplacement' } }
-
-    $cleaned = Invoke-ArkuzoDeadCookieCleanup
-    Assert ($cleaned -eq $true) "Invoke-ArkuzoDeadCookieCleanup should return true when accounts cleaned"
-    Assert (-not $script:suspendedAccounts.ContainsKey('dead-1111')) "Cleaned account must be removed from suspendedAccounts"
-    Assert (-not $script:recoveryPending.ContainsKey('dead-1111')) "Cleaned account must be removed from recoveryPending"
-
-    Write-Host "PASS: ExecutorSignal and DeadCookieCleanup tests passed."
+    Write-Host "PASS: ExecutorSignal tests passed."
 }
 finally {
     if (Test-Path $scratch) {

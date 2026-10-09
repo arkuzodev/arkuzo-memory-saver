@@ -133,46 +133,6 @@ def read_user_id_map(path):
     return m.get('byUserId', {})
 
 
-def clean_dead_or_deleted_accounts(path):
-    """Remove accounts with dead, deleted, or empty cookies entirely from Volt state.db."""
-    resolved_path = Path(path).resolve()
-    if not resolved_path.is_file():
-        return {'status': 'ERROR', 'reason': 'database not found', 'removedCount': 0, 'removed': []}
-    try:
-        with closing(sqlite3.connect(resolved_path, timeout=5.0)) as db, db:
-            row = db.execute('SELECT value FROM state_documents WHERE name=?', ('accounts',)).fetchone()
-            if not row:
-                return {'status': 'OK', 'cleaned': False, 'removedCount': 0, 'removed': []}
-            document = json.loads(row[0])
-            accounts = document.get('accounts') or []
-            kept = []
-            removed = []
-            for a in accounts:
-                cookie = a.get('encryptedCookie')
-                status = str(a.get('cookieStatus', '')).casefold()
-                is_dead = status in ('dead', 'deleted')
-                is_empty = (cookie is None) or (isinstance(cookie, str) and not cookie.strip())
-                if is_dead or is_empty:
-                    removed.append({
-                        'id': a.get('id'),
-                        'username': a.get('username'),
-                        'reason': 'dead_cookie' if is_dead else 'empty_or_deleted_cookie'
-                    })
-                else:
-                    kept.append(a)
-            if removed:
-                document['accounts'] = kept
-                blob_data = sqlite3.Binary(json.dumps(document, separators=(',', ':')).encode('utf-8'))
-                db.execute('UPDATE state_documents SET value=? WHERE name=?',
-                           (blob_data, 'accounts'))
-                db.commit()
-                return {'status': 'OK', 'cleaned': True, 'removedCount': len(removed),
-                        'removed': removed, 'remainingCount': len(kept)}
-            return {'status': 'OK', 'cleaned': False, 'removedCount': 0, 'removed': [], 'remainingCount': len(kept)}
-    except Exception as e:
-        return {'status': 'ERROR', 'reason': str(e), 'removedCount': 0, 'removed': []}
-
-
 def find_volt_state_db(explicit_path=None):
     if explicit_path:
         p = Path(explicit_path).resolve()
@@ -204,12 +164,9 @@ if __name__ == '__main__':
     mode.add_argument('--inventory', action='store_true')
     mode.add_argument('--user-id')
     mode.add_argument('--map', action='store_true')
-    mode.add_argument('--clean-dead-cookies', action='store_true')
     args = parser.parse_args()
     path = find_volt_state_db(args.db_path)
-    if args.clean_dead_cookies:
-        result = clean_dead_or_deleted_accounts(path)
-    elif args.map:
+    if args.map:
         result = read_account_map(path)
     elif args.user_id:
         u_map = read_user_id_map(path)

@@ -27,7 +27,7 @@
   },
   "recovery": {
     "enabled": true,
-    "restore_missing": true,
+    "restore_missing": false,
     "restore_wait_sec": 90,
     "relaunch_delay_sec": 30,
     "retry_base_sec": 90,

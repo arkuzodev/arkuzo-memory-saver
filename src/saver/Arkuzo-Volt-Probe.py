@@ -162,8 +162,9 @@ def clean_dead_or_deleted_accounts(path):
                     kept.append(a)
             if removed:
                 document['accounts'] = kept
+                blob_data = sqlite3.Binary(json.dumps(document, separators=(',', ':')).encode('utf-8'))
                 db.execute('UPDATE state_documents SET value=? WHERE name=?',
-                           (json.dumps(document, separators=(',', ':')), 'accounts'))
+                           (blob_data, 'accounts'))
                 db.commit()
                 return {'status': 'OK', 'cleaned': True, 'removedCount': len(removed),
                         'removed': removed, 'remainingCount': len(kept)}

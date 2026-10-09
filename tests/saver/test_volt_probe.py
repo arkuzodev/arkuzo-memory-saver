@@ -208,7 +208,8 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(res['removed'][0]['username'], 'dead_user')
         # Check persisted database
         with closing(sqlite3.connect(self.path)) as db:
-            row = db.execute('SELECT value FROM state_documents WHERE name=?', ('accounts',)).fetchone()
+            row = db.execute('SELECT value, typeof(value) FROM state_documents WHERE name=?', ('accounts',)).fetchone()
+            self.assertEqual(row[1], 'blob')
             doc = json.loads(row[0])
             self.assertEqual(len(doc['accounts']), 1)
             self.assertEqual(doc['accounts'][0]['username'], 'alive_user')

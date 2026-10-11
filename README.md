@@ -83,12 +83,12 @@ Windows may show SmartScreen warnings for an **unsigned binary**. Check that the
 
 ## Antivirus & Integrity Verification
 
-All official release artifacts are scanned and verified clean against **VirusTotal** across security vendors.
+The unchanged executable and portable archive retain their previously recorded VirusTotal reports. The updated v1.1.0 runtime has a new checksum; its VirusTotal result is not yet verified.
 
 | File | SHA-256 Checksum | VirusTotal Result |
 | :--- | :--- | :--- |
 | **`ArkuzoMemorySaver.exe`** | `6b2a7347bb288b11509aebb7cf4cd37e6ef190618cb8bed47a55b72b038f03ef` | [![0/71 Clean](https://img.shields.io/badge/VirusTotal-0%2F71%20Clean-brightgreen)](https://www.virustotal.com/gui/file/6b2a7347bb288b11509aebb7cf4cd37e6ef190618cb8bed47a55b72b038f03ef) |
-| **`ArkuzoMemorySaver-runtime.zip`** | `ab95975ce1746111b4a2accd538fd60cb0840768db179b3a174d4e5775531acb` | [![0/65 Clean](https://img.shields.io/badge/VirusTotal-0%2F65%20Clean-brightgreen)](https://www.virustotal.com/gui/file/ab95975ce1746111b4a2accd538fd60cb0840768db179b3a174d4e5775531acb) |
+| **`ArkuzoMemorySaver-runtime.zip`** | `c75e9f0b3ffa129e00cc80cbce02585c917a69fea3d15d37efe6c6cab80facc9` | Not yet verified for this updated checksum |
 | **`ArkuzoMemorySaver-v1.1.0-win-x64.zip`** | `28518128a18649a4370e814b08aa363561850a5eaf0fe2cf2084f256e646f9c4` | [![0/66 Clean](https://img.shields.io/badge/VirusTotal-0%2F66%20Clean-brightgreen)](https://www.virustotal.com/gui/file/28518128a18649a4370e814b08aa363561850a5eaf0fe2cf2084f256e646f9c4) |
 
 The exact release publishes **`SHA256SUMS.txt`** for its executable and archives, plus **`ArkuzoMemorySaver-runtime.sha256`** for updater validation. The launcher verifies downloaded bytes and available GitHub asset digests. See [security and privacy](SECURITY.md).

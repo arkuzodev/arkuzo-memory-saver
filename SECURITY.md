@@ -16,10 +16,10 @@ SHA-256 values for each release are published in that release's **`SHA256SUMS.tx
 
 The release binary `ArkuzoMemorySaver.exe` (`6b2a7347bb288b11509aebb7cf4cd37e6ef190618cb8bed47a55b72b038f03ef`) was scanned on VirusTotal and verified **0/71 Clean** with zero detections:
 - **VirusTotal Scan (Executable):** [https://www.virustotal.com/gui/file/6b2a7347bb288b11509aebb7cf4cd37e6ef190618cb8bed47a55b72b038f03ef](https://www.virustotal.com/gui/file/6b2a7347bb288b11509aebb7cf4cd37e6ef190618cb8bed47a55b72b038f03ef)
-- **VirusTotal Scan (Runtime Zip):** [https://www.virustotal.com/gui/file/ab95975ce1746111b4a2accd538fd60cb0840768db179b3a174d4e5775531acb](https://www.virustotal.com/gui/file/ab95975ce1746111b4a2accd538fd60cb0840768db179b3a174d4e5775531acb)
+- **Updated Runtime Zip:** SHA-256 `c75e9f0b3ffa129e00cc80cbce02585c917a69fea3d15d37efe6c6cab80facc9`. VirusTotal status for this checksum is not yet verified; the previous runtime scan does not apply to these updated bytes.
 - **VirusTotal Scan (Release Archive):** [https://www.virustotal.com/gui/file/28518128a18649a4370e814b08aa363561850a5eaf0fe2cf2084f256e646f9c4](https://www.virustotal.com/gui/file/28518128a18649a4370e814b08aa363561850a5eaf0fe2cf2084f256e646f9c4)
 
-The **v1.1.0 Stable Baseline Release** includes an updated launcher executable with built-in WMI controller takeover, automated stale process cleanup, and persistent process-bound account name caching. All release artifacts were submitted to and verified clean by VirusTotal on October 9, 2026.
+The **v1.1.0 Stable Baseline Release** includes a launcher executable with built-in WMI controller takeover, automated stale process cleanup, and persistent process-bound account name caching. The executable and portable archive are unchanged from the original release. The refreshed runtime adds automatic exclusion of disappeared suspended accounts; do not transfer the original runtime's antivirus result to this update.
 
 Checksums and antivirus scans are not signatures or guarantees. Keep Windows Defender, SmartScreen, and Windows Error Reporting enabled.
 

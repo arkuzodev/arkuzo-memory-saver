@@ -1313,6 +1313,25 @@ function Update-ArkuzoCookieSuspensions {
             throw
         }
     }
+    $autoExcluded = $false
+    foreach ($key in @($script:suspendedAccounts.Keys)) {
+        if (@($voltControlStatus.accounts | Where-Object { $_.accountId -ceq $key }).Count -eq 0) {
+            if ($restorePolicy.excluded_account_ids -notcontains $key) {
+                $restorePolicy.excluded_account_ids += @($key)
+                $autoExcluded = $true
+                Write-Diagnostic 'DISAPPEARED_SUSPENDED_ACCOUNT_AUTO_EXCLUDED' @{ accountId = $key }
+            }
+        }
+    }
+    if ($autoExcluded -and $configFilePath -and (Test-Path -LiteralPath $configFilePath)) {
+        try {
+            $cfgJson = [IO.File]::ReadAllText($configFilePath) | ConvertFrom-Json
+            if ($null -ne $cfgJson.recovery) {
+                $cfgJson.recovery.excluded_account_ids = @($restorePolicy.excluded_account_ids)
+                Save-ArkuzoAtomicJson $configFilePath $cfgJson
+            }
+        } catch { }
+    }
 }
 function Update-ArkuzoRecoveryOutcomes {
     if ($MonitorOnly -or -not $restorePolicy.enabled -or -not $ownsControllerMutex -or -not $recoveryJournalHealthy) { return }

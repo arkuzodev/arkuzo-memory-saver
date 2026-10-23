@@ -108,6 +108,10 @@ try {
     Assert ($hb.settings.targetMB -eq 450 -and $hb.settings.effectiveTrimSec -eq 20 -and $hb.settings.trimPressure -and $hb.settings.memoryPriority -eq 'VeryLow') 'Heartbeat publishes effective settings'
     Assert ($hb.trims -eq 3 -and $hb.totals.residentMB -eq 500 -and $hb.totalPhysicalMB -eq 16384) 'Heartbeat publishes totals'
     Assert (@($hb.alerts).Count -eq 1 -and $hb.alerts[0].message -match 'Volt' -and @($hb.quarantined).Count -eq 1) 'Heartbeat publishes alerts and quarantine'
+    $script:quarantinedAccounts[$stuck].untilUtc=[datetime]::UtcNow.AddSeconds(-5).ToString('o')
+    Write-ArkuzoRuntimeStatus
+    $hb=[IO.File]::ReadAllText((Join-Path $scratch 'runtime-status.json'))|ConvertFrom-Json
+    Assert (@($hb.quarantined).Count -eq 0 -and -not $script:quarantinedAccounts.ContainsKey($stuck)) 'Expired quarantine is dropped from the heartbeat'
     Write-Output 'PASS: heartbeat publishes settings, totals, alerts and quarantine'
 } finally { Remove-Item -LiteralPath $scratch -Recurse -Force }
 

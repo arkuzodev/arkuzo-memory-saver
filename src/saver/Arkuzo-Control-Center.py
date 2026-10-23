@@ -650,6 +650,9 @@ def derive_issues(hb, age, supervisor_state) -> list:
     if (hb.get('settings') or {}).get('trimPressure'):
         add('warning', 'Low physical RAM: trimming every {}s'.format((hb.get('settings') or {}).get('effectiveTrimSec')))
     for q in hb.get('quarantined') or []:
+        until = parse_utc(q.get('untilUtc'))
+        if until is not None and until <= time.time():
+            continue  # Expired; the engine retries this account normally.
         add('warning', f"{q.get('username') or 'An account'} is quarantined",
             f"{q.get('retryCount')} failed recoveries; retried automatically after the quarantine ends.")
     dead = hb.get('suspendedAccounts') or []

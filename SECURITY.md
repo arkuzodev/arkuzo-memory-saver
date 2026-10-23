@@ -16,8 +16,8 @@ SHA-256 values for each release are published in that release's **`SHA256SUMS.tx
 
 The **v1.2.0** release rebuilds the launcher and adds the Control Center add-on. Its VirusTotal results are not yet recorded; earlier scans do not apply to these bytes:
 - **`ArkuzoMemorySaver.exe`:** SHA-256 `27edbe616b590bc18c22ef8cef710687e0721e71d8f05404640fecc5ca96367e`
-- **`ArkuzoMemorySaver-runtime.zip`:** SHA-256 `85e7e3aadc4ff1ddeb4f0218058615dd117e296540f85a718b23316fcbfaad58`
-- **`ArkuzoMemorySaver-controlcenter.zip`:** SHA-256 `d0716a962a9c149050c06d5596720f21d5479271b07b3f1422a1a203dc17fba8`
+- **`ArkuzoMemorySaver-runtime.zip`:** SHA-256 `e9d457c4b69c7b92f21b5252f449e13f94f07bbb3287ed616b6009c34c5495a5`
+- **`ArkuzoMemorySaver-controlcenter.zip`:** SHA-256 `8e016a0534dfd47a72209131c8e9cd68f718a34e30476229cb3d18c3088f90b1`
 - **`ArkuzoMemorySaver-v1.2.0-win-x64.zip`:** SHA-256 `df610f72482561a1fdb9bcedd4ea41788fb1214d810a7f54f26174adb9d7d4c1`
 
 The Control Center listens only on `127.0.0.1`, rejects requests whose `Host` is not a loopback name, and requires a per-run token for every change. It never reads cookies, tickets or command lines and does not control Roblox or Volt directly.

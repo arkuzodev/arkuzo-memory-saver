@@ -1614,6 +1614,8 @@ function Update-ArkuzoLiveSettings($Config) {
 function Write-ArkuzoRuntimeStatus {
     if ($MonitorOnly -or -not $ownsControllerMutex) { return }
     try {
+        # Expired quarantines are otherwise only dropped when that account is next evaluated.
+        if ($null -ne $script:quarantinedAccounts) { foreach ($key in @($script:quarantinedAccounts.Keys)) { [void](Test-ArkuzoAccountQuarantined $key ([datetime]::UtcNow)) } }
         $accounts=@($voltControlStatus.accounts|ForEach-Object{@{accountId=$_.accountId;username=$_.username;processId=$_.processId;uiStatus=$_.uiStatus;controlReady=$_.controlReady;cookieStatus=$_.cookieStatus;suspensionSafe=$_.suspensionSafe;autoRelaunch=[bool]$_.autoRelaunch}})
         $expected=@($voltControlStatus.accounts|Where-Object{$_.autoRelaunch -and $_.cookieAlive -and $_.cookieStatus -ceq 'alive' -and [long]$_.lastLaunchAtMs -gt 0 -and $restorePolicy.excluded_account_ids -notcontains $_.accountId -and ($null -eq $script:suspendedAccounts -or -not $script:suspendedAccounts.ContainsKey([string]$_.accountId))})
         $missing=@($expected|Where-Object{-not $_.processId})

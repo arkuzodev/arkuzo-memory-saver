@@ -97,8 +97,8 @@ v1.2.0 ships a rebuilt executable and new archives. Their VirusTotal results are
 | File | SHA-256 Checksum | VirusTotal Result |
 | :--- | :--- | :--- |
 | **`ArkuzoMemorySaver.exe`** | `27edbe616b590bc18c22ef8cef710687e0721e71d8f05404640fecc5ca96367e` | Not yet scanned |
-| **`ArkuzoMemorySaver-runtime.zip`** | `85e7e3aadc4ff1ddeb4f0218058615dd117e296540f85a718b23316fcbfaad58` | Not yet scanned |
-| **`ArkuzoMemorySaver-controlcenter.zip`** | `d0716a962a9c149050c06d5596720f21d5479271b07b3f1422a1a203dc17fba8` | Not yet scanned |
+| **`ArkuzoMemorySaver-runtime.zip`** | `e9d457c4b69c7b92f21b5252f449e13f94f07bbb3287ed616b6009c34c5495a5` | Not yet scanned |
+| **`ArkuzoMemorySaver-controlcenter.zip`** | `8e016a0534dfd47a72209131c8e9cd68f718a34e30476229cb3d18c3088f90b1` | Not yet scanned |
 | **`ArkuzoMemorySaver-v1.2.0-win-x64.zip`** | `df610f72482561a1fdb9bcedd4ea41788fb1214d810a7f54f26174adb9d7d4c1` | Not yet scanned |
 
 The exact release publishes **`SHA256SUMS.txt`** for its executable and archives, plus **`ArkuzoMemorySaver-runtime.sha256`** and **`ArkuzoMemorySaver-controlcenter.sha256`** for updater validation. The launcher verifies downloaded bytes and available GitHub asset digests. See [security and privacy](SECURITY.md).

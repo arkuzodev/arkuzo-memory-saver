@@ -1,0 +1,932 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arkuzo Control Center</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232a78d6'/%3E%3Cpath d='M9 23 16 8l7 15M12 18h8' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface: #fcfcfb; --surface-2: #f2f1ed; --surface-3: #e9e8e3;
+  --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10); --border-strong: rgba(11,11,11,0.18);
+  --s1: #2a78d6; --s2: #eb6834; --accent: #2a78d6; --accent-ink: #ffffff;
+  --good: #0ca30c; --good-text: #006300; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+  --shadow: 0 1px 2px rgba(11,11,11,0.05), 0 8px 24px rgba(11,11,11,0.06);
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --surface-2: #222220; --surface-3: #2c2c2a;
+    --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10); --border-strong: rgba(255,255,255,0.18);
+    --s1: #3987e5; --s2: #d95926; --accent: #3987e5; --accent-ink: #ffffff; --good-text: #0ca30c;
+    --shadow: 0 1px 2px rgba(0,0,0,0.4), 0 8px 24px rgba(0,0,0,0.25);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19; --surface-2: #222220; --surface-3: #2c2c2a;
+  --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10); --border-strong: rgba(255,255,255,0.18);
+  --s1: #3987e5; --s2: #d95926; --accent: #3987e5; --accent-ink: #ffffff; --good-text: #0ca30c;
+  --shadow: 0 1px 2px rgba(0,0,0,0.4), 0 8px 24px rgba(0,0,0,0.25);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--page); color: var(--ink);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+button, input, select { font: inherit; color: inherit; }
+.num { font-variant-numeric: tabular-nums; }
+.muted { color: var(--muted); }
+.ink2 { color: var(--ink-2); }
+[hidden] { display: none !important; }
+
+/* ---------- top bar ---------- */
+.topbar {
+  position: sticky; top: 0; z-index: 20;
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 12px 24px; background: color-mix(in srgb, var(--page) 88%, transparent);
+  backdrop-filter: blur(10px); border-bottom: 1px solid var(--border);
+}
+.brand { display: flex; align-items: center; gap: 10px; margin-right: 6px; }
+.brand-mark { width: 30px; height: 30px; border-radius: 8px; background: var(--accent); display: grid; place-items: center; }
+.brand-mark svg { width: 18px; height: 18px; }
+.brand-name { font-weight: 700; letter-spacing: 0.14em; font-size: 13px; }
+.brand-sub { color: var(--muted); font-size: 12px; margin-top: -2px; }
+.pill {
+  display: inline-flex; align-items: center; gap: 8px; height: 30px; padding: 0 12px;
+  border-radius: 999px; border: 1px solid var(--border); background: var(--surface); font-weight: 600; font-size: 13px;
+}
+.pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.pill.good .dot { background: var(--good); box-shadow: 0 0 0 4px color-mix(in srgb, var(--good) 22%, transparent); }
+.pill.warning .dot { background: var(--warning); }
+.pill.critical .dot { background: var(--critical); }
+.pill.info .dot { background: var(--s1); animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: 0.35; } }
+.pill-meta { color: var(--muted); font-weight: 500; font-size: 12px; }
+.spacer { flex: 1; }
+.btn {
+  display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 14px;
+  border-radius: 9px; border: 1px solid var(--border-strong); background: var(--surface); cursor: pointer;
+  font-weight: 600; font-size: 13px; transition: background 0.12s, border-color 0.12s, transform 0.06s;
+}
+.btn:hover { background: var(--surface-2); }
+.btn:active { transform: translateY(1px); }
+.btn:disabled { opacity: 0.45; cursor: default; }
+.btn.primary { background: var(--accent); border-color: transparent; color: var(--accent-ink); }
+.btn.primary:hover { background: color-mix(in srgb, var(--accent) 88%, black); }
+.btn.danger { color: var(--critical); }
+.btn.ghost { border-color: transparent; background: transparent; }
+.btn.ghost:hover { background: var(--surface-2); }
+.btn svg { width: 16px; height: 16px; }
+.icon-btn { width: 34px; padding: 0; justify-content: center; }
+.btn:focus-visible, .switch input:focus-visible + span, .chip:focus-visible, .chart:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.switch { display: inline-flex; align-items: center; gap: 9px; cursor: pointer; user-select: none; font-weight: 600; font-size: 13px; }
+.switch input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.switch span.track { width: 36px; height: 20px; border-radius: 999px; background: var(--surface-3); border: 1px solid var(--border-strong); position: relative; transition: background 0.15s; flex: none; }
+.switch span.track::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--surface); box-shadow: 0 1px 2px rgba(0,0,0,0.3); transition: transform 0.15s; }
+.switch input:checked + span.track { background: var(--accent); border-color: transparent; }
+.switch input:checked + span.track::after { transform: translateX(16px); }
+
+/* ---------- layout ---------- */
+main { max-width: 1680px; margin: 0 auto; padding: 18px 24px 40px; display: grid; gap: 16px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow); min-width: 0; }
+.card-head { display: flex; align-items: center; gap: 10px; padding: 14px 16px 6px; flex-wrap: wrap; }
+.card-title { font-weight: 650; font-size: 14px; margin: 0; }
+.card-sub { color: var(--muted); font-size: 12px; }
+.card-body { padding: 8px 16px 16px; }
+.banner { margin: 0; padding: 10px 24px; background: var(--critical); color: #fff; font-weight: 600; text-align: center; }
+
+/* ---------- issues ---------- */
+.issues { display: grid; gap: 8px; }
+.issue { display: flex; gap: 12px; align-items: flex-start; padding: 11px 14px; border-radius: 12px; background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--muted); }
+.issue.critical { border-left-color: var(--critical); }
+.issue.warning { border-left-color: var(--warning); }
+.issue.good { border-left-color: var(--good); }
+.issue svg { width: 18px; height: 18px; flex: none; margin-top: 1px; }
+.issue .t { font-weight: 600; }
+.issue .d { color: var(--ink-2); font-size: 13px; }
+
+/* ---------- KPI tiles ---------- */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+.tile { padding: 14px 16px; }
+.tile-label { color: var(--ink-2); font-size: 12px; font-weight: 600; letter-spacing: 0.02em; display: flex; align-items: center; gap: 6px; }
+.tile-value { font-size: 28px; font-weight: 700; letter-spacing: -0.02em; margin-top: 4px; line-height: 1.1; }
+.tile-value small { font-size: 15px; font-weight: 600; color: var(--ink-2); margin-left: 3px; letter-spacing: 0; }
+.tile-sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
+.meter { height: 6px; border-radius: 999px; background: var(--surface-3); margin-top: 10px; overflow: hidden; }
+.meter > i { display: block; height: 100%; border-radius: 999px; background: var(--s1); transition: width 0.4s; }
+.meter.warn > i { background: var(--warning); }
+.meter.crit > i { background: var(--critical); }
+
+/* ---------- charts ---------- */
+.charts { display: grid; grid-template-columns: 1fr; gap: 16px; }
+@media (min-width: 1100px) { .charts { grid-template-columns: 1fr 1fr; } }
+.legend { display: flex; gap: 14px; margin-left: auto; align-items: center; flex-wrap: wrap; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-2); font-size: 12px; }
+.legend i { width: 14px; height: 2px; border-radius: 2px; display: inline-block; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.seg button { border: 0; background: transparent; padding: 3px 10px; font-size: 12px; cursor: pointer; color: var(--ink-2); }
+.seg button[aria-pressed="true"] { background: var(--surface-3); color: var(--ink); font-weight: 600; }
+.chart { position: relative; height: 220px; }
+.chart svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.chart .empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 13px; }
+.tip {
+  position: absolute; pointer-events: none; z-index: 5; min-width: 150px;
+  background: var(--surface); border: 1px solid var(--border-strong); border-radius: 10px; box-shadow: var(--shadow);
+  padding: 8px 10px; font-size: 12px;
+}
+.tip .tt { color: var(--muted); margin-bottom: 4px; }
+.tip .row { display: flex; align-items: center; gap: 8px; }
+.tip .row i { width: 12px; height: 2px; border-radius: 2px; }
+.tip .row b { font-variant-numeric: tabular-nums; font-size: 13px; }
+.tip .row span { color: var(--ink-2); }
+details.table-view { padding: 0 16px 12px; }
+details.table-view summary { cursor: pointer; color: var(--ink-2); font-size: 12px; width: max-content; }
+
+/* ---------- tables ---------- */
+.split { display: grid; grid-template-columns: 1fr; gap: 16px; align-items: start; }
+@media (min-width: 1240px) { .split { grid-template-columns: minmax(0, 1.85fr) minmax(340px, 1fr); } }
+.side { display: grid; gap: 16px; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; }
+th { text-align: left; font-size: 11px; font-weight: 650; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); padding: 8px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+td { padding: 9px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; vertical-align: middle; }
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover td { background: var(--surface-2); }
+td.r, th.r { text-align: right; }
+.slot { display: inline-grid; place-items: center; width: 26px; height: 22px; border-radius: 6px; background: var(--surface-3); font-size: 12px; font-weight: 650; color: var(--ink-2); }
+.acct { font-weight: 600; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.badge { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px 0 7px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--surface-3); color: var(--ink); white-space: nowrap; }
+.badge svg { width: 14px; height: 14px; flex: none; }
+.badge.good { background: color-mix(in srgb, var(--good) 14%, transparent); }
+.badge.warning { background: color-mix(in srgb, var(--warning) 18%, transparent); }
+.badge.serious { background: color-mix(in srgb, var(--serious) 18%, transparent); }
+.badge.critical { background: color-mix(in srgb, var(--critical) 16%, transparent); }
+.badge.small { height: 20px; font-size: 11px; padding: 0 7px 0 5px; }
+.membar { position: relative; width: 140px; height: 8px; border-radius: 999px; background: var(--surface-3); display: inline-block; vertical-align: middle; margin-right: 10px; }
+.membar > i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 999px; background: var(--s1); }
+.membar > b { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--ink-2); border-radius: 1px; }
+.empty-state { padding: 36px 16px; text-align: center; color: var(--muted); }
+.empty-state strong { display: block; color: var(--ink); font-size: 15px; margin-bottom: 4px; }
+@media (max-width: 900px) { .hide-sm { display: none; } .membar { width: 80px; } }
+
+/* ---------- accounts & feed ---------- */
+.list { list-style: none; margin: 0; padding: 0 8px 8px; max-height: 420px; overflow: auto; }
+.list li { display: flex; align-items: center; gap: 10px; padding: 9px 8px; border-radius: 10px; }
+.list li:hover { background: var(--surface-2); }
+.avatar { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 12px; background: var(--surface-3); color: var(--ink-2); flex: none; }
+.grow { flex: 1; min-width: 0; }
+.ellip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.li-sub { color: var(--muted); font-size: 12px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.chips { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; }
+.chip { border: 1px solid var(--border); background: transparent; border-radius: 999px; padding: 2px 10px; font-size: 12px; cursor: pointer; color: var(--ink-2); }
+.chip[aria-pressed="true"] { background: var(--ink); color: var(--surface); border-color: transparent; }
+.feed li { align-items: flex-start; gap: 10px; padding: 7px 8px; }
+.feed time { color: var(--muted); font-size: 12px; flex: none; min-width: 58px; white-space: nowrap; padding-top: 1px; }
+.feed svg { width: 15px; height: 15px; flex: none; margin-top: 2px; }
+.feed .txt { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+
+/* ---------- drawer ---------- */
+.scrim { position: fixed; inset: 0; background: rgba(0,0,0,0.35); z-index: 40; opacity: 0; pointer-events: none; transition: opacity 0.2s; }
+.scrim.open { opacity: 1; pointer-events: auto; }
+.drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(560px, 100vw); z-index: 50;
+  background: var(--surface); border-left: 1px solid var(--border); box-shadow: -12px 0 40px rgba(0,0,0,0.25);
+  transform: translateX(102%); transition: transform 0.22s ease; display: flex; flex-direction: column;
+}
+.drawer.open { transform: none; }
+.drawer-head { display: flex; align-items: center; gap: 10px; padding: 16px 20px; border-bottom: 1px solid var(--border); }
+.drawer-head h2 { margin: 0; font-size: 17px; }
+.drawer-body { overflow: auto; padding: 8px 20px 24px; flex: 1; }
+.drawer-foot { display: flex; gap: 8px; padding: 14px 20px; border-top: 1px solid var(--border); flex-wrap: wrap; align-items: center; }
+.presets { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 12px 0 6px; }
+.preset { text-align: left; border: 1px solid var(--border-strong); background: var(--surface); border-radius: 12px; padding: 10px 12px; cursor: pointer; }
+.preset:hover { background: var(--surface-2); }
+.preset[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.preset b { display: block; font-size: 13px; }
+.preset span { color: var(--muted); font-size: 11px; }
+fieldset { border: 0; margin: 18px 0 0; padding: 0; }
+legend { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin-bottom: 4px; }
+.field { display: grid; grid-template-columns: 1fr auto; gap: 2px 14px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.field label.name { font-weight: 600; font-size: 13px; }
+.field .hint { grid-column: 1 / 2; color: var(--muted); font-size: 12px; }
+.field .ctl { grid-row: 1 / span 2; grid-column: 2; display: flex; align-items: center; gap: 6px; }
+.field input[type=number], .field select { width: 120px; height: 32px; border-radius: 8px; border: 1px solid var(--border-strong); background: var(--surface-2); padding: 0 8px; text-align: right; }
+.field select { text-align: left; width: 140px; }
+.field .unit { color: var(--muted); font-size: 12px; min-width: 34px; }
+.field.dirty label.name::after { content: " •"; color: var(--accent); }
+.field.invalid input { border-color: var(--critical); }
+.form-error { color: var(--critical); font-weight: 600; font-size: 13px; }
+.toast {
+  position: fixed; left: 50%; bottom: 24px; transform: translate(-50%, 20px); opacity: 0; z-index: 60;
+  background: var(--ink); color: var(--surface); padding: 10px 16px; border-radius: 10px; font-weight: 600; transition: all 0.2s; pointer-events: none;
+}
+.toast.show { opacity: 1; transform: translate(-50%, 0); }
+footer { max-width: 1680px; margin: 0 auto; padding: 0 24px 24px; color: var(--muted); font-size: 12px; display: flex; gap: 16px; flex-wrap: wrap; }
+@media (max-width: 640px) {
+  .topbar { padding: 10px 16px; }
+  main { padding: 14px 16px 32px; }
+  .presets { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 18 18" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 15 9 2l6 13M5.6 10.5h6.8"/></svg></div>
+    <div><div class="brand-name">ARKUZO</div><div class="brand-sub">Control Center</div></div>
+  </div>
+  <div class="pill" id="saverPill" role="status" aria-live="polite"><span class="dot"></span><span id="saverLabel">Connecting…</span><span class="pill-meta num" id="saverMeta"></span></div>
+  <div class="spacer"></div>
+  <label class="switch" title="Restart the saver automatically if it stops, crashes or hangs">
+    <input type="checkbox" id="autopilot"><span class="track"></span>Autopilot
+  </label>
+  <button class="btn" id="btnTrim" title="Trim every eligible client now"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M3 8h10M8 3v10" transform="rotate(45 8 8)"/></svg>Trim now</button>
+  <button class="btn primary" id="btnStart"><svg viewBox="0 0 16 16" fill="currentColor"><path d="M5 3.5v9l7.5-4.5z"/></svg>Start</button>
+  <button class="btn" id="btnRestart" hidden><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M13 8a5 5 0 1 1-1.5-3.6M13 2.5v2.4h-2.4"/></svg>Restart</button>
+  <button class="btn danger" id="btnStop" hidden><svg viewBox="0 0 16 16" fill="currentColor"><rect x="4" y="4" width="8" height="8" rx="1.5"/></svg>Stop</button>
+  <button class="btn ghost icon-btn" id="btnTheme" title="Toggle light/dark" aria-label="Toggle light or dark theme"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5a5.5 5.5 0 0 0 0 11z" fill="currentColor"/></svg></button>
+  <button class="btn" id="btnSettings"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 4.5h6M11.5 4.5h2M2.5 11.5h2M7.5 11.5h6"/><circle cx="10" cy="4.5" r="1.6"/><circle cx="6" cy="11.5" r="1.6"/></svg>Settings</button>
+</header>
+<p class="banner" id="offline" hidden>Lost connection to the Control Center. Retrying…</p>
+
+<main>
+  <section class="issues" id="issues" aria-label="Farm health"></section>
+
+  <section class="kpis" id="kpis" aria-label="Key figures"></section>
+
+  <section class="charts">
+    <article class="card">
+      <div class="card-head">
+        <h2 class="card-title">Farm memory</h2>
+        <span class="card-sub">all Roblox clients</span>
+        <div class="legend"><span><i style="background:var(--s1)"></i>Resident (in RAM)</span><span><i style="background:var(--s2)"></i>Private (committed)</span>
+          <div class="seg" role="group" aria-label="Time range"><button data-range="900" aria-pressed="true">15m</button><button data-range="3600" aria-pressed="false">1h</button></div></div>
+      </div>
+      <div class="chart" id="chartMem" tabindex="0" aria-label="Farm memory over time. Use arrow keys to inspect values."></div>
+      <details class="table-view"><summary>Table view</summary><div class="table-wrap" id="tableMem"></div></details>
+    </article>
+    <article class="card">
+      <div class="card-head">
+        <h2 class="card-title">System pressure</h2>
+        <span class="card-sub">share of capacity in use</span>
+        <div class="legend"><span><i style="background:var(--s1)"></i>OS commit</span><span><i style="background:var(--s2)"></i>Physical RAM</span>
+          <div class="seg" role="group" aria-label="Time range"><button data-range="900" aria-pressed="true">15m</button><button data-range="3600" aria-pressed="false">1h</button></div></div>
+      </div>
+      <div class="chart" id="chartPressure" tabindex="0" aria-label="System memory pressure over time. Use arrow keys to inspect values."></div>
+      <details class="table-view"><summary>Table view</summary><div class="table-wrap" id="tablePressure"></div></details>
+    </article>
+  </section>
+
+  <section class="split">
+    <article class="card">
+      <div class="card-head">
+        <h2 class="card-title">Clients</h2><span class="card-sub num" id="clientsSub"></span>
+        <div class="legend"><span class="ink2" style="gap:6px"><span class="membar" style="width:28px;margin:0"><i style="width:60%"></i><b style="left:60%"></b></span>resident vs. target</span></div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Slot</th><th>Account</th><th>Status</th><th>Resident</th><th class="r">Private</th><th class="r hide-sm">CPU</th><th class="r hide-sm">Next trim</th><th class="r hide-sm">Uptime</th><th class="r hide-sm">PID</th></tr></thead>
+          <tbody id="clients"></tbody>
+        </table>
+      </div>
+      <div id="clientsEmpty" class="empty-state" hidden><strong>No Roblox clients running</strong>Launch accounts from Volt; they appear here within seconds.</div>
+    </article>
+    <div class="side">
+      <article class="card">
+        <div class="card-head"><h2 class="card-title">Accounts</h2><span class="card-sub" id="acctSub"></span></div>
+        <ul class="list" id="accounts"></ul>
+        <div id="acctEmpty" class="empty-state" hidden><strong>Volt Account Manager not reachable</strong>Open Volt with the Account Manager visible; accounts and auto-recovery appear here.</div>
+      </article>
+      <article class="card">
+        <div class="card-head"><h2 class="card-title">Activity</h2>
+          <div class="chips" role="group" aria-label="Filter activity">
+            <button class="chip" data-filter="all" aria-pressed="true">All</button>
+            <button class="chip" data-filter="recovery" aria-pressed="false">Recovery</button>
+            <button class="chip" data-filter="problems" aria-pressed="false">Problems</button>
+            <button class="chip" data-filter="saver" aria-pressed="false">Saver</button>
+          </div></div>
+        <ul class="list feed" id="feed" aria-live="polite"></ul>
+        <div id="feedEmpty" class="empty-state" hidden>No activity yet.</div>
+      </article>
+    </div>
+  </section>
+</main>
+<footer><span id="footVersion"></span><span id="footData"></span><span id="footUpdate"></span></footer>
+
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer" aria-label="Settings" aria-hidden="true">
+  <div class="drawer-head"><h2>Settings</h2><div class="spacer"></div><button class="btn ghost icon-btn" id="btnClose" aria-label="Close settings"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="m4 4 8 8M12 4l-8 8"/></svg></button></div>
+  <div class="drawer-body">
+    <div class="card-sub">Most settings apply to the running saver within 10 seconds. Fields marked "restart" need a saver restart.</div>
+    <div class="presets" id="presets"></div>
+    <form id="settingsForm" novalidate></form>
+    <fieldset><legend>Autopilot</legend>
+      <div class="field"><label class="name" for="pAutopilot">Keep the saver running</label><div class="hint">Restart it with backoff when it crashes, exits or hangs.</div><div class="ctl"><label class="switch"><input type="checkbox" id="pAutopilot"><span class="track"></span></label></div></div>
+      <div class="field"><label class="name" for="pLaunch">Start saver with the Control Center</label><div class="hint">Begin managing clients as soon as this app opens.</div><div class="ctl"><label class="switch"><input type="checkbox" id="pLaunch"><span class="track"></span></label></div></div>
+      <div class="field"><label class="name" for="pWindows">Start with Windows</label><div class="hint">Runs the Control Center in the background at sign-in (no window).</div><div class="ctl"><label class="switch"><input type="checkbox" id="pWindows"><span class="track"></span></label></div></div>
+    </fieldset>
+  </div>
+  <div class="drawer-foot">
+    <span class="form-error" id="formError"></span>
+    <div class="spacer"></div>
+    <button class="btn ghost" id="btnQuit" title="Close the Control Center; the saver keeps running">Quit app</button>
+    <button class="btn ghost danger" id="btnQuitAll">Stop farm &amp; quit</button>
+    <button class="btn primary" id="btnSave" disabled>Save changes</button>
+  </div>
+</aside>
+<div class="toast" id="toast" role="status"></div>
+
+<script>
+'use strict';
+const TOKEN = '__ARKUZO_TOKEN__';
+const $ = (id) => document.getElementById(id);
+const ICONS = {
+  good: '<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="var(--good)"/><path d="m4.8 8.2 2.2 2.2 4.2-4.6" stroke="#fff" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  info: '<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="var(--s1)"/><path d="M8 7.2v4M8 4.8v.1" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/></svg>',
+  neutral: '<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="var(--muted)" stroke-width="2" stroke-dasharray="3 2.2"/></svg>',
+  warning: '<svg viewBox="0 0 16 16"><path d="M8 1.6 15 14H1z" fill="var(--warning)" stroke="var(--warning)" stroke-linejoin="round"/><path d="M8 6v3.6M8 11.6v.1" stroke="#1a1a19" stroke-width="1.7" stroke-linecap="round"/></svg>',
+  serious: '<svg viewBox="0 0 16 16"><path d="M8 1.6 15 14H1z" fill="var(--serious)" stroke="var(--serious)" stroke-linejoin="round"/><path d="M8 6v3.6M8 11.6v.1" stroke="#fff" stroke-width="1.7" stroke-linecap="round"/></svg>',
+  critical: '<svg viewBox="0 0 16 16"><path d="M5.2 1h5.6L15 5.2v5.6L10.8 15H5.2L1 10.8V5.2z" fill="var(--critical)"/><path d="m5.6 5.6 4.8 4.8M10.4 5.6l-4.8 4.8" stroke="#fff" stroke-width="1.7" stroke-linecap="round"/></svg>',
+};
+
+// ---------- helpers ----------
+function el(tag, props, ...kids) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (v == null || v === false) continue;
+    if (k === 'class') node.className = v;
+    else if (k === 'text') node.textContent = v;
+    else if (k === 'html') node.innerHTML = v; // Only ever trusted static icon markup.
+    else if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
+    else node.setAttribute(k, v === true ? '' : v);
+  }
+  for (const kid of kids.flat()) if (kid != null) node.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+  return node;
+}
+const fmtMB = (mb) => mb == null || isNaN(mb) ? '–' : (mb >= 1024 ? (mb / 1024).toFixed(mb >= 10240 ? 1 : 2) + ' GB' : Math.round(mb) + ' MB');
+const fmtGBparts = (mb) => mb >= 1024 ? [(mb / 1024).toFixed(1), 'GB'] : [String(Math.round(mb || 0)), 'MB'];
+const fmtPct = (v) => v == null || isNaN(v) ? '–' : (Math.round(v * 10) / 10).toFixed(v < 10 ? 1 : 0) + '%';
+function fmtDur(sec) {
+  if (sec == null || isNaN(sec)) return '–';
+  sec = Math.max(0, Math.round(sec));
+  const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60);
+  if (d) return `${d}d ${h}h`;
+  if (h) return `${h}h ${m}m`;
+  if (m) return `${m}m`;
+  return `${sec}s`;
+}
+const fmtTime = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+const fmtClock = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+const initials = (name) => (String(name || '?').replace(/[^\p{L}\p{N}]/gu, '').slice(0, 2) || '?').toUpperCase();
+function toast(text) { const t = $('toast'); t.textContent = text; t.classList.add('show'); clearTimeout(toast.h); toast.h = setTimeout(() => t.classList.remove('show'), 2600); }
+async function post(path, body) {
+  const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Arkuzo-Token': TOKEN }, body: JSON.stringify(body || {}) });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
+  return data;
+}
+
+// ---------- theme ----------
+function applyTheme(theme) { if (theme) document.documentElement.dataset.theme = theme; else delete document.documentElement.dataset.theme; }
+try { applyTheme(localStorage.getItem('arkuzo-theme')); } catch (e) { /* storage unavailable */ }
+$('btnTheme').onclick = () => {
+  const dark = getComputedStyle(document.documentElement).colorScheme === 'dark';
+  const next = dark ? 'light' : 'dark';
+  applyTheme(next);
+  try { localStorage.setItem('arkuzo-theme', next); } catch (e) { /* ignore */ }
+  redrawCharts();
+};
+
+// ---------- state ----------
+const S = { state: null, history: [], events: [], lastEvent: 0, range: 900, filter: 'all', config: null, presets: {}, schema: {}, restartKeys: [], edits: {} };
+
+// ---------- status helpers ----------
+const CRIT = new Set(['NOT RESPONDING', 'STUCK CLIENT', 'LEAK GUARD', 'COMMIT PRESSURE', 'CRITICAL COMMIT', 'VOLT STARTUP ERROR', 'DISCONNECTED']);
+const WARN = new Set(['MEMORY GRACE', 'HANG GRACE', 'NO CPU >10s', 'CHECK NOTICE']);
+function clientStatus(c) {
+  const s = c.state || '';
+  if (CRIT.has(s)) return { level: 'critical', label: s === 'VOLT STARTUP ERROR' ? 'Startup error' : s.charAt(0) + s.slice(1).toLowerCase() };
+  if (WARN.has(s)) return { level: 'warning', label: s === 'NO CPU >10s' ? 'Idle CPU' : s.charAt(0) + s.slice(1).toLowerCase() };
+  if (s === 'LOADING') return { level: 'neutral', label: 'Loading' };
+  if (String(c.nextTrim || '').startsWith('WARMUP')) return { level: 'neutral', label: 'Warming up' };
+  return { level: 'good', label: c.gameReady ? 'In game' : (s === 'MINIMIZED' ? 'Minimized' : 'Running') };
+}
+function badge(level, label, small) { return el('span', { class: `badge ${level}${small ? ' small' : ''}`, html: ICONS[level] || ICONS.neutral }, label); }
+
+// ---------- render: header ----------
+const SAVER = {
+  running: ['good', 'Running'], external: ['good', 'Running'], starting: ['info', 'Starting…'],
+  restarting: ['warning', 'Restarting'], crashed: ['critical', 'Crashed'], stopped: ['', 'Stopped'],
+};
+function renderHeader(st) {
+  const sup = st.supervisor, hb = st.heartbeat;
+  const [level, label] = SAVER[sup.state] || ['', sup.state];
+  $('saverPill').className = 'pill ' + level;
+  $('saverLabel').textContent = label + (sup.state === 'external' ? ' (external)' : '');
+  $('saverPill').title = sup.message || '';
+  let meta = '';
+  if ((sup.state === 'running' || sup.state === 'external') && hb) meta = 'up ' + fmtDur(hb.uptimeSec);
+  else if (sup.state === 'restarting' && sup.restartInSec != null) meta = 'in ' + sup.restartInSec + 's';
+  $('saverMeta').textContent = meta;
+  const live = ['running', 'external', 'starting'].includes(sup.state);
+  $('btnStart').hidden = live;
+  $('btnStop').hidden = !live;
+  $('btnRestart').hidden = !live;
+  $('btnTrim').disabled = !live || !hb;
+  if (document.activeElement !== $('autopilot')) $('autopilot').checked = !!sup.autopilot;
+}
+
+// ---------- render: issues ----------
+function renderIssues(st) {
+  const box = $('issues'); box.replaceChildren();
+  const issues = [...st.issues];
+  const alerts = (st.heartbeat && st.heartbeat.alerts) || [];
+  const seen = new Set(issues.map((i) => i.title));
+  for (const a of alerts.slice(0, 3)) {
+    if (!a.message || seen.has(a.message) || a.ageSec > 60) continue;
+    issues.push({ level: /fail|blocked|error|dead|critical/i.test(a.message) ? 'critical' : 'warning', title: a.message, detail: '' });
+  }
+  if (!issues.length && st.heartbeat && ['running', 'external'].includes(st.supervisor.state)) {
+    box.append(el('div', { class: 'issue good', html: ICONS.good }, el('div', {}, el('div', { class: 't', text: 'Farm healthy' }),
+      el('div', { class: 'd', text: 'All clients are monitored; recovery and memory policies are active.' }))));
+    return;
+  }
+  for (const i of issues.slice(0, 6)) {
+    box.append(el('div', { class: 'issue ' + i.level, html: ICONS[i.level] || ICONS.warning },
+      el('div', {}, el('div', { class: 't', text: i.title }), i.detail ? el('div', { class: 'd', text: i.detail }) : null)));
+  }
+}
+
+// ---------- render: KPIs ----------
+function tile(label, valueParts, sub, meter) {
+  const value = el('div', { class: 'tile-value num' }, valueParts[0], valueParts[1] ? el('small', { text: valueParts[1] }) : null);
+  const node = el('div', { class: 'card tile' }, el('div', { class: 'tile-label', text: label }), value, el('div', { class: 'tile-sub', text: sub }));
+  if (meter) node.append(el('div', { class: 'meter ' + (meter.cls || ''), role: 'img', 'aria-label': meter.label }, el('i', { style: `width:${Math.max(0, Math.min(100, meter.pct)).toFixed(1)}%` })));
+  return node;
+}
+function renderKpis(st) {
+  const hb = st.heartbeat, box = $('kpis');
+  if (!hb) { box.replaceChildren(tile('Saver', ['Offline'], st.supervisor.message || 'Waiting for the saver heartbeat.')); return; }
+  const clients = hb.clients || [], totals = hb.totals || {}, mem = hb.systemMemory || {}, set = hb.settings || {};
+  const resident = totals.residentMB ?? clients.reduce((a, c) => a + (c.residentMB || 0), 0);
+  const priv = totals.privateMB ?? clients.reduce((a, c) => a + (c.privateMB || 0), 0);
+  const expected = hb.expectedAccounts || 0;
+  const totalPhys = hb.totalPhysicalMB || 0, avail = mem.availablePhysicalMB;
+  const freePct = totalPhys && avail != null ? 100 * avail / totalPhys : null;
+  const commit = mem.commitPercent;
+  const pressureAt = (hb.health || {}).pressure_percent || 88;
+  const healthy = clients.filter((c) => clientStatus(c).level === 'good').length;
+  box.replaceChildren(
+    tile('Clients', [String(clients.length), expected ? `/ ${expected}` : ''], `${healthy} healthy · ${hb.missingAccounts || 0} missing`),
+    tile('Farm RAM in use', fmtGBparts(resident), `target ${set.targetMB || '–'} MB each · ${clients.length ? fmtMB(resident / clients.length) : '–'} avg`),
+    tile('Private commit', fmtGBparts(priv), clients.length ? `${fmtMB(priv / clients.length)} per client` : 'no clients'),
+    tile('Physical RAM free', avail != null ? fmtGBparts(avail) : ['–'],
+      (freePct != null ? fmtPct(freePct) + ' free · ' : '') + (set.trimPressure ? `low RAM: trim every ${set.effectiveTrimSec}s` : `trim every ${set.effectiveTrimSec || set.trimEverySec || '–'}s`),
+      freePct != null ? { pct: 100 - freePct, cls: freePct < (set.trimPressure ? 100 : 0) ? 'warn' : '', label: fmtPct(100 - freePct) + ' of physical RAM used' } : null),
+    tile('OS commit', [commit != null ? String(Math.round(commit)) : '–', '%'], mem.commitLimitMB ? `${fmtMB(mem.commitUsedMB)} of ${fmtMB(mem.commitLimitMB)} · recycle at ${pressureAt}%` : '',
+      commit != null ? { pct: commit, cls: commit >= pressureAt ? 'crit' : commit >= pressureAt - 8 ? 'warn' : '', label: fmtPct(commit) + ' commit used' } : null),
+    tile('Recovery', [String(hb.pendingRecoveries || 0), 'pending'], `${(hb.quarantined || []).length} quarantined · ${(hb.suspendedAccounts || []).length} dead cookie`),
+    tile('Trims', [Number(hb.trims || 0).toLocaleString()], `uptime ${fmtDur(hb.uptimeSec)}`),
+  );
+}
+
+// ---------- charts ----------
+const CHARTS = {
+  chartMem: { table: 'tableMem', series: [{ key: 'resident', label: 'Resident', color: '--s1' }, { key: 'private', label: 'Private', color: '--s2' }], fmt: fmtMB, axisFmt: (v) => v === 0 ? '0' : v >= 1024 ? (v / 1024).toFixed(v >= 10240 ? 0 : 1) + ' GB' : Math.round(v) + ' MB' },
+  chartPressure: { table: 'tablePressure', series: [{ key: 'commit', label: 'OS commit', color: '--s1' }, { key: 'ramUsed', label: 'Physical RAM', color: '--s2' }], fmt: fmtPct, axisFmt: (v) => v + '%', yMax: 100 },
+};
+function niceMax(v) {
+  if (v <= 0) return 1;
+  const p = Math.pow(10, Math.floor(Math.log10(v))), n = v / p;
+  return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * p;
+}
+function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+function drawChart(id) {
+  const host = $(id), cfg = CHARTS[id];
+  const W = Math.max(300, host.clientWidth), H = host.clientHeight || 220;
+  const m = { l: 56, r: 92, t: 12, b: 26 };
+  const now = (S.state && S.state.now) || Date.now() / 1000, x0 = now - S.range;
+  const pts = S.history.filter((p) => p.t >= x0);
+  cfg.view = { pts, W, H, m, x0, x1: now };
+  if (pts.length < 2) {
+    host.innerHTML = '';
+    host.append(el('div', { class: 'empty', text: S.state && S.state.heartbeat ? 'Collecting samples…' : 'No data while the saver is offline' }));
+    return;
+  }
+  let max = cfg.yMax;
+  if (!max) {
+    max = 0; for (const p of pts) for (const s of cfg.series) if (p[s.key] != null) max = Math.max(max, p[s.key]);
+    max *= 1.08;
+    max = max > 1024 ? niceMax(max / 1024 / 4) * 4 * 1024 : niceMax(max / 4) * 4; // Round ticks in GB once the axis is in GB.
+  }
+  cfg.view.max = max;
+  const X = (t) => m.l + (t - x0) / (now - x0) * (W - m.l - m.r);
+  const Y = (v) => m.t + (1 - v / max) * (H - m.t - m.b);
+  cfg.view.X = X; cfg.view.Y = Y;
+  const grid = css('--grid'), axis = css('--axis'), muted = css('--muted'), ink2 = css('--ink-2'), surface = css('--surface');
+  let svg = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-hidden="true">`;
+  for (let i = 0; i <= 4; i++) {
+    const v = max * i / 4, y = Y(v).toFixed(1);
+    svg += `<line x1="${m.l}" x2="${W - m.r}" y1="${y}" y2="${y}" stroke="${i ? grid : axis}" stroke-width="1"/>`;
+    svg += `<text x="${m.l - 8}" y="${y}" dy="0.32em" text-anchor="end" font-size="11" fill="${muted}" style="font-variant-numeric:tabular-nums">${cfg.axisFmt(Math.round(v * 10) / 10)}</text>`;
+  }
+  const step = S.range <= 900 ? 300 : 900;
+  for (let t = Math.ceil(x0 / step) * step; t <= now; t += step) {
+    svg += `<text x="${X(t).toFixed(1)}" y="${H - 6}" text-anchor="middle" font-size="11" fill="${muted}">${fmtClock(t)}</text>`;
+  }
+  if (id === 'chartPressure' && S.state && S.state.heartbeat) {
+    const at = (S.state.heartbeat.health || {}).pressure_percent || 88, y = Y(at).toFixed(1);
+    svg += `<line x1="${m.l}" x2="${W - m.r}" y1="${y}" y2="${y}" stroke="${muted}" stroke-dasharray="4 4" stroke-width="1"/>`;
+    svg += `<text x="${m.l + 6}" y="${y}" dy="-0.45em" font-size="11" fill="${muted}">recycle at ${at}%</text>`;
+  }
+  const labels = [];
+  for (const s of cfg.series) {
+    let d = '', prev = null;
+    for (const p of pts) {
+      const v = p[s.key];
+      if (v == null) { prev = null; continue; }
+      const gap = prev && p.t - prev.t > 12; // A missed heartbeat is a gap, not a line.
+      d += (prev && !gap ? 'L' : 'M') + X(p.t).toFixed(1) + ' ' + Y(v).toFixed(1);
+      prev = p;
+    }
+    svg += `<path d="${d}" fill="none" stroke="${css(s.color)}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+    const last = [...pts].reverse().find((p) => p[s.key] != null);
+    if (last) labels.push({ y: Y(last[s.key]), text: cfg.fmt(last[s.key]), color: css(s.color), x: X(last.t) });
+  }
+  labels.sort((a, b) => a.y - b.y);
+  for (let i = 1; i < labels.length; i++) if (labels[i].y - labels[i - 1].y < 15) labels[i].y = labels[i - 1].y + 15;
+  for (const l of labels) {
+    svg += `<circle cx="${l.x.toFixed(1)}" cy="${l.y.toFixed(1)}" r="4" fill="${l.color}" stroke="${surface}" stroke-width="2"/>`;
+    svg += `<line x1="${(W - m.r + 8).toFixed(1)}" x2="${(W - m.r + 18).toFixed(1)}" y1="${l.y.toFixed(1)}" y2="${l.y.toFixed(1)}" stroke="${l.color}" stroke-width="2" stroke-linecap="round"/>`;
+    svg += `<text x="${W - m.r + 23}" y="${l.y.toFixed(1)}" dy="0.32em" font-size="12" font-weight="600" fill="${ink2}" style="font-variant-numeric:tabular-nums">${l.text}</text>`;
+  }
+  svg += `<line class="xhair" x1="0" x2="0" y1="${m.t}" y2="${H - m.b}" stroke="${muted}" stroke-width="1" visibility="hidden"/>`;
+  for (const s of cfg.series) svg += `<circle class="hdot" data-key="${s.key}" r="4" fill="${css(s.color)}" stroke="${surface}" stroke-width="2" visibility="hidden"/>`;
+  svg += '</svg>';
+  host.innerHTML = svg;
+  host.append(el('div', { class: 'tip', hidden: true }));
+  if (cfg.hover != null) showHover(id, cfg.hover);
+  renderTable(id);
+}
+function showHover(id, index) {
+  const host = $(id), cfg = CHARTS[id], v = cfg.view;
+  if (!v || !v.pts || !v.pts.length) return;
+  index = Math.max(0, Math.min(v.pts.length - 1, index));
+  cfg.hover = index;
+  const p = v.pts[index], x = v.X(p.t);
+  const svg = host.querySelector('svg'), tip = host.querySelector('.tip');
+  if (!svg || !tip) return;
+  const xh = svg.querySelector('.xhair');
+  xh.setAttribute('x1', x); xh.setAttribute('x2', x); xh.setAttribute('visibility', 'visible');
+  tip.replaceChildren(el('div', { class: 'tt', text: fmtTime(p.t) + ` · ${p.clients} clients` }));
+  for (const s of cfg.series) {
+    const dot = svg.querySelector(`.hdot[data-key="${s.key}"]`);
+    if (p[s.key] == null) { dot.setAttribute('visibility', 'hidden'); continue; }
+    dot.setAttribute('cx', x); dot.setAttribute('cy', v.Y(p[s.key])); dot.setAttribute('visibility', 'visible');
+    tip.append(el('div', { class: 'row' }, el('i', { style: `background:var(${s.color})` }), el('b', { text: cfg.fmt(p[s.key]) }), el('span', { text: s.label })));
+  }
+  tip.hidden = false;
+  const left = x + 14 + 170 > v.W ? x - 14 - tip.offsetWidth : x + 14;
+  tip.style.left = Math.max(0, left) + 'px'; tip.style.top = '8px';
+}
+function hideHover(id) {
+  const host = $(id), cfg = CHARTS[id]; cfg.hover = null;
+  const svg = host.querySelector('svg'), tip = host.querySelector('.tip');
+  if (tip) tip.hidden = true;
+  if (svg) svg.querySelectorAll('.xhair,.hdot').forEach((n) => n.setAttribute('visibility', 'hidden'));
+}
+for (const id of Object.keys(CHARTS)) {
+  const host = $(id);
+  host.addEventListener('pointermove', (e) => {
+    const v = CHARTS[id].view; if (!v || !v.pts || v.pts.length < 2) return;
+    const rect = host.getBoundingClientRect(), px = (e.clientX - rect.left) * (v.W / rect.width);
+    const t = v.x0 + (px - v.m.l) / (v.W - v.m.l - v.m.r) * (v.x1 - v.x0);
+    let best = 0; for (let i = 1; i < v.pts.length; i++) if (Math.abs(v.pts[i].t - t) < Math.abs(v.pts[best].t - t)) best = i;
+    showHover(id, best);
+  });
+  host.addEventListener('pointerleave', () => hideHover(id));
+  host.addEventListener('blur', () => hideHover(id));
+  host.addEventListener('keydown', (e) => {
+    const v = CHARTS[id].view; if (!v || !v.pts || !v.pts.length) return;
+    const cur = CHARTS[id].hover ?? v.pts.length - 1;
+    if (e.key === 'ArrowLeft') { showHover(id, cur - 1); e.preventDefault(); }
+    else if (e.key === 'ArrowRight') { showHover(id, cur + 1); e.preventDefault(); }
+    else if (e.key === 'Escape') hideHover(id);
+  });
+}
+function renderTable(id) {
+  const cfg = CHARTS[id], box = $(cfg.table);
+  if (!box.closest('details').open) return;
+  const pts = cfg.view.pts || [], rows = [];
+  let lastMinute = null;
+  for (let i = pts.length - 1; i >= 0 && rows.length < 30; i--) {
+    const minute = Math.floor(pts[i].t / 60);
+    if (minute === lastMinute) continue;
+    lastMinute = minute; rows.push(pts[i]);
+  }
+  box.replaceChildren(el('table', {}, el('thead', {}, el('tr', {}, el('th', { text: 'Time' }), el('th', { class: 'r', text: 'Clients' }), cfg.series.map((s) => el('th', { class: 'r', text: s.label })))),
+    el('tbody', {}, rows.map((p) => el('tr', {}, el('td', { class: 'num', text: fmtTime(p.t) }), el('td', { class: 'r num', text: String(p.clients) }), cfg.series.map((s) => el('td', { class: 'r num', text: cfg.fmt(p[s.key]) })))))));
+}
+document.querySelectorAll('details.table-view').forEach((d) => d.addEventListener('toggle', () => redrawCharts()));
+function redrawCharts() { for (const id of Object.keys(CHARTS)) drawChart(id); }
+document.querySelectorAll('.seg button').forEach((b) => b.addEventListener('click', () => {
+  S.range = Number(b.dataset.range);
+  document.querySelectorAll('.seg button').forEach((x) => x.setAttribute('aria-pressed', String(Number(x.dataset.range) === S.range)));
+  redrawCharts();
+}));
+new ResizeObserver(() => redrawCharts()).observe(document.querySelector('.charts'));
+
+// ---------- clients ----------
+function renderClients(st) {
+  const hb = st.heartbeat, body = $('clients');
+  const clients = ((hb && hb.clients) || []).slice().sort((a, b) => (a.slot ?? 99) - (b.slot ?? 99) || a.pid - b.pid);
+  const target = (hb && hb.settings && hb.settings.targetMB) || 600;
+  $('clientsEmpty').hidden = clients.length > 0;
+  body.parentElement.hidden = clients.length === 0;
+  const scale = Math.max(target * 1.6, ...clients.map((c) => c.residentMB || 0));
+  $('clientsSub').textContent = clients.length ? `${clients.length} running · ${hb.settings && hb.settings.memoryPriority ? hb.settings.memoryPriority + ' memory priority' : ''}` : '';
+  body.replaceChildren(...clients.map((c) => {
+    const status = clientStatus(c);
+    const res = c.residentMB || 0;
+    const bar = el('span', { class: 'membar', role: 'img', 'aria-label': `${Math.round(res)} MB of ${target} MB target` },
+      el('i', { style: `width:${(100 * res / scale).toFixed(1)}%` }), el('b', { style: `left:${(100 * target / scale).toFixed(1)}%` }));
+    const name = c.account && c.account !== 'Unknown account' ? c.account : 'Unmapped client';
+    const statusCell = el('td', {}, badge(status.level, status.label));
+    if (c.disconnectReason) statusCell.title = c.disconnectReason;
+    return el('tr', {},
+      el('td', {}, el('span', { class: 'slot num', text: c.slot != null ? String(c.slot + 1) : '–' })),
+      el('td', {}, el('div', { class: 'acct', text: name, title: name })),
+      statusCell,
+      el('td', { class: 'num' }, bar, fmtMB(res)),
+      el('td', { class: 'r num', text: fmtMB(c.privateMB) }),
+      el('td', { class: 'r num hide-sm', text: c.cpuPercent != null ? c.cpuPercent.toFixed(1) + '%' : '–' }),
+      el('td', { class: 'r num hide-sm ink2', text: c.nextTrim ? String(c.nextTrim).replace('WARMUP', 'warmup') : '–' }),
+      el('td', { class: 'r num hide-sm', text: fmtDur(c.ageSec) }),
+      el('td', { class: 'r num hide-sm muted', text: String(c.pid) }));
+  }));
+}
+
+// ---------- accounts ----------
+function renderAccounts(st) {
+  const hb = st.heartbeat, list = $('accounts');
+  const accounts = ((hb && hb.accounts) || []).slice().sort((a, b) => String(a.username).localeCompare(String(b.username)));
+  $('acctEmpty').hidden = accounts.length > 0;
+  if (!accounts.length) { list.replaceChildren(); $('acctSub').textContent = ''; return; }
+  const excluded = new Set(((hb.recovery || {}).excluded_account_ids || []).map((x) => x.toLowerCase()));
+  const pending = new Set((hb.pending || []).map((p) => p.accountId));
+  const quarantined = new Map((hb.quarantined || []).map((q) => [q.accountId, q]));
+  const connected = accounts.filter((a) => a.uiStatus === 'Connected').length;
+  $('acctSub').textContent = `${connected} of ${accounts.length} connected`;
+  list.replaceChildren(...accounts.map((a) => {
+    const sub = el('div', { class: 'li-sub' });
+    if (a.cookieStatus === 'dead') sub.append(badge('critical', 'Cookie dead', true));
+    else if (a.uiStatus === 'Connected') sub.append(badge('good', 'Connected', true));
+    else if (a.uiStatus === 'Idle') sub.append(badge('neutral', 'Idle', true));
+    else sub.append(badge('neutral', a.uiStatus || 'Unknown', true));
+    if (quarantined.has(a.accountId)) {
+      const q = quarantined.get(a.accountId), until = Date.parse(q.untilUtc);
+      sub.append(badge('serious', 'Quarantined' + (until ? ' ' + fmtDur((until - Date.now()) / 1000) : ''), true));
+    } else if (pending.has(a.accountId)) sub.append(badge('warning', 'Recovering', true));
+    if (!a.autoRelaunch) sub.append(el('span', { text: 'Volt auto-relaunch off' }));
+    const on = !excluded.has(String(a.accountId).toLowerCase());
+    const input = el('input', { type: 'checkbox', 'aria-label': `Auto-recover ${a.username}` });
+    input.checked = on;
+    input.addEventListener('change', async () => {
+      input.disabled = true;
+      try { await post('/api/accounts/recovery', { accountId: a.accountId, enabled: input.checked }); toast(`${a.username}: auto-recover ${input.checked ? 'on' : 'off'}`); }
+      catch (e) { input.checked = !input.checked; toast(e.message); }
+      finally { input.disabled = false; }
+    });
+    return el('li', {}, el('div', { class: 'avatar', text: initials(a.username) }),
+      el('div', { class: 'grow' }, el('div', { class: 'ellip', style: 'font-weight:600', text: a.username || 'Unknown account' }), sub),
+      el('label', { class: 'switch', title: 'Auto-recover this account' }, input, el('span', { class: 'track' })));
+  }));
+}
+
+// ---------- feed ----------
+function renderFeed() {
+  const f = S.filter;
+  const items = S.events.filter((e) => f === 'all' || (f === 'recovery' && e.category === 'recovery') ||
+    (f === 'problems' && (e.level === 'warning' || e.level === 'critical')) || (f === 'saver' && (e.category === 'saver' || e.category === 'error'))).slice(-150).reverse();
+  $('feedEmpty').hidden = items.length > 0;
+  $('feed').replaceChildren(...items.map((e) => el('li', {}, el('time', { class: 'num', text: fmtTime(e.t) }),
+    el('span', { html: ICONS[e.level === 'info' ? 'neutral' : e.level] || ICONS.neutral }), el('span', { class: 'txt', text: e.text }))));
+}
+document.querySelectorAll('.chip').forEach((c) => c.addEventListener('click', () => {
+  S.filter = c.dataset.filter;
+  document.querySelectorAll('.chip').forEach((x) => x.setAttribute('aria-pressed', String(x === c)));
+  renderFeed();
+}));
+
+// ---------- polling ----------
+async function poll() {
+  try {
+    const since = S.history.length ? S.history[S.history.length - 1].t : 0;
+    const r = await fetch(`/api/state?since=${since}&events=${S.lastEvent}`, { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const st = await r.json();
+    $('offline').hidden = true;
+    S.state = st;
+    if (st.history.length) { S.history.push(...st.history); const cut = st.now - 3700; while (S.history.length && S.history[0].t < cut) S.history.shift(); }
+    if (st.events.length) { S.events.push(...st.events); S.lastEvent = st.events[st.events.length - 1].id; if (S.events.length > 400) S.events.splice(0, S.events.length - 400); }
+    renderHeader(st); renderIssues(st); renderKpis(st); renderClients(st); renderAccounts(st); renderFeed(); redrawCharts();
+    const hb = st.heartbeat;
+    $('footVersion').textContent = hb ? `Saver v${hb.version} · PID ${hb.pid}` : 'Saver offline';
+    $('footData').textContent = 'Data: ' + st.dataDirectory;
+    $('footUpdate').textContent = hb && hb.updateAvailable && hb.updateAvailable.available ? `Update ${hb.updateAvailable.latestVersion} available` : '';
+    syncPrefs(st.prefs);
+  } catch (e) {
+    $('offline').hidden = false;
+  } finally {
+    setTimeout(poll, 2000);
+  }
+}
+
+// ---------- actions ----------
+async function act(path, done, body) {
+  try { const r = await post(path, body); toast(done || r.result); setTimeout(poll, 300); }
+  catch (e) { toast(e.message); }
+}
+$('btnStart').onclick = () => act('/api/saver/start', 'Saver starting…');
+$('btnStop').onclick = () => { if (confirm('Stop the saver? Clients keep running but are no longer managed or recovered.')) act('/api/saver/stop', 'Saver stopped'); };
+$('btnRestart').onclick = () => act('/api/saver/restart', 'Saver restarting…');
+$('btnTrim').onclick = () => act('/api/trim-now', 'Trim requested for every eligible client');
+$('autopilot').onchange = (e) => act('/api/prefs', e.target.checked ? 'Autopilot on' : 'Autopilot off', { autopilot: e.target.checked });
+
+// ---------- settings ----------
+const FIELDS = [
+  ['Memory', [
+    ['settings', 'target_ram_mb', 'Working-set target', 'MB', 'Clients above this are trimmed. Advisory, not a cap.'],
+    ['settings', 'trim_enabled', 'Trim working sets', '', 'Page out idle client memory periodically.'],
+    ['settings', 'trim_every_sec', 'Trim interval', 's', 'Per client, staggered across the farm.'],
+    ['settings', 'adaptive_trim', 'Adaptive trimming', '', 'Trim three times as often while physical RAM is scarce.'],
+    ['settings', 'pressure_trim_available_percent', 'Low-RAM threshold', '% free', 'Below this much free RAM, adaptive trimming kicks in.'],
+    ['settings', 'memory_priority', 'Memory priority', '', 'Lower values make Windows evict client pages first under pressure.'],
+    ['settings', 'hard_limit', 'Hard working-set cap', 'restart', 'Enforces the target. Can cause stutter; off is recommended.'],
+  ]],
+  ['CPU', [
+    ['settings', 'priority', 'Process priority', '', 'Scheduling priority for every client.'],
+    ['settings', 'cores_per_instance', 'Cores per client', '', 'Logical CPUs each client may use, spread across the CPU.'],
+    ['settings', 'minimize_on_launch', 'Minimize clients', '', 'Minimized windows render less.'],
+  ]],
+  ['Health guard', [
+    ['health', 'enabled', 'Health guard', '', 'Recycle stuck, leaking or disconnected clients through Volt.'],
+    ['health', 'private_limit_mb', 'Leak limit', 'MB', 'Private memory that marks a client as leaking.'],
+    ['health', 'private_limit_sustain_sec', 'Leak confirmation', 's', 'How long the limit must hold before recycling.'],
+    ['health', 'hang_timeout_sec', 'Hang timeout', 's', 'Unresponsive window time before recycling.'],
+    ['health', 'disconnect_timeout_sec', 'Disconnect grace', 's', 'Wait after a kick or disconnect before recycling.'],
+    ['health', 'warmup_sec', 'Warmup', 's', 'Startup grace for each new client.'],
+    ['health', 'pressure_percent', 'Commit pressure', '%', 'OS commit level that recycles the largest clients.'],
+    ['health', 'cooldown_sec', 'Recycle cooldown', 's', 'Minimum spacing between recycles.'],
+    ['health', 'max_recycles_per_hour', 'Recycles per hour', '', 'Farm-wide budget; prevents restart storms.'],
+  ]],
+  ['Recovery', [
+    ['recovery', 'enabled', 'Account recovery', '', 'Verified Volt relaunch for recycled clients.'],
+    ['recovery', 'restore_missing', 'Relaunch missing accounts', '', 'Launch opted-in accounts that went idle in Volt.'],
+    ['recovery', 'ready_stable_sec', 'Readiness check', 's', 'Healthy time required before a restore counts.'],
+    ['recovery', 'retry_base_sec', 'First retry after', 's', 'Doubles with each failed attempt.'],
+    ['recovery', 'retry_max_sec', 'Longest retry delay', 's', ''],
+    ['recovery', 'retry_max_per_hour', 'Launches per hour', '', 'Missing-account launch budget.'],
+    ['recovery', 'abandon_after_retries', 'Quarantine after', 'tries', 'A failing account stops blocking the others.'],
+    ['recovery', 'abandon_after_sec', 'Quarantine after', 's', 'Or after this long without a verified restore.'],
+    ['recovery', 'quarantine_sec', 'Quarantine length', 's', 'Then the account is retried automatically.'],
+  ]],
+  ['Advanced', [
+    ['settings', 'apply_graphics_flags', 'Low-graphics flags', 'restart', 'Requests minimum textures and MSAA for new clients.'],
+    ['settings', 'poll_ms', 'Poll interval', 'ms', 'How often the saver samples every client.'],
+    ['', 'config_lock', 'Config lock', '', 'Forces production guard values on load.'],
+  ]],
+];
+const PRESET_INFO = { normal: ['Normal', 'Stable · 850 MB · 4 cores'], agressive: ['Aggressive', 'Farming · 600 MB · 2 cores'], extreme: ['Extreme', 'Density · 450 MB · 1 core'] };
+
+function currentValue(section, key) {
+  const cfg = S.config || {};
+  if (!section) return cfg[key];
+  const v = (cfg[section] || {})[key];
+  if (v !== undefined) return v;
+  const hb = S.state && S.state.heartbeat;
+  if (section === 'settings') return ((S.presets[cfg.selected_preset] || S.presets.normal) || {})[key];
+  return hb && hb[section] ? hb[section][key] : undefined;
+}
+function editedValue(section, key) {
+  const k = section + '.' + key;
+  return k in S.edits ? S.edits[k] : currentValue(section, key);
+}
+function buildForm() {
+  const form = $('settingsForm'); form.replaceChildren();
+  const presets = $('presets'); presets.replaceChildren();
+  const selected = S.edits['.selected_preset'] ?? (S.config || {}).selected_preset;
+  for (const [name, [title, sub]] of Object.entries(PRESET_INFO)) {
+    presets.append(el('button', { type: 'button', class: 'preset', 'aria-pressed': String(selected === name), onclick: () => applyPreset(name) }, el('b', { text: title }), el('span', { text: sub })));
+  }
+  for (const [title, fields] of FIELDS) {
+    const fs = el('fieldset', {}, el('legend', { text: title }));
+    for (const [section, key, label, unit, hint] of fields) {
+      const rule = section ? (S.schema[section] || {})[key] : (key === 'config_lock' ? ['bool'] : null);
+      if (!rule) continue;
+      const id = `f-${section}-${key}`, value = editedValue(section, key);
+      let ctl;
+      if (rule[0] === 'bool') {
+        const input = el('input', { type: 'checkbox', id }); input.checked = !!value;
+        input.addEventListener('change', () => edit(section, key, input.checked, input));
+        ctl = el('label', { class: 'switch' }, input, el('span', { class: 'track' }));
+      } else if (rule[0] === 'enum') {
+        const select = el('select', { id }, rule[1].map((o) => el('option', { value: o, text: o.replace(/([a-z])([A-Z])/g, '$1 $2') })));
+        select.value = value ?? rule[1][0];
+        select.addEventListener('change', () => edit(section, key, select.value, select));
+        ctl = select;
+      } else {
+        const input = el('input', { type: 'number', id, min: rule[1], max: rule[2], step: 1, inputmode: 'numeric' });
+        input.value = value ?? '';
+        input.addEventListener('input', () => {
+          const n = Number(input.value), ok = input.value !== '' && Number.isInteger(n) && n >= rule[1] && n <= rule[2];
+          input.closest('.field').classList.toggle('invalid', !ok);
+          if (ok) edit(section, key, n, input); else { $('formError').textContent = `${label}: ${rule[1]}–${rule[2]}`; $('btnSave').disabled = true; }
+        });
+        ctl = input;
+      }
+      const k = section + '.' + key;
+      fs.append(el('div', { class: 'field' + (k in S.edits ? ' dirty' : '') },
+        el('label', { class: 'name', for: id, text: label }),
+        el('div', { class: 'hint', text: hint || '' }),
+        el('div', { class: 'ctl' }, ctl, el('span', { class: 'unit', text: unit || '' }))));
+    }
+    form.append(fs);
+  }
+}
+function edit(section, key, value, input) {
+  const k = section + '.' + key;
+  if (JSON.stringify(value) === JSON.stringify(currentValue(section, key))) delete S.edits[k]; else S.edits[k] = value;
+  if (input) input.closest('.field').classList.toggle('dirty', k in S.edits);
+  $('formError').textContent = document.querySelector('.field.invalid') ? 'Fix the highlighted values.' : '';
+  $('btnSave').disabled = !Object.keys(S.edits).length || !!document.querySelector('.field.invalid');
+}
+function applyPreset(name) {
+  for (const [key, value] of Object.entries(S.presets[name] || {})) edit('settings', key, value);
+  edit('', 'selected_preset', name);
+  buildForm();
+  $('btnSave').disabled = !Object.keys(S.edits).length;
+}
+async function openSettings() {
+  try {
+    const r = await fetch('/api/config', { cache: 'no-store' }).then((x) => x.json());
+    S.config = r.config; S.presets = r.presets; S.schema = r.schema; S.restartKeys = r.restartKeys; S.edits = {};
+  } catch (e) { toast('Could not load settings'); return; }
+  if (!S.config) { toast('data/config.json is missing or invalid'); return; }
+  buildForm();
+  $('formError').textContent = ''; $('btnSave').disabled = true;
+  $('drawer').classList.add('open'); $('drawer').setAttribute('aria-hidden', 'false'); $('scrim').classList.add('open');
+  $('btnClose').focus();
+}
+function closeSettings() {
+  if (Object.keys(S.edits).length && !confirm('Discard unsaved changes?')) return;
+  S.edits = {};
+  $('drawer').classList.remove('open'); $('drawer').setAttribute('aria-hidden', 'true'); $('scrim').classList.remove('open');
+}
+$('btnSettings').onclick = openSettings;
+$('btnClose').onclick = closeSettings;
+$('scrim').onclick = closeSettings;
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('drawer').classList.contains('open')) closeSettings(); });
+$('btnSave').onclick = async () => {
+  const changes = {};
+  for (const [k, v] of Object.entries(S.edits)) {
+    const [section, key] = k.split('.');
+    if (!section) changes[key] = v; else (changes[section] = changes[section] || {})[key] = v;
+  }
+  $('btnSave').disabled = true;
+  try {
+    const r = await post('/api/config', { changes });
+    S.config = r.config; S.edits = {};
+    buildForm();
+    toast(r.restartRequired && r.restartRequired.length ? 'Saved. Restart the saver to apply: ' + r.restartRequired.join(', ') : 'Saved. Applying to the running saver…');
+  } catch (e) { $('formError').textContent = e.message; $('btnSave').disabled = false; }
+};
+function syncPrefs(p) {
+  if (!p) return;
+  for (const [id, key] of [['pAutopilot', 'autopilot'], ['pLaunch', 'startSaverOnLaunch'], ['pWindows', 'startWithWindows']]) {
+    if (document.activeElement !== $(id)) $(id).checked = !!p[key];
+  }
+}
+for (const [id, key] of [['pAutopilot', 'autopilot'], ['pLaunch', 'startSaverOnLaunch'], ['pWindows', 'startWithWindows']]) {
+  $(id).addEventListener('change', () => act('/api/prefs', 'Saved', { [key]: $(id).checked }));
+}
+$('btnQuit').onclick = async () => { await post('/api/quit', {}).catch(() => {}); document.body.innerHTML = '<p style="padding:40px;text-align:center">Control Center closed. The saver keeps running. You can close this window.</p>'; };
+$('btnQuitAll').onclick = async () => {
+  if (!confirm('Stop the saver and quit? Clients keep running but are no longer managed.')) return;
+  await post('/api/quit', { stopSaver: true }).catch(() => {});
+  document.body.innerHTML = '<p style="padding:40px;text-align:center">Saver stopped and Control Center closed. You can close this window.</p>';
+};
+
+poll();
+</script>
+</body>
+</html>

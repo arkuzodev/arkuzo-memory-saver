@@ -30,6 +30,7 @@ param(
     [ValidateRange(250,10000)][int]$PollMs = 500,
     [ValidateRange(1,64)][int]$CoresPerInstance = 4,
     [ValidateSet('Idle','BelowNormal','Normal')][string]$Priority = 'BelowNormal',
+    [ValidateSet('VeryLow','Low','Medium','BelowNormal','Normal')][string]$MemoryPriority = 'Normal',
     [switch]$Minimize,
     [switch]$EnableTrimming = $true,
     [switch]$SoftLimit = $true,
@@ -47,7 +48,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$ArkuzoRuntimeVersion = '1.1.0'
+$ArkuzoRuntimeVersion = '1.2.0'
+# Explicit CLI values win over config, including later hot reloads.
+$cliBoundParameters = @($PSBoundParameters.Keys)
 # Resolve persistent data independently of the versioned program files.
 if ([string]::IsNullOrWhiteSpace($DataDirectory)) { $DataDirectory = $PSScriptRoot }
 $DataDirectory = [IO.Path]::GetFullPath($DataDirectory)
@@ -79,6 +82,9 @@ function Get-ArkuzoPresets {
             poll_ms              = 500
             minimize_on_launch   = $false
             apply_graphics_flags = $false
+            memory_priority      = 'BelowNormal'
+            adaptive_trim        = $true
+            pressure_trim_available_percent = 15
             description          = 'Higher advisory target (850 MB soft), trim every 120s, 4 cores. Lag and disconnects remain possible.'
         }
         'agressive' = [ordered]@{
@@ -91,6 +97,9 @@ function Get-ArkuzoPresets {
             poll_ms              = 350
             minimize_on_launch   = $false
             apply_graphics_flags = $false
+            memory_priority      = 'Low'
+            adaptive_trim        = $true
+            pressure_trim_available_percent = 20
             description          = 'Multi-account profile: 600 MB working-set target, trim every 60s, 2 cores. Trimming does not repair private-memory leaks.'
         }
         'extreme' = [ordered]@{
@@ -103,7 +112,10 @@ function Get-ArkuzoPresets {
             poll_ms              = 250
             minimize_on_launch   = $false
             apply_graphics_flags = $false
-            description          = 'Maximum instances: Tight advisory target (450 MB soft), trim every 30s, 1 core. Maximum density on 16 GB RAM.'
+            memory_priority      = 'VeryLow'
+            adaptive_trim        = $true
+            pressure_trim_available_percent = 25
+            description          = 'Maximum instances:Tight advisory target (450 MB soft), trim every 30s, 1 core. Maximum density on 16 GB RAM.'
         }
     }
 }
@@ -1019,12 +1031,13 @@ function Save-ArkuzoRecoveryJournal {
         schemaVersion = 2; attempts = @($recoveryAttempts | ForEach-Object { $_.ToString('o') })
         launchAttempts = @($launchAttempts | ForEach-Object { $_.ToString('o') })
         pending = @($recoveryPending.Values); suspendedAccounts = @(); updatedUtc = $utc.ToString('o')
+        quarantined = @(if ($null -ne $script:quarantinedAccounts) { $script:quarantinedAccounts.Values })
     }
     $script:recoveryJournalHealthy = $true
 }
 function Initialize-ArkuzoRecoveryJournal {
     # Load only while holding the sole destructive-controller mutex.
-    $script:recoveryJournalHealthy = $false; $script:recoveryJournalCorrupt = $false; $script:recoveryAttempts = @(); $script:launchAttempts = @(); $script:recoveryPending = @{}; $script:suspendedAccounts = @{}
+    $script:recoveryJournalHealthy = $false; $script:recoveryJournalCorrupt = $false; $script:recoveryAttempts = @(); $script:launchAttempts = @(); $script:recoveryPending = @{}; $script:suspendedAccounts = @{}; $script:quarantinedAccounts = @{}
     if (-not $ownsControllerMutex) { return }
     try {
         if (Test-Path -LiteralPath $recoveryStatePath) {
@@ -1051,13 +1064,21 @@ function Initialize-ArkuzoRecoveryJournal {
             }
             # Suspended accounts disappear on restart and are not saved practically; start clean
             $script:suspendedAccounts = @{}
+            # Quarantine survives restarts so a crash loop cannot reset it. Malformed
+            # rows are dropped: losing a quarantine only resumes normal recovery.
+            foreach ($q in @($journal.quarantined)) {
+                if ($null -eq $q -or [string]$q.accountId -notmatch '\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\z') { continue }
+                try { [datetime]$q.untilUtc | Out-Null } catch { continue }
+                $row = @{}; foreach ($prop in $q.PSObject.Properties) { $row[$prop.Name] = $prop.Value }
+                $script:quarantinedAccounts[[string]$q.accountId] = $row
+            }
             $script:recoveryJournalHealthy = $true
         } else {
             $script:recoveryJournalHealthy = $true
             Save-ArkuzoRecoveryJournal
         }
     } catch {
-        $script:recoveryAttempts = @(); $script:launchAttempts = @(); $script:recoveryPending = @{}; $script:suspendedAccounts = @{}
+        $script:recoveryAttempts = @(); $script:launchAttempts = @(); $script:recoveryPending = @{}; $script:suspendedAccounts = @{}; $script:quarantinedAccounts = @{}
         $script:recoveryJournalHealthy = $false; $script:recoveryJournalCorrupt = $true
     }
 }
@@ -1149,10 +1170,12 @@ function Test-ArkuzoTargetRecovery($Watcher, [int]$ClientId, [long]$StartTicks) 
     } catch { return $false } # Never expose command lines, tickets, or account state in errors.
 }
 function Get-ArkuzoRestorePolicy($Config) {
-    $p = @{ enabled=$false; restore_missing=$false; restore_wait_sec=90; relaunch_delay_sec=30; retry_base_sec=90; retry_max_sec=900; retry_max_per_hour=6; ready_stable_sec=30; excluded_account_ids=@() }
+    $p = @{ enabled=$false; restore_missing=$false; restore_wait_sec=90; relaunch_delay_sec=30; retry_base_sec=90; retry_max_sec=900; retry_max_per_hour=6; ready_stable_sec=30; excluded_account_ids=@()
+        abandon_after_retries=8; abandon_after_sec=5400; quarantine_sec=1800 }
     if ($null -ne $Config) { foreach ($k in @($p.Keys)) { if ($null -ne $Config.$k) { $p[$k]=$Config.$k } } }
     foreach ($b in @('enabled','restore_missing')) { if ($p[$b] -isnot [bool]) { throw "recovery.$b must be a JSON boolean" } }
-    $ranges=@{ restore_wait_sec=@(90,900); relaunch_delay_sec=@(30,120); retry_base_sec=@(90,900); retry_max_sec=@(180,3600); retry_max_per_hour=@(1,500); ready_stable_sec=@(30,300) }
+    $ranges=@{ restore_wait_sec=@(90,900); relaunch_delay_sec=@(30,120); retry_base_sec=@(90,900); retry_max_sec=@(180,3600); retry_max_per_hour=@(1,500); ready_stable_sec=@(30,300)
+        abandon_after_retries=@(1,100); abandon_after_sec=@(900,86400); quarantine_sec=@(0,86400) }
     foreach ($k in $ranges.Keys) {
         $v=[double]$p[$k]
         if ([double]::IsNaN($v) -or [double]::IsInfinity($v) -or $v -lt $ranges[$k][0] -or $v -gt $ranges[$k][1] -or [math]::Floor($v) -ne $v) { throw "Invalid recovery setting: $k" }
@@ -1163,6 +1186,80 @@ function Get-ArkuzoRestorePolicy($Config) {
 }
 function Get-ArkuzoRetryDelay([int]$Attempt, $Policy) {
     return [int][math]::Min([double]$Policy.retry_max_sec, [double]$Policy.retry_base_sec * [math]::Pow(2,[math]::Min(20,[math]::Max(0,$Attempt-1))))
+}
+function ConvertTo-ArkuzoMemoryPriorityValue([string]$Name) {
+    # Windows MEMORY_PRIORITY_* values. Lower priority pages are repurposed from
+    # the standby list first under pressure; this neither caps nor frees memory.
+    switch -Exact ($Name) {
+        'VeryLow' { return [uint32]1 }
+        'Low' { return [uint32]2 }
+        'Medium' { return [uint32]3 }
+        'BelowNormal' { return [uint32]4 }
+        'Normal' { return [uint32]5 }
+    }
+    throw "Invalid memory priority: $Name"
+}
+function Get-ArkuzoTrimPlan($SystemMemory, [double]$TotalPhysicalMB, [int]$IntervalSec, [bool]$Adaptive, [double]$PressureAvailablePercent) {
+    # Shorten the per-client interval only while physical RAM is scarce. The soft
+    # target, per-client warmup and global spacing still apply; never below 15s.
+    $plan = [pscustomobject]@{ IntervalSec = $IntervalSec; Pressure = $false; AvailablePercent = $null }
+    if ($null -eq $SystemMemory -or $TotalPhysicalMB -le 0) { return $plan }
+    $available = [double]$SystemMemory.availablePhysicalMB
+    if ([double]::IsNaN($available) -or [double]::IsInfinity($available) -or $available -lt 0) { return $plan }
+    $plan.AvailablePercent = [math]::Round([math]::Min(100, 100 * $available / $TotalPhysicalMB), 1)
+    if ($Adaptive -and $plan.AvailablePercent -lt $PressureAvailablePercent) {
+        $plan.Pressure = $true
+        $plan.IntervalSec = [int][math]::Min($IntervalSec, [math]::Max(15, [math]::Ceiling($IntervalSec / 3)))
+    }
+    return $plan
+}
+function Test-ArkuzoPendingAbandon($Entry, [datetime]$NowUtc, $Policy) {
+    # A recovery that keeps failing must not hold the shared handoff gate and
+    # recycle budget forever. Returns the abandon reason, or $null to keep waiting.
+    # An absent limit (an unvalidated or legacy policy object) disables that rule.
+    if ($null -eq $Entry -or $null -eq $Policy) { return $null }
+    if ([int]$Policy.abandon_after_retries -gt 0 -and [int]$Entry.retryCount -ge [int]$Policy.abandon_after_retries) { return 'RETRY_LIMIT' }
+    if ([double]$Policy.abandon_after_sec -le 0) { return $null }
+    try { $created = ([datetime]$Entry.createdUtc).ToUniversalTime() } catch { return $null }
+    if (($NowUtc.ToUniversalTime() - $created).TotalSeconds -ge [double]$Policy.abandon_after_sec) { return 'AGE_LIMIT' }
+    return $null
+}
+function Test-ArkuzoAccountQuarantined([string]$AccountId, [datetime]$NowUtc) {
+    if (-not $AccountId -or $null -eq $script:quarantinedAccounts -or -not $script:quarantinedAccounts.ContainsKey($AccountId)) { return $false }
+    try { $until = ([datetime]$script:quarantinedAccounts[$AccountId].untilUtc).ToUniversalTime() } catch { $until = [datetime]::MinValue }
+    if ($NowUtc.ToUniversalTime() -lt $until) { return $true }
+    $script:quarantinedAccounts.Remove($AccountId)
+    return $false
+}
+function Get-ArkuzoLiveResourceSettings($Settings, [hashtable]$Current) {
+    # Validates the hot-reloadable resource settings. A hard working-set limit
+    # still requires a restart. Invalid input throws; the caller keeps $Current.
+    $next = @{} + $Current
+    if ($null -eq $Settings) { return $next }
+    $numbers = @{ target_ram_mb=@('MaxRamMB',128,32768); trim_every_sec=@('TrimEverySec',1,120); cores_per_instance=@('CoresPerInstance',1,64); pressure_trim_available_percent=@('PressureTrimAvailablePercent',5,60); poll_ms=@('PollMs',250,10000) }
+    foreach ($key in $numbers.Keys) {
+        $value = $Settings.$key
+        if ($null -eq $value) { continue }
+        if ($value -is [bool] -or $value -is [string] -or $value -isnot [ValueType]) { throw "settings.$key must be a number" }
+        $n = [double]$value
+        if ([double]::IsNaN($n) -or $n -lt $numbers[$key][1] -or $n -gt $numbers[$key][2] -or [math]::Floor($n) -ne $n) { throw "settings.$key is out of range" }
+        $next[$numbers[$key][0]] = [int]$n
+    }
+    foreach ($pair in @(@('trim_enabled','EnableTrimming'), @('adaptive_trim','AdaptiveTrim'), @('minimize_on_launch','Minimize'))) {
+        $value = $Settings.($pair[0])
+        if ($null -eq $value) { continue }
+        if ($value -isnot [bool]) { throw "settings.$($pair[0]) must be a JSON boolean" }
+        $next[$pair[1]] = $value
+    }
+    if ($null -ne $Settings.priority) {
+        if ([string]$Settings.priority -cnotin @('Idle','BelowNormal','Normal')) { throw 'settings.priority is invalid' }
+        $next.Priority = [string]$Settings.priority
+    }
+    if ($null -ne $Settings.memory_priority) {
+        ConvertTo-ArkuzoMemoryPriorityValue ([string]$Settings.memory_priority) | Out-Null
+        $next.MemoryPriority = [string]$Settings.memory_priority
+    }
+    return $next
 }
 function Invoke-ArkuzoVoltControl([ValidateSet('Status','Configure','LaunchMissing')][string]$Action='Status', [string]$AccountId='', [string]$TrackerId='') {
     $child=$null
@@ -1370,7 +1467,8 @@ function Update-ArkuzoRecoveryOutcomes {
                 continue
             }
             if ($restorePolicy.restore_missing -and -not $a.processId -and $a.uiStatus -eq 'Idle' -and [long]$a.lastLaunchAtMs -gt 0 -and
-                $a.trackerId -match '\A[0-9]+\z' -and -not $recoveryPending.ContainsKey([string]$a.accountId)) {
+                $a.trackerId -match '\A[0-9]+\z' -and -not $recoveryPending.ContainsKey([string]$a.accountId) -and
+                -not (Test-ArkuzoAccountQuarantined ([string]$a.accountId) $utc)) {
                 $script:recoveryPending[[string]$a.accountId]=New-ArkuzoPendingEntry $a.accountId $a.trackerId
                 Write-Diagnostic 'MISSING_ACCOUNT_DETECTED' @{accountId=$a.accountId;username=$a.username;note='Wait for native Volt queue before a bounded missing-account request.'}
             }
@@ -1379,6 +1477,18 @@ function Update-ArkuzoRecoveryOutcomes {
             $entry=$recoveryPending[$key]
             if ($restorePolicy.excluded_account_ids -contains $key) {
                 Write-Diagnostic 'RECOVERY_CANCELLED_BY_POLICY' @{accountId=$key;note='Account explicitly excluded by policy'}
+                $script:recoveryPending.Remove($key)
+                continue
+            }
+            $abandon=Test-ArkuzoPendingAbandon $entry $utc $restorePolicy
+            if ($abandon) {
+                if ($null -eq $script:quarantinedAccounts) { $script:quarantinedAccounts=@{} }
+                $until=$utc.AddSeconds([int]$restorePolicy.quarantine_sec).ToString('o')
+                if ([int]$restorePolicy.quarantine_sec -gt 0) {
+                    $script:quarantinedAccounts[$key]=@{accountId=$key;username=(Get-ArkuzoAccountDisplayLabel -AccountId $key);reason=$abandon;retryCount=[int]$entry.retryCount;sinceUtc=$utc.ToString('o');untilUtc=$until}
+                }
+                Write-Diagnostic 'RECOVERY_QUARANTINED' @{accountId=$key;reason=$abandon;retryCount=[int]$entry.retryCount;untilUtc=$until;note='Repeatedly failing account released from the shared handoff gate; other accounts recover normally.'}
+                Warn-Throttled ('quarantine-'+$key) ((Get-ArkuzoAccountDisplayLabel -AccountId $key)+' quarantined after repeated failed recoveries ('+$abandon+'). Other accounts continue normally.')
                 $script:recoveryPending.Remove($key)
                 continue
             }
@@ -1477,13 +1587,34 @@ function Update-ArkuzoLivePolicy {
         $newPagefile=Get-ArkuzoPagefilePolicy -Input $cfg.pagefile -PressurePercent $newHealth.pressure_percent
         if (-not $newPagefile.valid) { throw ('Invalid pagefile policy: '+($newPagefile.errors -join '; ')) }
         $script:healthPolicy=$newHealth;$script:restorePolicy=$newRestore;$script:pagefilePolicy=$newPagefile;$script:lastConfigText=$raw
-        Write-Diagnostic 'CONFIG_RELOADED' @{health=$newHealth;recovery=$newRestore;pagefile=$newPagefile;note='Validated health/recovery/pagefile hot reload; resource settings apply on next ordinary start.'}
+        # Resource settings are validated and applied separately by the main loop.
+        $script:pendingLiveSettings=$cfg
+        Write-Diagnostic 'CONFIG_RELOADED' @{health=$newHealth;recovery=$newRestore;pagefile=$newPagefile;note='Validated health/recovery/pagefile hot reload; resource settings are applied live except hard_limit.'}
     } catch { Warn-Throttled 'config-reload' 'Invalid/unavailable config ignored; last validated health, recovery and pagefile policy retained.' }
+}
+function Update-ArkuzoLiveSettings($Config) {
+    $current = @{ MaxRamMB=$MaxRamMB; TrimEverySec=$TrimEverySec; CoresPerInstance=$CoresPerInstance; Priority=$Priority; EnableTrimming=[bool]$EnableTrimming
+        MemoryPriority=$MemoryPriority; AdaptiveTrim=[bool]$AdaptiveTrim; PressureTrimAvailablePercent=$PressureTrimAvailablePercent; Minimize=[bool]$Minimize; PollMs=$PollMs }
+    try { $next = Get-ArkuzoLiveResourceSettings $Config.settings $current }
+    catch { Warn-Throttled 'settings-reload' ('Resource settings ignored: ' + $_.Exception.Message + '. Last applied values retained.'); return }
+    $changed = @()
+    foreach ($name in @($next.Keys)) {
+        if ($script:cliBoundParameters -contains $name -or $next[$name] -eq $current[$name]) { continue }
+        # Parameter validation attributes still guard each assignment.
+        try { Set-Variable -Scope Script -Name $name -Value $next[$name]; $changed += $name }
+        catch { Warn-Throttled 'settings-reload' ("Resource setting $name rejected: " + $_.Exception.Message) }
+    }
+    if ($Config.selected_preset -and $script:cliBoundParameters -notcontains 'Mode') { try { $script:Mode = [string]$Config.selected_preset } catch { } }
+    if ($changed.Count -eq 0) { return }
+    $script:maxBytes = [uint64]$script:MaxRamMB * 1MB
+    # Reapply priority/affinity/memory priority on the next pass, not in 10s.
+    foreach ($state in @($script:tracked.Values)) { $state.LastConfig = -1e6 }
+    Write-Diagnostic 'SETTINGS_APPLIED_LIVE' @{changed=$changed;targetMB=$script:MaxRamMB;trimEverySec=$script:TrimEverySec;cores=$script:CoresPerInstance;priority=$script:Priority;memoryPriority=$script:MemoryPriority;adaptiveTrim=[bool]$script:AdaptiveTrim}
 }
 function Write-ArkuzoRuntimeStatus {
     if ($MonitorOnly -or -not $ownsControllerMutex) { return }
     try {
-        $accounts=@($voltControlStatus.accounts|ForEach-Object{@{accountId=$_.accountId;username=$_.username;processId=$_.processId;uiStatus=$_.uiStatus;controlReady=$_.controlReady;cookieStatus=$_.cookieStatus;suspensionSafe=$_.suspensionSafe}})
+        $accounts=@($voltControlStatus.accounts|ForEach-Object{@{accountId=$_.accountId;username=$_.username;processId=$_.processId;uiStatus=$_.uiStatus;controlReady=$_.controlReady;cookieStatus=$_.cookieStatus;suspensionSafe=$_.suspensionSafe;autoRelaunch=[bool]$_.autoRelaunch}})
         $expected=@($voltControlStatus.accounts|Where-Object{$_.autoRelaunch -and $_.cookieAlive -and $_.cookieStatus -ceq 'alive' -and [long]$_.lastLaunchAtMs -gt 0 -and $restorePolicy.excluded_account_ids -notcontains $_.accountId -and ($null -eq $script:suspendedAccounts -or -not $script:suspendedAccounts.ContainsKey([string]$_.accountId))})
         $missing=@($expected|Where-Object{-not $_.processId})
         $controlFresh=$voltControlStatus.available -and $null -ne $voltControlCheckedUtc -and ([datetime]::UtcNow-$voltControlCheckedUtc).TotalSeconds -ge 0 -and ([datetime]::UtcNow-$voltControlCheckedUtc).TotalSeconds -le 25
@@ -1494,6 +1625,16 @@ function Write-ArkuzoRuntimeStatus {
             voltControlAvailable=[bool]$voltControlStatus.available;recoveryJournalHealthy=[bool]$recoveryJournalHealthy;systemMemory=$systemMemory;health=$healthPolicy;recovery=$restorePolicy;logFailed=$logFailed
             pagefilePolicy=$pagefilePolicy;pagefile=$script:pagefileStatus;nativePrivileges=$script:nativePrivilegeInitialization;graphics=$script:graphicsStatus
             updateAvailable=$script:updateAvailableStatus
+            quarantined=@(if ($null -ne $script:quarantinedAccounts) { $script:quarantinedAccounts.Values })
+            uptimeSec=$(if ($null -ne $script:clock) { [math]::Round($script:clock.Elapsed.TotalSeconds,1) } else { 0 })
+            trims=[int]$script:trimCount;totals=$script:lastTotals;totalPhysicalMB=$script:totalPhysicalMB
+            settings=@{mode=$script:Mode;targetMB=$script:MaxRamMB;trimEnabled=[bool]$script:EnableTrimming;trimEverySec=$script:TrimEverySec
+                effectiveTrimSec=$(if ($null -ne $script:trimPlan) { $script:trimPlan.IntervalSec } else { $script:TrimEverySec })
+                trimPressure=($null -ne $script:trimPlan -and [bool]$script:trimPlan.Pressure);availablePhysicalPercent=$(if ($null -ne $script:trimPlan) { $script:trimPlan.AvailablePercent } else { $null })
+                adaptiveTrim=[bool]$script:AdaptiveTrim;priority=$script:Priority;memoryPriority=$script:MemoryPriority;coresPerInstance=$script:CoresPerInstance
+                softLimit=[bool]$script:SoftLimit;configLocked=[bool]$script:isConfigLocked}
+            alerts=@(if ($null -ne $script:dashboardIssues) { foreach ($issue in @($script:dashboardIssues.GetEnumerator())) {
+                @{key=[string]$issue.Key;message=[string]$issue.Value.Message;ageSec=$(if ($null -ne $script:clock) { [math]::Round($script:clock.Elapsed.TotalSeconds - [double]$issue.Value.Time,1) } else { 0 })} } })
         }
     } catch { Warn-Throttled 'runtime-heartbeat' 'Runtime heartbeat could not be persisted. Watchdog must report degraded status.' }
 }
@@ -1607,6 +1748,12 @@ function Invoke-ClientRecovery([int]$ClientId, $State) {
         # suspended identities. Expose this pre-request refusal instead of leaving
         # the operator with a zero trim countdown and no recovery explanation.
         Warn-Throttled 'recovery-mapping' 'Recovery blocked: exact Volt account mapping or suspended-account safety cannot be verified. Clients left untouched.'
+        return
+    }
+    # A quarantined account would only burn the shared budget again. Critical
+    # commit pressure still protects the host.
+    if ($reason -cne 'SYSTEM_COMMIT_PRESSURE' -and (Test-ArkuzoAccountQuarantined ([string]$boundAccount.accountId) $utc)) {
+        Warn-Throttled ('quarantine-'+$boundAccount.accountId) ((Get-ArkuzoAccountDisplayLabel -AccountId ([string]$boundAccount.accountId))+' is quarantined after repeated failed recoveries; it is left untouched until the quarantine expires.')
         return
     }
     if ($State.ParentId -le 0 -and $script:voltParents.Count -eq 1) {
@@ -2598,6 +2745,21 @@ if ($null -ne $loadedConfig -and $null -ne $loadedConfig.settings) {
         $ApplyGraphicsFlags = [bool]$cfg.apply_graphics_flags
     }
 }
+# Keys added after a configuration was written fall back to its preset, not to
+# a no-op, so existing installations gain memory priority and adaptive trimming.
+$presetName = ([string]$loadedConfig.selected_preset).ToLowerInvariant()
+if ($presetName -eq 'aggressive') { $presetName = 'agressive' }
+$presetDefaults = (Get-ArkuzoPresets)[$(if ((Get-ArkuzoPresets).Contains($presetName)) { $presetName } else { 'normal' })]
+$AdaptiveTrim = [bool]$presetDefaults.adaptive_trim
+$PressureTrimAvailablePercent = [int]$presetDefaults.pressure_trim_available_percent
+if (-not $PSBoundParameters.ContainsKey('MemoryPriority')) { $MemoryPriority = [string]$presetDefaults.memory_priority }
+$startupSettingsError = $null
+try {
+    $startupSettings = Get-ArkuzoLiveResourceSettings $loadedConfig.settings @{ MemoryPriority=$MemoryPriority; AdaptiveTrim=$AdaptiveTrim; PressureTrimAvailablePercent=$PressureTrimAvailablePercent }
+    if (-not $PSBoundParameters.ContainsKey('MemoryPriority')) { $MemoryPriority = $startupSettings.MemoryPriority }
+    $AdaptiveTrim = [bool]$startupSettings.AdaptiveTrim
+    $PressureTrimAvailablePercent = [int]$startupSettings.PressureTrimAvailablePercent
+} catch { $startupSettingsError = $_.Exception.Message } # Reported once logging is ready; preset values stay.
 
 $healthPolicy = Get-ArkuzoHealthPolicy $loadedConfig.health
 $restorePolicy = Get-ArkuzoRestorePolicy $loadedConfig.recovery
@@ -3079,6 +3241,10 @@ $saverSessionStartEpochMs = [long][DateTimeOffset]::UtcNow.ToUnixTimeMillisecond
 $voltControlStatus = [pscustomobject]@{available=$false;accounts=@();relaunchDelayMs=0}
 $voltControlCheckedUtc = [datetime]::MinValue
 $nextOutcomeCheck = 0.0; $nextPolicyCheck = 0.0; $nextRuntimeHeartbeat = 0.0
+$quarantinedAccounts = @{}; $pendingLiveSettings = $null; $lastTotals = $null; $trimPlan = $null
+$trimNowSignalPath = Join-Path $DataDirectory 'trim-now.signal'
+try { $totalPhysicalMB = [math]::Round([double](Get-CimInstance Win32_ComputerSystem -Property TotalPhysicalMemory -ErrorAction Stop).TotalPhysicalMemory / 1MB, 1) }
+catch { $totalPhysicalMB = 0 } # Adaptive trimming then keeps the configured interval.
 $controllerStartTicks = ([Diagnostics.Process]::GetCurrentProcess()).StartTime.ToUniversalTime().Ticks
 if (-not $StopFile -and -not $MonitorOnly) { $StopFile = Join-Path $DataDirectory 'controller.stop' }
 $controllerMutex = $null
@@ -3260,6 +3426,8 @@ Write-Diagnostic 'SESSION_START' @{
     version = $ArkuzoRuntimeVersion; health = $healthPolicy; recovery = $restorePolicy; pagefile = $pagefilePolicy
     mode = $Mode; advisoryMB = $MaxRamMB; softLimit = [bool]$SoftLimit
     trimming = [bool]$EnableTrimming; trimSeconds = $TrimEverySec; priority = $Priority
+    memoryPriority = $MemoryPriority; adaptiveTrim = [bool]$AdaptiveTrim; pressureTrimAvailablePercent = $PressureTrimAvailablePercent
+    totalPhysicalMB = $totalPhysicalMB; settingsError = $startupSettingsError
     logicalCpuPerClient = $CoresPerInstance; monitorOnly = [bool]$MonitorOnly
     logicalCpuCount = $cpuThreads; powershell = $PSVersionTable.PSVersion.ToString()
     os = [Environment]::OSVersion.VersionString; sampleSeconds = $LogEverySec
@@ -3318,11 +3486,15 @@ function Write-ArkuzoNativePrivilegeStatus($Status) {
 function Restore-Client($Client, $State) {
     # Start time prevents restoring an unrelated process after PID reuse.
     if ($Client.StartTime.ToUniversalTime().Ticks -ne $State.StartTicks -or $MonitorOnly) { return }
-    foreach ($operation in @('Priority','Affinity','Limits')) {
+    foreach ($operation in @('Priority','Affinity','MemoryPriority','Limits')) {
         try {
             switch ($operation) {
                 'Priority' { $Client.PriorityClass = $State.Priority }
                 'Affinity' { $Client.ProcessorAffinity = $State.Affinity }
+                'MemoryPriority' {
+                    if (-not $State.MemoryPriorityChanged -or $null -eq $State.MemoryPriority) { continue }
+                    [Arkuzo.MemorySaverNativeV1]::SetMemoryPriority($Client.Handle, [uint32]$State.MemoryPriority)
+                }
                 'Limits' {
                     if (-not $State.LimitsChanged) { continue }
                     # Explicitly clear introduced hard limits when originally absent.
@@ -3503,7 +3675,7 @@ function New-ArkuzoFrame($Model, [int]$Width, [int]$Height) {
     $mode = ([string]$Model.Mode).ToUpperInvariant()
     if ($Model.MonitorOnly) { $mode = 'MONITOR ONLY' }
     $cap = 'HARD WS CAP'; if ($Model.SoftLimit) { $cap = 'ADVISORY' }
-    $trim = 'OFF'; if ($Model.TrimEnabled -and -not $Model.MonitorOnly) { $trim = "TRIM $($Model.TrimSeconds)s" }
+    $trim = 'OFF'; if ($Model.TrimEnabled -and -not $Model.MonitorOnly) { $trim = "TRIM $($Model.TrimSeconds)s"; if ($Model.TrimPressure) { $trim += ' (LOW RAM)' } }
     $lockBadge = if ($Model.ConfigLocked) { '  [CONFIG LOCKED]' } else { '' }
     $lines.Add((New-ArkuzoLine "  $mode  |  $($Model.TargetMB) MB $cap  |  $trim$lockBadge" White $Width))
     if ($Height -ge 12) {
@@ -3674,7 +3846,8 @@ function Draw-Dashboard($Rows, [int]$Detected, [int64]$Resident, [int64]$Private
         if ($issues.Count -gt 0) { $notice = [string]$issues[0].Message }
         $model = @{
             Mode = $Mode; TargetMB = $MaxRamMB; SoftLimit = [bool]$SoftLimit
-            TrimEnabled = [bool]$EnableTrimming; TrimSeconds = $TrimEverySec
+            TrimEnabled = [bool]$EnableTrimming; TrimSeconds = $(if ($null -ne $trimPlan) { $trimPlan.IntervalSec } else { $TrimEverySec })
+            TrimPressure = ($null -ne $trimPlan -and [bool]$trimPlan.Pressure)
             Priority = $Priority; CoresPerInstance = $CoresPerInstance
             MonitorOnly = [bool]$MonitorOnly; Detected = $Detected
             Managed = $tracked.Count; ResidentMB = $Resident / 1MB
@@ -3752,6 +3925,7 @@ try {
         if ($clock.Elapsed.TotalSeconds -ge $nextPolicyCheck) {
             $swPhase = [Diagnostics.Stopwatch]::StartNew()
             Update-ArkuzoLivePolicy
+            if ($null -ne $pendingLiveSettings) { Update-ArkuzoLiveSettings $pendingLiveSettings; $pendingLiveSettings = $null }
             Sync-ArkuzoAutoexecSignals
             $swPhase.Stop()
             if ($swPhase.Elapsed.TotalSeconds -gt 5) {
@@ -3791,6 +3965,14 @@ try {
             Start-ArkuzoVersionCheckAsync
             $nextUpdateCheck = $clock.Elapsed.TotalSeconds + $updateCheckInterval
         }
+        $trimPlan = Get-ArkuzoTrimPlan $systemMemory $totalPhysicalMB $TrimEverySec ([bool]$AdaptiveTrim) $PressureTrimAvailablePercent
+        if (-not $MonitorOnly -and (Test-Path -LiteralPath $trimNowSignalPath)) {
+            # Operator request (Control Center): make every client due now. Warmup,
+            # soft target, responsiveness and global spacing still apply.
+            Remove-Item -LiteralPath $trimNowSignalPath -Force -ErrorAction SilentlyContinue
+            foreach ($state in @($tracked.Values)) { $state.LastTrim = -1e6 }
+            Write-Diagnostic 'TRIM_NOW_REQUESTED' @{ clients = $tracked.Count }
+        }
         $clients = @(Get-Process -Name RobloxPlayerBeta -ErrorAction SilentlyContinue)
         $liveIds = @($clients | ForEach-Object { $_.Id })
         foreach ($id in @($tracked.Keys)) {
@@ -3829,6 +4011,7 @@ try {
                         StartTicks = $ticks; Slot = $slot
                         Priority = $client.PriorityClass; Affinity = $client.ProcessorAffinity
                         Limits = [Arkuzo.MemorySaverNativeV1]::ReadLimits($client.Handle)
+                        MemoryPriority = $(try { [Arkuzo.MemorySaverNativeV1]::ReadMemoryPriority($client.Handle) } catch { $null }); MemoryPriorityChanged = $false
                         Watcher = $null; LastSnapshot = $null; LastStatus = $null
                         LimitsChanged = $false; LastProgress = $clock.Elapsed.TotalSeconds
                         LastTrim = $clock.Elapsed.TotalSeconds; LastConfig = -1e6; MinimizedByUs = $false
@@ -3898,11 +4081,18 @@ try {
                 $now = $clock.Elapsed.TotalSeconds
                 # Reapply periodically without hammering native setters on each poll.
                 if (-not $MonitorOnly -and ($now - $state.LastConfig) -ge 10) {
-                    foreach ($operation in @('Priority','Affinity','Limits')) {
+                    foreach ($operation in @('Priority','Affinity','MemoryPriority','Limits')) {
                         try {
                             switch ($operation) {
                                 'Priority' { $client.PriorityClass = $Priority }
                                 'Affinity' { $client.ProcessorAffinity = [Arkuzo.MemorySaverNativeV1]::Affinity($state.Affinity.ToInt64(), $state.Slot, $CoresPerInstance) }
+                                'MemoryPriority' {
+                                    # Only change what can be restored on exit.
+                                    if ($null -ne $state.MemoryPriority) {
+                                        [Arkuzo.MemorySaverNativeV1]::SetMemoryPriority($client.Handle, (ConvertTo-ArkuzoMemoryPriorityValue $MemoryPriority))
+                                        $state.MemoryPriorityChanged = $true
+                                    }
+                                }
                                 'Limits' {
                                     if (-not $SoftLimit) {
                                         [Arkuzo.MemorySaverNativeV1]::SetLimits($client.Handle, 1MB, $maxBytes, $limitFlags)
@@ -3912,7 +4102,7 @@ try {
                             }
                         } catch { Warn-Throttled "$id-$operation" "PID ${id}: $operation failed: $($_.Exception.Message)" }
                     }
-                    if ($state.LastConfig -lt 0) { Write-Diagnostic 'RESOURCE_CONFIGURATION_REQUESTED' @{ pid = $id; priority = $Priority; logicalCpu = $CoresPerInstance; hardCap = (-not [bool]$SoftLimit); targetMB = $MaxRamMB } }
+                    if ($state.LastConfig -lt 0) { Write-Diagnostic 'RESOURCE_CONFIGURATION_REQUESTED' @{ pid = $id; priority = $Priority; logicalCpu = $CoresPerInstance; memoryPriority = $MemoryPriority; hardCap = (-not [bool]$SoftLimit); targetMB = $MaxRamMB } }
                     $state.LastConfig = $now
                 }
                 if (-not $MonitorOnly -and $Minimize -and $client.MainWindowHandle -ne [IntPtr]::Zero) {
@@ -3922,7 +4112,7 @@ try {
                         }
                     }
                 }
-                if (-not $MonitorOnly -and $EnableTrimming -and -not $launchError -and (([DateTime]::UtcNow - $client.StartTime.ToUniversalTime()).TotalSeconds -ge $healthPolicy.warmup_sec) -and ($now - $state.LastTrim) -ge $TrimEverySec -and ($now - $lastGlobalTrim) -ge $healthPolicy.trim_spacing_sec) {
+                if (-not $MonitorOnly -and $EnableTrimming -and -not $launchError -and (([DateTime]::UtcNow - $client.StartTime.ToUniversalTime()).TotalSeconds -ge $healthPolicy.warmup_sec) -and ($now - $state.LastTrim) -ge $trimPlan.IntervalSec -and ($now - $lastGlobalTrim) -ge $healthPolicy.trim_spacing_sec) {
                     # Opt-in only, above target, skip loading/unresponsive clients.
                     if ($client.WorkingSet64 -gt $maxBytes -and $window -ne [IntPtr]::Zero -and $isResponding) {
                         try {
@@ -3990,22 +4180,25 @@ try {
                 $state.HealthDecision = Get-ArkuzoHealthDecision $state $healthSample $healthPolicy $sampleTime
                 if ($state.HealthDecision.Status) { $status = $state.HealthDecision.Status }
                 $clientAgeSec = ([DateTime]::UtcNow - $client.StartTime.ToUniversalTime()).TotalSeconds
-                $nextTrimText = Get-ArkuzoTrimCountdown $clientAgeSec $healthPolicy.warmup_sec $TrimEverySec $sampleTime $state.LastTrim ([bool]$EnableTrimming) ([bool]$MonitorOnly)
+                $nextTrimText = Get-ArkuzoTrimCountdown $clientAgeSec $healthPolicy.warmup_sec $trimPlan.IntervalSec $sampleTime $state.LastTrim ([bool]$EnableTrimming) ([bool]$MonitorOnly)
                 $clientIssues = @($dashboardIssues.Keys | Where-Object { $_ -eq [string]$id -or $_ -like "$id-*" })
                 if ($clientIssues.Count -gt 0 -and -not $state.HealthDecision.Status) { $status = 'CHECK NOTICE' }
+                $accountName = Resolve-ArkuzoAccountName -ProcessId $id -TrackerId $state.TrackerId -LogPath $state.LogPath
                 $state.LastSnapshot = [ordered]@{
                     pid = $id; cpuPercent = [Math]::Round($cpu, 2); residentMB = [Math]::Round($client.WorkingSet64 / 1MB, 1)
                     privateMB = [Math]::Round($client.PrivateMemorySize64 / 1MB, 1)
                     responding = $isResponding; windowPresent = ($window -ne [IntPtr]::Zero); launchError = $launchError
                     state = $status; sampleTime = (Get-Date).ToString('o')
                     eligible = [bool]$healthSample.eligible; isDisconnected = [bool]$state.isDisconnected; parentId = [int]$state.ParentId
+                    account = $accountName; slot = [int]$state.Slot; ageSec = [Math]::Round($clientAgeSec); nextTrim = $nextTrimText
+                    gameReady = [bool]$state.GameReady; disconnectReason = $state.DisconnectReason
+                    memoryPriority = $(if ($state.MemoryPriorityChanged) { $MemoryPriority } else { $null })
                 }
                 $state.HealthSnapshotUtc=[datetime]::UtcNow.ToString('o')
                 if ($state.LastStatus -ne $status) {
                     Write-Diagnostic 'CLIENT_STATE_CHANGED' @{ previous = $state.LastStatus; sample = $state.LastSnapshot }
                     $state.LastStatus = $status
                 }
-                $accountName = Resolve-ArkuzoAccountName -ProcessId $id -TrackerId $state.TrackerId -LogPath $state.LogPath
                 $rows.Add([pscustomobject]@{
                     Id = $id; Slot = $state.Slot; Account = $accountName; Cpu = $cpu
                     Ram = $client.WorkingSet64 / 1MB; Private = $client.PrivateMemorySize64 / 1MB
@@ -4017,13 +4210,16 @@ try {
                 Warn-Throttled ([string]$id) "PID ${id}: $($_.Exception.Message)"
             } finally { try { $client.Dispose() } catch { } }
         }
+        $lastTotals = @{ detected = $clients.Count; managed = $tracked.Count; cpuPercent = [Math]::Round($totalCpu, 2)
+            residentMB = [Math]::Round($totalResident / 1MB, 1); privateMB = [Math]::Round($totalPrivate / 1MB, 1) }
         if ($clock.Elapsed.TotalSeconds -ge $nextOutcomeCheck) {
             Update-ArkuzoRecoveryOutcomes
             $nextOutcomeCheck = $clock.Elapsed.TotalSeconds + 10
         }
         if ($clock.Elapsed.TotalSeconds -ge $nextRuntimeHeartbeat) {
             Write-ArkuzoRuntimeStatus
-            $nextRuntimeHeartbeat = $clock.Elapsed.TotalSeconds + 5
+            # Two seconds keeps the Control Center live; the file is small.
+            $nextRuntimeHeartbeat = $clock.Elapsed.TotalSeconds + 2
         }
         # Try largest first, skipping unready targets without charging a budget.
         foreach ($candidate in @($tracked.GetEnumerator() | Where-Object {

@@ -59,6 +59,11 @@ The tables below describe the current repository defaults in `config/defaults.js
 | `poll_ms` | `350` | Main polling interval in milliseconds; some observations run less frequently. |
 | `minimize_on_launch` | `false` | Whether the saver requests client-window minimization. |
 | `apply_graphics_flags` | `true` | Requests graphics-flag application; writing a requested flag does not prove that Roblox honors it. |
+| `memory_priority` | `"Low"` | Windows memory priority for clients (`VeryLow`, `Low`, `Medium`, `BelowNormal`, `Normal`). Lower values are evicted first under pressure. Restored on exit. |
+| `adaptive_trim` | `true` | Trims three times as often (never below 15 s) while free physical RAM is scarce. |
+| `pressure_trim_available_percent` | `20` | Free physical RAM percentage below which adaptive trimming applies. |
+
+Everything in `settings` except `hard_limit` and `apply_graphics_flags` is applied to a running saver within about 10 seconds of saving. A configuration that predates `memory_priority` or `adaptive_trim` inherits them from its `selected_preset`.
 
 Trimming waits for the **individual client's** warmup, checks its current resident memory against the soft target, and requires a present, responsive window without a detected startup-error dialog. Global spacing staggers eligible clients. A trim can cause subsequent page faults as needed pages return to RAM. It does not decommit private allocations or repair the cause of memory growth.
 
@@ -95,7 +100,10 @@ The **88% threshold is a candidate-selection policy, not a guarantee**. OS commi
 | `retry_max_sec` | `900` | Default upper bound of increasing retry backoff. |
 | `retry_max_per_hour` | `6` | Per-account launch-retry budget, separate from client-termination budgets. |
 | `ready_stable_sec` | `30` | Continuous restoration-readiness confirmation interval. |
-| `excluded_account_ids` | `[]` | Account identifiers excluded from restoration eligibility. Keep real identifiers private. |
+| `excluded_account_ids` | `[]` | Account identifiers excluded from restoration eligibility. Keep real identifiers private. The Control Center's per-account toggle edits this list. |
+| `abandon_after_retries` | `8` | Failed recovery attempts after which an account is quarantined and stops blocking other accounts. |
+| `abandon_after_sec` | `5400` | Unresolved recovery age after which the same quarantine applies. |
+| `quarantine_sec` | `1800` | How long a quarantined account is left untouched before normal recovery resumes. `0` releases it without a quarantine. |
 
 ## `pagefile`: guarded virtual memory scaling (bounded)
 

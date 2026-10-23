@@ -2,6 +2,25 @@
 
 Changes for **Arkuzo Memory Saver with Volt Integration** are recorded here.
 
+## v1.2.0 — Control Center & Autopilot (unreleased)
+
+### Control Center (new)
+- **Visual dashboard** (`Arkuzo-Control-Center.cmd`): live fleet table with per-client status, resident memory against the target, private memory, CPU, trim countdown and uptime; KPI tiles; one-hour farm-memory and system-pressure charts with crosshair tooltips and table views; Volt account list; filtered activity feed; light and dark themes.
+- **Autopilot supervisor:** starts the saver, restarts it with 5–120 s backoff when it exits, crashes or stops writing its heartbeat for two minutes, and pauses after eight crashes in 30 minutes instead of looping. It never starts a second controller next to a live one.
+- **Settings without JSON editing:** presets and every resource, health and recovery value, validated with the engine's own ranges, written atomically with a timestamped backup (`data/config-backups/`).
+- **Per-account auto-recover toggles** (edit `recovery.excluded_account_ids`), **Trim now**, Start/Stop/Restart, and optional **Start with Windows** (per-user `Run` entry, off by default).
+- Local only: binds to `127.0.0.1`, rejects foreign `Host` headers, and requires a per-run token for every change. Standard-library Python; no new dependency.
+
+### Memory
+- **Memory priority:** clients run at a lower Windows memory priority (`Low` for Aggressive, `VeryLow` for Extreme), so Windows repurposes their pages first under pressure. The original priority is restored on exit.
+- **Adaptive trimming:** while free physical RAM is below `pressure_trim_available_percent`, the trim interval drops to a third (never below 15 s). Target, warmup, responsiveness and spacing checks are unchanged.
+
+### Autonomy
+- **Stuck-recovery quarantine:** a recovery that fails `abandon_after_retries` times or stays unresolved for `abandon_after_sec` is released from the shared handoff gate, so one bad account no longer blocks recovery for the whole farm or burns the shared hourly budget. The account is left untouched for `quarantine_sec` (critical commit pressure excepted), then retried; quarantine persists across restarts.
+- **Live settings:** target RAM, trim interval and switches, cores, CPU priority, memory priority, minimize and poll interval now apply to the running saver within 10 s. Only `hard_limit` and graphics flags still need a restart. Explicit command-line values keep precedence.
+- Richer 2-second heartbeat (`runtime-status.json`): effective settings, totals, trims, uptime, alerts, quarantine and per-client account/slot/trim data.
+- Configurations written before these keys existed inherit them from their preset.
+
 ## v1.1.0 — Stable Baseline Release
 
 Official stable baseline release for the Arkuzo Memory Saver (AMS) architecture with complete Volt integration.

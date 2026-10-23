@@ -121,6 +121,14 @@ Arkuzo Memory Saver does **not** guarantee a fix for these conditions. A seat-li
 
 Review Volt's own visible error and supported account/session controls. Never replay authenticated launch commands, extract credentials, or write to its database. Leave ambiguous clients untouched rather than trying to force a return path.
 
+### An account shows “Quarantined”
+
+Its recovery failed `recovery.abandon_after_retries` times or stayed unresolved for `recovery.abandon_after_sec`. It is released so the other accounts can keep recovering, left untouched for `recovery.quarantine_sec`, then retried automatically. Check the account in Volt (session, seat, launch errors). Quarantine survives saver restarts by design.
+
+### Control Center shows “Crashed” or “Autopilot paused”
+
+The saver exited eight times within 30 minutes, so autopilot stopped restarting it. Read `data/Arkuzo-Logs/saver-console.log` (the previous run is in `saver-console.previous.log`) and the newest `Arkuzo-*.log`, fix the cause (often an invalid `config.json`), then press **Start** or toggle **Autopilot** on.
+
 ## Logs and recovery state
 
 ### Audit writes fail or the recovery journal is invalid

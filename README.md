@@ -59,6 +59,16 @@ Recovery   WAITING         exact account restoration still unconfirmed
 Policy     600 MB soft target · hard cap disabled
 ```
 
+## Control Center and autopilot
+
+`Arkuzo-Control-Center.cmd` opens a local dashboard (served only on `127.0.0.1`) that runs the saver for you:
+
+- **Live view** of every client: account, status, resident memory against the target, private memory, CPU, next trim and uptime; farm-memory and system-pressure charts; Volt accounts; an activity feed.
+- **Autopilot** keeps the saver alive: restarts with backoff after a crash, exit or hang, and pauses instead of looping if it keeps crashing.
+- **Settings** for presets, memory, CPU, health and recovery, validated and backed up before saving; most apply live. Per-account auto-recover toggles, **Trim now**, and optional **Start with Windows**.
+
+Closing the window leaves the Control Center and saver running in the background; use **Settings → Quit app** to close it. It needs Python 3 on `PATH`, like the Volt probe.
+
 ## Requirements
 
 - **Windows x64** with **Windows PowerShell 5.1**.

@@ -9,7 +9,10 @@
     "hard_limit": false,
     "poll_ms": 350,
     "minimize_on_launch": false,
-    "apply_graphics_flags": true
+    "apply_graphics_flags": true,
+    "memory_priority": "Low",
+    "adaptive_trim": true,
+    "pressure_trim_available_percent": 20
   },
   "health": {
     "enabled": true,
@@ -34,6 +37,9 @@
     "retry_max_sec": 900,
     "retry_max_per_hour": 6,
     "ready_stable_sec": 30,
+    "abandon_after_retries": 8,
+    "abandon_after_sec": 5400,
+    "quarantine_sec": 1800,
     "excluded_account_ids": []
   },
   "pagefile": {

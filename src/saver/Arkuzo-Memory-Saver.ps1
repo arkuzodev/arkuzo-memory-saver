@@ -518,7 +518,7 @@ function Get-RobloxLogDisconnectReason([string]$NewText) {
     $lines = $NewText -split "(\r?\n)"
     foreach ($line in $lines) {
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
-        if ($line -match "(?i)(?:Disconnection Notification\. Reason|Disconnect reason received|Disconnected from server for reason:\s*(?:Player:)?|Sending disconnect with reason):\s*([0-9]+)") {
+        if ($line -match "(?i)(?:Disconnection Notification\. Reason|Disconnect reason received|Disconnected from server for reason:\s*(?:Player:)?|Sending disconnect with reason|Disconnect code):\s*([0-9]+)") {
             $code = [int]$matches[1]
             if ($code -ne 285 -and $code -ne 0) {
                 return @{ Disconnected = $true; ErrorCode = $code; Reason = "Error Code $code" }
@@ -997,12 +997,21 @@ function Save-ArkuzoAtomicJson([string]$Path, $Value) {
     $temp = $Path + '.' + $PID + '.tmp'
     try {
         [IO.File]::WriteAllText($temp, ($Value | ConvertTo-Json -Depth 12), (New-Object Text.UTF8Encoding($false)))
-        if (Test-Path -LiteralPath $Path) { [IO.File]::Replace($temp, $Path, [Management.Automation.Language.NullString]::Value) }
-        else { [IO.File]::Move($temp, $Path) }
+        $saved = $false
+        for ($attempt = 0; $attempt -lt 5 -and -not $saved; $attempt++) {
+            try {
+                if (Test-Path -LiteralPath $Path) { [IO.File]::Replace($temp, $Path, [Management.Automation.Language.NullString]::Value) }
+                else { [IO.File]::Move($temp, $Path) }
+                $saved = $true
+            } catch {
+                if ($attempt -ge 4) { throw }
+                Start-Sleep -Milliseconds 60
+            }
+        }
     } finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue } }
 }
 function Save-ArkuzoRecoveryJournal {
-    if (-not $ownsControllerMutex -or -not $recoveryJournalHealthy) { throw 'Recovery journal not owned/healthy' }
+    if (-not $ownsControllerMutex -or $script:recoveryJournalCorrupt) { throw 'Recovery journal not owned/healthy' }
     $utc = [datetime]::UtcNow
     $script:recoveryAttempts = @($recoveryAttempts | Where-Object { ($utc - $_).TotalSeconds -lt 3600 })
     $script:launchAttempts = @($launchAttempts | Where-Object { ($utc - $_).TotalSeconds -lt 3600 })
@@ -1011,33 +1020,33 @@ function Save-ArkuzoRecoveryJournal {
         launchAttempts = @($launchAttempts | ForEach-Object { $_.ToString('o') })
         pending = @($recoveryPending.Values); suspendedAccounts = @(); updatedUtc = $utc.ToString('o')
     }
+    $script:recoveryJournalHealthy = $true
 }
 function Initialize-ArkuzoRecoveryJournal {
     # Load only while holding the sole destructive-controller mutex.
-    $script:recoveryJournalHealthy = $false; $script:recoveryAttempts = @(); $script:launchAttempts = @(); $script:recoveryPending = @{}; $script:suspendedAccounts = @{}
+    $script:recoveryJournalHealthy = $false; $script:recoveryJournalCorrupt = $false; $script:recoveryAttempts = @(); $script:launchAttempts = @(); $script:recoveryPending = @{}; $script:suspendedAccounts = @{}
     if (-not $ownsControllerMutex) { return }
     try {
         if (Test-Path -LiteralPath $recoveryStatePath) {
             $journal = [IO.File]::ReadAllText($recoveryStatePath) | ConvertFrom-Json
             if ($null -eq $journal.attempts) { throw 'Invalid recovery journal' }
             $script:recoveryAttempts = @($journal.attempts | ForEach-Object { ([datetime]$_).ToUniversalTime() })
-            $script:launchAttempts = @($journal.launchAttempts | ForEach-Object { if ($null -ne $_) { ([datetime]$_).ToUniversalTime() } })
-            foreach ($value in @($journal.pending)) {
-                if ($null -eq $value) { continue }
-                if ($value.accountId -notmatch '\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\z' -or
-                    $value.oldTrackerId -notmatch '\A[0-9]+\z' -or $null -eq $value.createdUtc -or $null -eq $value.retryCount -or
-                    $recoveryPending.ContainsKey([string]$value.accountId)) { throw 'Invalid pending recovery entry' }
-                [datetime]$value.createdUtc | Out-Null
-                if ($value.closedUtc) { [datetime]$value.closedUtc | Out-Null }
-                if ($value.nextRetryUtc) { [datetime]$value.nextRetryUtc | Out-Null }
-                if ([int]$value.retryCount -lt 0) { throw 'Invalid retry count' }
-                $entry = @{}; foreach ($prop in $value.PSObject.Properties) { $entry[$prop.Name] = $prop.Value }
-                if ($value.missingSinceUtc) { [datetime]$value.missingSinceUtc | Out-Null }
-                # A monitor restart breaks continuity; never inherit a previous healthy timer.
-                $entry.readySinceUtc = $null; $entry.lastObservedUtc = $null
-                # Stale or synthetic missing entries without a verified prior process must not trigger auto-launch on startup.
-                if ([int]$value.oldPid -gt 0 -and [long]$value.oldStartTicks -gt 0) {
-                    $script:recoveryPending[[string]$value.accountId] = $entry
+            $script:launchAttempts = if ($journal.launchAttempts) { @($journal.launchAttempts | ForEach-Object { ([datetime]$_).ToUniversalTime() }) } else { @() }
+            if ($null -ne $journal.pending) {
+                foreach ($value in $journal.pending) {
+                    if (-not $value.accountId -or -not $value.createdUtc) { throw 'Invalid pending journal entry' }
+                    [datetime]$value.createdUtc | Out-Null
+                    if ($value.closedUtc) { [datetime]$value.closedUtc | Out-Null }
+                    if ($value.nextRetryUtc) { [datetime]$value.nextRetryUtc | Out-Null }
+                    if ([int]$value.retryCount -lt 0) { throw 'Invalid retry count' }
+                    $entry = @{}; foreach ($prop in $value.PSObject.Properties) { $entry[$prop.Name] = $prop.Value }
+                    if ($value.missingSinceUtc) { [datetime]$value.missingSinceUtc | Out-Null }
+                    # A monitor restart breaks continuity; never inherit a previous healthy timer.
+                    $entry.readySinceUtc = $null; $entry.lastObservedUtc = $null
+                    # Stale or synthetic missing entries without a verified prior process must not trigger auto-launch on startup.
+                    if ([int]$value.oldPid -gt 0 -and [long]$value.oldStartTicks -gt 0) {
+                        $script:recoveryPending[[string]$value.accountId] = $entry
+                    }
                 }
             }
             # Suspended accounts disappear on restart and are not saved practically; start clean
@@ -1049,7 +1058,7 @@ function Initialize-ArkuzoRecoveryJournal {
         }
     } catch {
         $script:recoveryAttempts = @(); $script:launchAttempts = @(); $script:recoveryPending = @{}; $script:suspendedAccounts = @{}
-        $script:recoveryJournalHealthy = $false
+        $script:recoveryJournalHealthy = $false; $script:recoveryJournalCorrupt = $true
     }
 }
 function Get-ArkuzoRecoveryHealthSample($Watcher, [string]$Reason, $CurrentState = $null) {
@@ -1197,12 +1206,17 @@ function Poll-ArkuzoVoltControlAsync {
     if ($null -ne $script:voltStatusChild) {
         if ($script:voltStatusChild.HasExited) {
             try {
-                if ($script:voltStatusChild.ExitCode -eq 0 -and $null -ne $script:voltStatusOut -and $script:voltStatusOut.IsCompleted) {
-                    $raw = $script:voltStatusOut.Result
-                    $res = $raw | ConvertFrom-Json
-                    if ($res.available -is [bool]) {
-                        $script:voltControlStatus = $res
-                        $script:voltControlCheckedUtc = [datetime]::UtcNow
+                if ($script:voltStatusChild.ExitCode -eq 0 -and $null -ne $script:voltStatusOut) {
+                    if (-not $script:voltStatusOut.IsCompleted) {
+                        [void]$script:voltStatusOut.AsyncWaitHandle.WaitOne(2000)
+                    }
+                    if ($script:voltStatusOut.IsCompleted) {
+                        $raw = $script:voltStatusOut.Result
+                        $res = $raw | ConvertFrom-Json
+                        if ($res.available -is [bool]) {
+                            $script:voltControlStatus = $res
+                            $script:voltControlCheckedUtc = [datetime]::UtcNow
+                        }
                     }
                 }
             } catch { }
@@ -1334,7 +1348,7 @@ function Update-ArkuzoCookieSuspensions {
     }
 }
 function Update-ArkuzoRecoveryOutcomes {
-    if ($MonitorOnly -or -not $restorePolicy.enabled -or -not $ownsControllerMutex -or -not $recoveryJournalHealthy) { return }
+    if ($MonitorOnly -or -not $restorePolicy.enabled -or -not $ownsControllerMutex -or $script:recoveryJournalCorrupt) { return }
     $utc=[datetime]::UtcNow
     if (-not $voltControlStatus.available -or $voltControlStatus.globalMappingSafe -isnot [bool] -or -not $voltControlStatus.globalMappingSafe -or ($utc-$voltControlCheckedUtc).TotalSeconds -lt 0 -or ($utc-$voltControlCheckedUtc).TotalSeconds -gt 25) {
         foreach ($entry in $recoveryPending.Values) { $entry.readySinceUtc=$null;$entry.lastObservedUtc=$null }
@@ -1739,11 +1753,13 @@ function Get-ArkuzoHealthDecision($State, $Sample, $Policy, [double]$Now) {
     $reason = ''; $status = ''
     # Normal polling is sub-second. A >5s gap (or clock rollback) breaks
     # continuous observation, even when both endpoint samples succeeded.
-    if ($null -eq $State.LastHealthSampleTime -or $Now -lt [double]$State.LastHealthSampleTime -or
-        ($Now - [double]$State.LastHealthSampleTime) -gt 5) {
+    if ($null -eq $State.LastHealthSampleTime -or $Now -lt [double]$State.LastHealthSampleTime) {
         $State.HangSince = -1.0
         $State.StartupErrorSince = -1.0
         $State.DisconnectSince = -1.0
+        $State.PrivateLimitSince = -1.0
+    } elseif (($Now - [double]$State.LastHealthSampleTime) -gt 5) {
+        $State.HangSince = -1.0
         $State.PrivateLimitSince = -1.0
     }
     $State.LastHealthSampleTime = $Now
@@ -3056,6 +3072,7 @@ $lastGlobalTrim = -1e6
 $recoveryAttempts = @()
 $recoveryStatePath = Join-Path $DataDirectory 'recovery-state.json'
 $recoveryJournalHealthy = $false # Initialized only while owning the controller lock.
+$recoveryJournalCorrupt = $false
 $recoveryPending = @{}; $suspendedAccounts = @{}; $launchAttempts = @()
 $sessionObservedAccounts = @{}
 $saverSessionStartEpochMs = [long][DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
@@ -3174,14 +3191,20 @@ function Get-ArkuzoOrphanHandlerDecision($Handler, $Parent, [datetime]$NowUtc, $
                     if ($null -ne $Parent -and $Parent.QuerySucceeded -is [bool] -and $Parent.QuerySucceeded -and
                         $Parent.Id -eq $Handler.ParentId -and $Parent.Count -is [int]) {
                         if ($Parent.Count -eq 0 -and $Parent.AbsenceConfirmed -is [bool] -and $Parent.AbsenceConfirmed) { $close = $true; $reason = 'ParentAbsent' }
-                        elseif ($Parent.Count -eq 1 -and $Parent.HasExited -is [bool] -and -not $Parent.HasExited -and
+                        elseif ($Parent.Count -eq 1 -and $Parent.HasExited -is [bool] -and
                             $Parent.Handle -is [IntPtr] -and $Parent.Handle -ne [IntPtr]::Zero -and
                             $Parent.CimId -eq $Parent.Id -and $Parent.StartTicks -is [long] -and $Parent.StartTicks -gt 0 -and
                             $Parent.CimStartTicks -is [long] -and $Parent.CimStartTicks -gt 0 -and
                             ($Parent.StartTicks - $Parent.CimStartTicks) -ge 0 -and ($Parent.StartTicks - $Parent.CimStartTicks) -lt 10) {
-                            # WMI timestamps have microsecond precision; retain/recheck the exact .NET generation too.
-                            $close = $Parent.StartTicks -gt $Handler.StartTicks
-                            $reason = if ($close) { 'ParentPidReused' } else { 'HealthyParent' }
+                            if ($Parent.HasExited) {
+                                if ($Parent.StartTicks -le $Handler.StartTicks) {
+                                    $close = $true; $reason = 'ParentAbsent'
+                                }
+                            } else {
+                                # WMI timestamps have microsecond precision; retain/recheck the exact .NET generation too.
+                                $close = $Parent.StartTicks -gt $Handler.StartTicks
+                                $reason = if ($close) { 'ParentPidReused' } else { 'HealthyParent' }
+                            }
                         }
                     }
                 }
@@ -3610,7 +3633,13 @@ try {
     [Console]::CursorVisible = $false
     [Console]::Clear()
     $consoleReady = $true
-} catch { if (-not $Headless) { throw "Live dashboard requires an interactive console. $($_.Exception.Message)" } }
+} catch {
+    $consoleReady = $false
+    if (-not $Headless -and [Environment]::UserInteractive -and -not [Console]::IsOutputRedirected) {
+        throw "Live dashboard requires an interactive console. $($_.Exception.Message)"
+    }
+    $Headless = $true
+}
 
 # Short, bounded boot sequence; the live view stays motionless between samples.
 function Show-ArkuzoBoot {
@@ -3706,6 +3735,7 @@ try {
         Initialize-ArkuzoNativePrivileges | Out-Null
         Initialize-ArkuzoGraphicsSettings
         Initialize-ArkuzoRecoveryJournal
+        Update-VoltRecoveryCapability -SyncControl
         Sync-ArkuzoAutoexecSignals
     }
     while ($true) {
@@ -4003,7 +4033,9 @@ try {
         } | Sort-Object { $_.Value.LastSnapshot.privateMB } -Descending)) {
             $effectiveCooldown = if ($candidate.Value.HealthDecision.Reason -eq 'VOLT_STARTUP_ERROR') { [math]::Min(5, $healthPolicy.cooldown_sec) } else { $healthPolicy.cooldown_sec }
             if (-not (Test-ArkuzoRecoveryBudget $recoveryAttempts ([DateTime]::UtcNow) $effectiveCooldown $healthPolicy.max_recycles_per_hour)) {
-                Warn-Throttled 'recovery-budget' 'Recovery cooldown/hourly budget reached. No restart storm.'; break
+                # Cooldown is reason-specific: a larger blocked hang/memory
+                # target must not starve a startup error with its own safe budget.
+                Warn-Throttled 'recovery-budget' 'Recovery cooldown/hourly budget reached. No restart storm.'; continue
             }
             Invoke-ClientRecovery $candidate.Key $candidate.Value
             if ($candidate.Value.RecoveryRequested) { break }
@@ -4068,7 +4100,10 @@ try {
                                     $parent.AbsenceConfirmed = $false
                                     try {
                                         $owner = Get-Process -Id $parentId -ErrorAction Stop
-                                        throw 'Parent absence contradicted/unconfirmed by process lookup'
+                                        if (-not $owner.HasExited) {
+                                            throw 'Parent absence contradicted/unconfirmed by process lookup'
+                                        }
+                                        $parent.AbsenceConfirmed = $true
                                     } catch {
                                         if ($_.FullyQualifiedErrorId -notlike 'NoProcessFoundForGivenId*') { throw }
                                         $parent.AbsenceConfirmed = $true

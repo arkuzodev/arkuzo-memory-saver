@@ -2,7 +2,7 @@
 
 Changes for **Arkuzo Memory Saver with Volt Integration** are recorded here.
 
-## v1.2.0 — Control Center & Autopilot (unreleased)
+## v1.2.0 — Control Center & Autopilot
 
 ### Control Center (new)
 - **Visual dashboard** (`Arkuzo-Control-Center.cmd`): live fleet table with per-client status, resident memory against the target, private memory, CPU, trim countdown and uptime; KPI tiles; one-hour farm-memory and system-pressure charts with crosshair tooltips and table views; Volt account list; filtered activity feed; light and dark themes.
@@ -20,6 +20,11 @@ Changes for **Arkuzo Memory Saver with Volt Integration** are recorded here.
 - **Live settings:** target RAM, trim interval and switches, cores, CPU priority, memory priority, minimize and poll interval now apply to the running saver within 10 s. Only `hard_limit` and graphics flags still need a restart. Explicit command-line values keep precedence.
 - Richer 2-second heartbeat (`runtime-status.json`): effective settings, totals, trims, uptime, alerts, quarantine and per-client account/slot/trim data.
 - Configurations written before these keys existed inherit them from their preset.
+
+### Launcher and updates
+- **Existing launchers update automatically** to the v1.2.0 engine: `ArkuzoMemorySaver-runtime.zip` keeps its four-file layout.
+- **Download the new `ArkuzoMemorySaver.exe` to get the Control Center.** It ships as a separate add-on (`ArkuzoMemorySaver-controlcenter.zip` + `.sha256`) that only the new launcher fetches and verifies. With Python 3 (`pythonw.exe`) on `PATH`, the new launcher opens the Control Center, which runs the saver; otherwise, or with `--console`, it runs the console saver as before.
+- **Start with Windows** registers the launcher itself in launcher installs, so every sign-in checks for updates first.
 
 ## v1.1.0 — Stable Baseline Release
 

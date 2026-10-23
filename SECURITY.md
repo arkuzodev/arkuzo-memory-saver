@@ -12,14 +12,15 @@ Arkuzo Memory Saver runs locally. The public launcher reads release metadata and
 
 ## Release integrity and antivirus status
 
-SHA-256 values for each release are published in that release's **`SHA256SUMS.txt`** and **`ArkuzoMemorySaver-runtime.sha256`** assets. The launcher validates runtime bytes and available GitHub asset digests before installation or repair. Use checksums from the exact release you downloaded, not a previous version.
+SHA-256 values for each release are published in that release's **`SHA256SUMS.txt`**, **`ArkuzoMemorySaver-runtime.sha256`** and **`ArkuzoMemorySaver-controlcenter.sha256`** assets. The launcher validates runtime bytes and available GitHub asset digests before installation or repair. Use checksums from the exact release you downloaded, not a previous version.
 
-The release binary `ArkuzoMemorySaver.exe` (`6b2a7347bb288b11509aebb7cf4cd37e6ef190618cb8bed47a55b72b038f03ef`) was scanned on VirusTotal and verified **0/71 Clean** with zero detections:
-- **VirusTotal Scan (Executable):** [https://www.virustotal.com/gui/file/6b2a7347bb288b11509aebb7cf4cd37e6ef190618cb8bed47a55b72b038f03ef](https://www.virustotal.com/gui/file/6b2a7347bb288b11509aebb7cf4cd37e6ef190618cb8bed47a55b72b038f03ef)
-- **Updated Runtime Zip:** SHA-256 `c75e9f0b3ffa129e00cc80cbce02585c917a69fea3d15d37efe6c6cab80facc9`. VirusTotal status for this checksum is not yet verified; the previous runtime scan does not apply to these updated bytes.
-- **VirusTotal Scan (Release Archive):** [https://www.virustotal.com/gui/file/28518128a18649a4370e814b08aa363561850a5eaf0fe2cf2084f256e646f9c4](https://www.virustotal.com/gui/file/28518128a18649a4370e814b08aa363561850a5eaf0fe2cf2084f256e646f9c4)
+The **v1.2.0** release rebuilds the launcher and adds the Control Center add-on. Its VirusTotal results are not yet recorded; earlier scans do not apply to these bytes:
+- **`ArkuzoMemorySaver.exe`:** SHA-256 `27edbe616b590bc18c22ef8cef710687e0721e71d8f05404640fecc5ca96367e`
+- **`ArkuzoMemorySaver-runtime.zip`:** SHA-256 `85e7e3aadc4ff1ddeb4f0218058615dd117e296540f85a718b23316fcbfaad58`
+- **`ArkuzoMemorySaver-controlcenter.zip`:** SHA-256 `d0716a962a9c149050c06d5596720f21d5479271b07b3f1422a1a203dc17fba8`
+- **`ArkuzoMemorySaver-v1.2.0-win-x64.zip`:** SHA-256 `df610f72482561a1fdb9bcedd4ea41788fb1214d810a7f54f26174adb9d7d4c1`
 
-The **v1.1.0 Stable Baseline Release** includes a launcher executable with built-in WMI controller takeover, automated stale process cleanup, and persistent process-bound account name caching. The executable and portable archive are unchanged from the original release. The refreshed runtime adds automatic exclusion of disappeared suspended accounts; do not transfer the original runtime's antivirus result to this update.
+The Control Center listens only on `127.0.0.1`, rejects requests whose `Host` is not a loopback name, and requires a per-run token for every change. It never reads cookies, tickets or command lines and does not control Roblox or Volt directly.
 
 Checksums and antivirus scans are not signatures or guarantees. Keep Windows Defender, SmartScreen, and Windows Error Reporting enabled.
 

@@ -745,6 +745,11 @@ class App:
 
 
 def startup_command(data: Path) -> str:
+    # Launcher installs run from app/control-center/<version>/: start the
+    # launcher instead, so every sign-in updates first and never pins this version.
+    launcher = RUNTIME.parent.parent.parent / 'ArkuzoMemorySaver.exe'
+    if RUNTIME.parent.name == 'control-center' and launcher.exists():
+        return f'"{launcher}"'
     exe = Path(sys.executable)
     windowless = exe.with_name('pythonw.exe')
     runner = windowless if windowless.exists() else exe

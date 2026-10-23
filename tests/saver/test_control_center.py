@@ -99,6 +99,28 @@ class ConfigTests(unittest.TestCase):
                     self.assertEqual(ranges.get(key), (rule[1], rule[2]), f'{section}.{key}')
 
 
+class StartupCommandTests(unittest.TestCase):
+    def test_launcher_install_autostarts_the_launcher(self):
+        root = Path(tempfile.mkdtemp())
+        try:
+            runtime = root / 'app' / 'control-center' / 'v9.9.9'
+            runtime.mkdir(parents=True)
+            (root / 'ArkuzoMemorySaver.exe').write_bytes(b'')
+            original = cc.RUNTIME
+            cc.RUNTIME = runtime
+            try:
+                self.assertEqual(cc.startup_command(root / 'data'), f'"{root / "ArkuzoMemorySaver.exe"}"')
+            finally:
+                cc.RUNTIME = original
+        finally:
+            shutil.rmtree(root)
+
+    def test_checkout_autostarts_the_script(self):
+        command = cc.startup_command(Path('C:/farm/data'))
+        self.assertIn('Arkuzo-Control-Center.py', command)
+        self.assertIn('--background', command)
+
+
 class FeedTests(unittest.TestCase):
     def test_summaries_resolve_names_and_skip_noise(self):
         names = {'a': 'Farmer01'}

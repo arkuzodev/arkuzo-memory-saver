@@ -15,6 +15,15 @@ internal sealed class FixtureControllerIo : IControllerIo
  public void Signal(string path,string token) { Signals++; Process.OnSignal?.Invoke(); }
  public void RemoveSignal(string path,string token) { Removes++; }
 }
+internal sealed class FixtureControlCenterHost : IControlCenterHost
+{
+ public bool Running;
+ public string? Python;
+ public readonly List<System.Diagnostics.ProcessStartInfo> Started=[];
+ public bool IsRunning()=>Running;
+ public string? FindPython()=>Python;
+ public void Start(System.Diagnostics.ProcessStartInfo info)=>Started.Add(info);
+}
 internal sealed class FixtureControllerProcess : IControllerProcess
 {
  public ControllerIdentity Identity=new(777,1,"","");

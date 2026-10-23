@@ -19,20 +19,29 @@ public sealed class GitHubReleaseSource
     throw new InvalidDataException("Latest release is not published and stable.");
    var version=release.GetProperty("tag_name").GetString() ?? ""; Installation.ParseVersion(version);
    var assets=release.GetProperty("assets").EnumerateArray().ToArray();
-   var zipAsset=Asset(assets,"ArkuzoMemorySaver-runtime.zip",version,RuntimePackage.Limit);
-   var checksumAsset=Asset(assets,"ArkuzoMemorySaver-runtime.sha256",version,4096);
-   var zip=await Download(client,zipAsset.Url,RuntimePackage.Limit,budget.Token);
-   var checksum=await Download(client,checksumAsset.Url,4096,budget.Token);
-   if(zip.Length!=zipAsset.Size || checksum.Length!=checksumAsset.Size) throw new InvalidDataException("Release asset size mismatch.");
-   if(checksumAsset.Digest is not null && !checksumAsset.Digest.Equals("sha256:"+System.Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(checksum)),StringComparison.OrdinalIgnoreCase))
-    throw new InvalidDataException("GitHub checksum asset digest mismatch.");
-   return new ReleasePayload(version,zip,new System.Text.UTF8Encoding(false,true).GetString(checksum),zipAsset.Digest);
+   var core=await Pair(client,Asset(assets,RuntimePackage.ZipName,version,RuntimePackage.Limit)!.Value,Asset(assets,RuntimePackage.ChecksumName,version,4096)!.Value,budget.Token);
+   // Optional: releases without the add-on (and launchers that predate it) keep the console saver.
+   var ccZip=Asset(assets,RuntimePackage.ControlCenterZipName,version,RuntimePackage.Limit,optional:true);
+   var ccChecksum=Asset(assets,RuntimePackage.ControlCenterChecksumName,version,4096,optional:true);
+   if(ccZip.HasValue!=ccChecksum.HasValue) throw new InvalidDataException("Control Center release assets must be published together.");
+   var controlCenter=ccZip is { } ccz && ccChecksum is { } ccs ? await Pair(client,ccz,ccs,budget.Token) : null;
+   return new ReleasePayload(version,core.Zip,core.Checksum,core.Digest,controlCenter);
   } catch(Exception ex) when(ex is System.Text.Json.JsonException or KeyNotFoundException or InvalidOperationException or System.Text.DecoderFallbackException)
   { throw new InvalidDataException("Invalid GitHub release metadata.",ex); }
  }
- static (string Url,long Size,string? Digest) Asset(System.Text.Json.JsonElement[] assets,string name,string version,int limit)
+ static async Task<AddonPayload> Pair(HttpClient client,(string Url,long Size,string? Digest) zipAsset,(string Url,long Size,string? Digest) checksumAsset,CancellationToken token)
+ {
+  var zip=await Download(client,zipAsset.Url,RuntimePackage.Limit,token);
+  var checksum=await Download(client,checksumAsset.Url,4096,token);
+  if(zip.Length!=zipAsset.Size || checksum.Length!=checksumAsset.Size) throw new InvalidDataException("Release asset size mismatch.");
+  if(checksumAsset.Digest is not null && !checksumAsset.Digest.Equals("sha256:"+System.Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(checksum)),StringComparison.OrdinalIgnoreCase))
+   throw new InvalidDataException("GitHub checksum asset digest mismatch.");
+  return new AddonPayload(zip,new System.Text.UTF8Encoding(false,true).GetString(checksum),zipAsset.Digest);
+ }
+ static (string Url,long Size,string? Digest)? Asset(System.Text.Json.JsonElement[] assets,string name,string version,int limit,bool optional=false)
  {
   var matches=assets.Where(x=>x.GetProperty("name").GetString()==name).ToArray();
+  if(optional && matches.Length==0) return null;
   if(matches.Length!=1) throw new InvalidDataException("Required release asset missing or duplicated: "+name);
   var asset=matches[0]; var size=asset.GetProperty("size").GetInt64();
   var expected="https://github.com/arkuzodev/arkuzo-memory-saver/releases/download/"+version+"/"+name;
@@ -78,9 +87,19 @@ public static class Updater
   }
   if (store.TryGetInstalled(out var current) && Installation.ParseVersion(release.Version) <= Installation.ParseVersion(current.Version))
   {
-   return store.Validate();
+   var installed=store.Validate();
+   // Adds (or repairs) the add-on for a runtime installed by a launcher that did not know it.
+   if (release.ControlCenter is not null && release.Version==installed.Version && !store.HasValidControlCenter(installed))
+    store.InstallControlCenter(release,installed);
+   return installed;
   }
   return store.Install(release);
+ }
+ public static ProcessStartInfo ControlCenterStart(string root,string runtime,string python)
+ {
+  var start=new ProcessStartInfo(python) { UseShellExecute=false, WorkingDirectory=runtime };
+  foreach(var arg in new[]{"-I",Path.Combine(runtime,"Arkuzo-Control-Center.py"),"--data",Path.Combine(root,"data")}) start.ArgumentList.Add(arg);
+  return start;
  }
  public static ProcessStartInfo ChildStart(string root,string runtime)
  {

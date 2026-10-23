@@ -205,6 +205,10 @@ try {
         $p = $present.Clone(); foreach ($k in $mutation.Keys) { $p[$k] = $mutation[$k] }
         Check (-not (Get-ArkuzoOrphanHandlerDecision $handler $p $now $false $true @($script:fixtureRoot) $expected).Close) ('Unverified parent snapshot rejected: ' + ($mutation.Keys -join ','))
     }
+    $exitedParent = @{QuerySucceeded=$true;Count=1;Id=4343;CimId=[uint32]4343;StartTicks=$handler.StartTicks - [TimeSpan]::FromSeconds(5).Ticks;HasExited=$true;Handle=[IntPtr]88}
+    $exitedParent.CimStartTicks = $exitedParent.StartTicks - 5L
+    $decision = Get-ArkuzoOrphanHandlerDecision $handler $exitedParent $now $false $true @($script:fixtureRoot) $expected
+    Check ($decision.Close -and $decision.Reason -eq 'ParentAbsent') 'Verified exited parent generation closes the orphan crash handler'
     $edge = $handler.Clone(); $edge.StartTicks = $now.AddSeconds(-60).Ticks - 1L
     Check ((Get-ArkuzoOrphanHandlerDecision $edge $parent $now $false $true @($script:fixtureRoot) $edge).Close) 'Age must be strictly greater than 60 seconds, including one tick over the boundary'
     Check (Test-ArkuzoCrashHandlerIdentity $handler @($script:fixtureRoot)) 'Pure executable identity verifies exact names, matching paths and Roblox publisher'

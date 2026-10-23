@@ -43,19 +43,25 @@ public sealed class LauncherLock : IDisposable
 public static class LauncherEntry
 {
  internal const string ControllerMutexName = "Local\\ArkuzoSaver-ProcessController";
- public static int Run(string[] args,string root) => Run(args,root,ControllerMutexName,null,new WindowsControllerIo());
- internal static int Run(string[] args,string root,string controllerMutexName,Action? acknowledgement,IControllerIo io)
+ public static int Run(string[] args,string root) => Run(args,root,ControllerMutexName,null,new WindowsControllerIo(),new WindowsControlCenterHost());
+ internal static int Run(string[] args,string root,string controllerMutexName,Action? acknowledgement,IControllerIo io,IControlCenterHost? controlCenter=null)
  {
+  controlCenter??=ControlCenter.Unavailable;
   LauncherUi.DisableQuickEdit();
   void DismissNotice() {
    if(args.Contains("--verify-only")) return;
    if(acknowledgement is null) LauncherUi.WaitForDismissal(false); else acknowledgement();
   }
-  if(args.Any(x=>x!="--offline" && x!="--verify-only") || args.Distinct().Count()!=args.Length)
-  { Console.Error.WriteLine("Usage: ArkuzoMemorySaver.exe [--offline] [--verify-only]");return 2; }
+  if(args.Any(x=>x!="--offline" && x!="--verify-only" && x!="--console") || args.Distinct().Count()!=args.Length)
+  { Console.Error.WriteLine("Usage: ArkuzoMemorySaver.exe [--offline] [--verify-only] [--console]");return 2; }
+  var consoleOnly=args.Contains("--console");
   try {
    using var updaterLock=new LauncherLock(root, args.Contains("--verify-only"));
-   if (!args.Contains("--verify-only") && io.IsRunning(controllerMutexName))
+   // A running Control Center supervises (and would restart) its saver, so it is never taken over.
+   var controlCenterRunning=!args.Contains("--verify-only") && controlCenter.IsRunning();
+   if (controlCenterRunning && consoleOnly)
+       throw new AlreadyRunningException("The Arkuzo Control Center is supervising the saver at "+ControlCenter.Url+". Quit it (Settings > Quit app) before starting the console saver.");
+   if (!args.Contains("--verify-only") && !controlCenterRunning && io.IsRunning(controllerMutexName))
    {
        bool replaced = false;
        try { replaced = ControllerTakeover.Replace(root, controllerMutexName, io); } catch { }
@@ -82,15 +88,38 @@ public static class LauncherEntry
    }
    var installed=Updater.PrepareAsync(store,args.Contains("--offline")).GetAwaiter().GetResult();
    store.InitializeData();
+   var addon=store.ValidateControlCenter(installed);
    if (Console.IsOutputRedirected || args.Contains("--verify-only"))
    {
        Console.WriteLine("Verified runtime "+installed.Version+" (SHA-256 "+installed.ZipSha256+").");
+       Console.WriteLine(addon is null ? "Control Center add-on not installed for this runtime." : "Verified Control Center "+addon.Version+" (SHA-256 "+addon.ZipSha256+").");
    }
    if(args.Contains("--verify-only")) return 0;
    if (!Console.IsOutputRedirected)
    {
        LauncherUi.Step("DIGEST", $"Runtime integrity verified: {installed.Version} (SHA-256 {installed.ZipSha256[..12]}...)", ConsoleColor.Green);
        LauncherUi.Step("LOCK", "Storage isolation: data/config.json locked", ConsoleColor.Green);
+   }
+   var python=addon is not null && !consoleOnly ? controlCenter.FindPython() : null;
+   if (addon is not null && python is not null)
+   {
+       if (!Console.IsOutputRedirected)
+       {
+           LauncherUi.Step("BOOT", controlCenterRunning
+               ? "Control Center already running; opening it. Quit it from Settings to load a newer runtime."
+               : "Opening the Control Center; it starts and supervises the saver.", ConsoleColor.Cyan);
+       }
+       Installation.SafePath(Path.Combine(root,"data","config.json"));
+       if (store.ValidateControlCenter(store.Validate()) is null) throw new InvalidDataException("Control Center add-on changed during startup.");
+       controlCenter.Start(Updater.ControlCenterStart(Path.GetFullPath(root),store.ControlCenterPath(installed),python));
+       return 0;
+   }
+   if (controlCenterRunning)
+       throw new AlreadyRunningException("The Arkuzo Control Center is already supervising the saver at "+ControlCenter.Url+".");
+   if (!Console.IsOutputRedirected)
+   {
+       if (addon is not null && !consoleOnly)
+           LauncherUi.Step("PYTHON", "Python 3 (pythonw.exe) not found on PATH; starting the console saver instead.", ConsoleColor.Yellow);
        LauncherUi.ProgressAnimation("PREPARING GUARDIAN CORE");
        LauncherUi.Step("BOOT", "Launching autonomous memory guardian...\n", ConsoleColor.Cyan);
        Thread.Sleep(60);

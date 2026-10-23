@@ -8,8 +8,8 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 REPO = 'arkuzodev/arkuzo-memory-saver'
-VERSION = 'v1.1.0'
-NAMES = ['ArkuzoMemorySaver.exe', 'ArkuzoMemorySaver-runtime.zip', 'ArkuzoMemorySaver-runtime.sha256', f'ArkuzoMemorySaver-{VERSION}-win-x64.zip', 'SHA256SUMS.txt']
+VERSION = 'v1.2.0'
+NAMES = ['ArkuzoMemorySaver.exe', 'ArkuzoMemorySaver-runtime.zip', 'ArkuzoMemorySaver-runtime.sha256', 'ArkuzoMemorySaver-controlcenter.zip', 'ArkuzoMemorySaver-controlcenter.sha256', f'ArkuzoMemorySaver-{VERSION}-win-x64.zip', 'SHA256SUMS.txt']
 
 def run(command, expected=0, timeout=120):
     result = subprocess.run(command, capture_output=True, text=True, errors='replace', timeout=timeout)
@@ -43,7 +43,7 @@ def main():
             require(path.read_bytes() == (ROOT / 'dist' / asset['name']).read_bytes(), 'Asset byte mismatch: ' + asset['name'])
             if asset.get('digest'):
                 require(asset['digest'] == 'sha256:' + digest(path), 'GitHub asset digest mismatch: ' + asset['name'])
-        print('PASS all five published assets match local release bytes and GitHub digests')
+        print(f'PASS all {len(NAMES)} published assets match local release bytes and GitHub digests')
         install = base / 'Fresh portable ü folder'
         install.mkdir()
         exe = install / 'ArkuzoMemorySaver.exe'
@@ -61,6 +61,9 @@ def main():
         require(config.read_bytes() == custom, 'Existing user config was changed')
         pointer = json.loads((install / 'app' / 'current.json').read_text())
         require(pointer['Version'] == VERSION, 'Updater installed unexpected version')
+        require(sorted(p.name for p in (install / 'app' / 'versions' / VERSION).iterdir()) == sorted(pointer['Files']) and len(pointer['Files']) == 4, 'Core runtime must keep the four-file layout older launchers validate')
+        addon = json.loads((install / 'app' / 'control-center.json').read_text())
+        require(addon['Version'] == VERSION and len(addon['Files']) == 6, 'Control Center add-on was not installed for this version')
         engine = install / 'app' / 'versions' / VERSION / 'Arkuzo-Memory-Saver.ps1'
         engine.write_bytes(engine.read_bytes() + b'\n# tamper-detection-test\n')
         run([str(exe), '--offline', '--verify-only'], expected=1)

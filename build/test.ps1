@@ -1,6 +1,8 @@
 #requires -Version 5.1
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
+# Several suites build fixtures under TMPDIR, which only Git Bash sets.
+if (-not $env:TMPDIR) { $env:TMPDIR = [IO.Path]::GetTempPath() }
 foreach ($test in Get-ChildItem -LiteralPath (Join-Path $root 'tests/saver') -Filter '*.Tests.ps1') {
     Write-Host ('TEST ' + $test.Name)
     & $test.FullName

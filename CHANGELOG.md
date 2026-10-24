@@ -2,7 +2,7 @@
 
 Changes for **Arkuzo Memory Saver with Volt Integration** are recorded here.
 
-## Unreleased
+## v2.1.2 — Updates take over, clean exit
 
 - **Updates take effect without quitting first:** starting the launcher always runs the newest version. A newer Control Center takes over from an older one that is still running, restarts the saver on the new version if it was running, and open windows reload onto it. Before, the old Control Center kept running until you quit it from Settings.
 - **Closing the window exits cleanly:** clicking the window's X stops the saver gracefully and quits the Control Center, like **Stop farm & quit**. Reloading the page or minimizing the window doesn't. A Control Center running without a window (a source checkout started with Windows) keeps running until one is opened and closed.

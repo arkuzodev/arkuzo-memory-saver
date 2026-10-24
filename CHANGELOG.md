@@ -2,6 +2,13 @@
 
 Changes for **Arkuzo Memory Saver with Volt Integration** are recorded here.
 
+## Unreleased
+
+- **Control Center in the Arkuzo Client's own style:** rebuilt from the client's theme values: eight themes (Graphite, Midnight, Obsidian, Nord, Ember, Forest, Plum, Frost) with its ten accents, beveled cards with accent glow and film grain, keycaps, the client's vector icons and its boot intro.
+- **The window stays on screen:** long pages scroll inside the window instead of pushing it past the bottom edge.
+- **Data folder shows your profile as `~`,** so shared screenshots don't carry your Windows user name.
+- `?theme=`, `?accent=`, `?page=` and `?intro=0` open a specific view; the README now has pictures of each page.
+
 ## v2.0.0 — Arkuzo Control Center
 
 The Control Center becomes the main way to run the saver. **All 1.x releases are deprecated**; existing launchers update to 2.0.0 automatically on their next start. Download the new `ArkuzoMemorySaver.exe` to get the Control Center.

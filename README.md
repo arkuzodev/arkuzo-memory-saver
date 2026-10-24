@@ -68,6 +68,18 @@ The launcher (`ArkuzoMemorySaver.exe` v2.0.0, with Python 3 on `PATH`) opens the
 
 Closing the window leaves the Control Center and saver running in the background; use **Settings → Quit app** to close it. It needs Python 3 on `PATH`, like the Volt probe.
 
+The look follows the Arkuzo Client: its eight themes and ten accents, card surfaces, keycaps and boot intro.
+
+![Control Center overview](docs/images/control-center-overview.png)
+
+| Clients | Settings |
+| --- | --- |
+| ![Clients page](docs/images/control-center-clients.png) | ![Settings page](docs/images/control-center-settings.png) |
+| **Midnight · Violet** | **Frost · Indigo** |
+| ![Midnight theme with Violet accent](docs/images/control-center-midnight.png) | ![Frost theme with Indigo accent](docs/images/control-center-frost.png) |
+
+<sub>Pictures use a synthetic demo farm, not real accounts or measurements.</sub>
+
 ## Requirements
 
 - **Windows x64** with **Windows PowerShell 5.1**.

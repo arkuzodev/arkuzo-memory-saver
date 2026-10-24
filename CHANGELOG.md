@@ -2,7 +2,9 @@
 
 Changes for **Arkuzo Memory Saver with Volt Integration** are recorded here.
 
-## Unreleased
+## v2.0.0 — Arkuzo Control Center
+
+The Control Center becomes the main way to run the saver. **All 1.x releases are deprecated**; existing launchers update to 2.0.0 automatically on their next start. Download the new `ArkuzoMemorySaver.exe` to get the Control Center.
 
 - **Saver no longer freezes on a stalled WMI query:** every `Win32_Process`/`Win32_ComputerSystem` query now times out after 5 s. On 23 Oct, a freeze while all clients were unresponsive left the farm unmanaged overnight.
 - **Stall watchdog:** a background timer records which step the saver is blocked in (`data/saver-stall.json`). The Control Center names that step when it restarts a hung saver, and the saver logs `SAVER_STALL_RECOVERED` when a long step ends.

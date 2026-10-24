@@ -106,7 +106,7 @@ public static class LauncherEntry
        if (!Console.IsOutputRedirected)
        {
            LauncherUi.Step("BOOT", controlCenterRunning
-               ? "Control Center already running; opening it. Quit it from Settings to load a newer runtime."
+               ? "Control Center already running; this version takes over if it is newer, otherwise it opens."
                : "Opening the Control Center; it starts and supervises the saver.", ConsoleColor.Cyan);
        }
        Installation.SafePath(Path.Combine(root,"data","config.json"));

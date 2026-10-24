@@ -66,7 +66,7 @@ The launcher (`ArkuzoMemorySaver.exe` v2.1.1, with Python 3 on `PATH`) opens the
 - **Autopilot** keeps the saver alive: restarts with backoff after a crash, exit or hang, and pauses instead of looping if it keeps crashing.
 - **Settings** for presets, memory, CPU, health and recovery, validated and backed up before saving; most apply live. Per-account auto-recover toggles, **Trim now**, and optional **Start with Windows**.
 
-Closing the window leaves the Control Center and saver running in the background; use **Settings → Quit app** to close it. It needs Python 3 on `PATH`, like the Volt probe.
+Closing the window exits cleanly: the saver stops and the Control Center quits, like **Settings → Stop farm & quit** (your Roblox clients keep running). With **Start with Windows**, a launcher install opens the window at sign-in; a source checkout starts in the background and keeps running until you open its window and close it. Starting the launcher again always runs the newest installed version: a newer Control Center takes over from an older running one by itself, restarting the saver on the new version if it was running. It needs Python 3 on `PATH`, like the Volt probe.
 
 The look follows the Arkuzo Client: its eight themes and ten accents, card surfaces, keycaps and boot intro.
 

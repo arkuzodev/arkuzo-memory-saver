@@ -49,6 +49,8 @@ CRASH_LOOP_WINDOW_SEC = 1800
 CRASH_LOOP_LIMIT = 8
 # After a crash loop, keep trying slowly: an unmanaged farm is worse than a retry.
 CRASH_LOOP_RETRY_SEC = 600
+# After the last window closes the Control Center quits; a page reload reconnects well within this.
+WINDOW_CLOSE_GRACE_SEC = 8
 
 # Mirrors Get-ArkuzoPresets in the engine; tests cross-check the two.
 PRESETS = {
@@ -108,6 +110,39 @@ EVENT_KINDS = {
 
 
 # ---------------------------------------------------------------- utilities
+def engine_version(script: Path) -> str | None:
+    """The runtime version stamped in the engine next to this file, e.g. '2.1.2'."""
+    try:
+        text = script.read_text(encoding='utf-8-sig', errors='replace')
+    except OSError:
+        return None
+    match = re.search(r"^\$ArkuzoRuntimeVersion\s*=\s*'(\d+(?:\.\d+)*)'", text, re.M)
+    return match.group(1) if match else None
+
+
+def version_key(version) -> tuple | None:
+    match = re.fullmatch(r'v?(\d+(?:\.\d+)*)', str(version or '').strip())
+    if not match:
+        return None
+    parts = [int(p) for p in match.group(1).split('.')]
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    return tuple(parts)
+
+
+def should_take_over(mine, theirs) -> bool:
+    """A newer Control Center replaces a running older one. Those from before
+    the handover existed report no version, so they count as older."""
+    mine_key = version_key(mine)
+    if mine_key is None:
+        return False
+    theirs_key = version_key(theirs)
+    return theirs_key is None or theirs_key < mine_key
+
+
+RUNTIME_VERSION = engine_version(SAVER_SCRIPT)
+
+
 def parse_utc(value) -> float | None:
     """Parse .NET round-trip timestamps (7 fractional digits) to epoch seconds."""
     if not isinstance(value, str):
@@ -697,6 +732,12 @@ class App:
         self.heartbeat = None
         self.stop_event = threading.Event()
         self.server = None
+        # Open pages poll with their own id and send a beacon when their window closes.
+        self.version = RUNTIME_VERSION
+        self.instance = secrets.token_hex(6)  # Pages reload when this changes (an update took over).
+        self.pages = set()
+        self.close_at = None
+        self.pages_lock = threading.Lock()
 
     def save_prefs(self):
         write_json_atomic(self.prefs_path, self.prefs)
@@ -706,6 +747,26 @@ class App:
         if self.server:
             self.server.shutdown()
 
+    def page_seen(self, page: str):
+        if page:
+            with self.pages_lock:
+                self.pages.add(page)
+                self.close_at = None
+
+    def page_closed(self, page: str, now: float | None = None):
+        with self.pages_lock:
+            if page not in self.pages:
+                return  # Only a window this Control Center served can close it.
+            self.pages.discard(page)
+            if not self.pages:
+                self.close_at = (time.time() if now is None else now) + WINDOW_CLOSE_GRACE_SEC
+
+    def window_close_due(self, now: float) -> bool:
+        """The last window closed and none reopened within the grace period.
+        A page that vanishes without its beacon keeps the Control Center running."""
+        with self.pages_lock:
+            return self.close_at is not None and not self.pages and now >= self.close_at
+
     def names(self) -> dict:
         hb = self.heartbeat if isinstance(self.heartbeat, dict) else {}
         return {a.get('accountId'): a.get('username') for a in hb.get('accounts') or [] if a.get('accountId') and a.get('username')}
@@ -713,6 +774,15 @@ class App:
     def loop(self):
         while not self.stop_event.is_set():
             now = time.time()
+            if self.window_close_due(now):
+                # Closing the window exits like Stop farm & quit, saver included.
+                self.supervisor.stop()
+                with self.pages_lock:
+                    reopened = bool(self.pages)
+                if not reopened:
+                    self.shutdown()
+                    return
+                self.supervisor.start()  # A window came back while the saver stopped: carry on.
             self.heartbeat = read_json(self.data / 'runtime-status.json')
             try:
                 self.supervisor.tick(self.heartbeat, now)
@@ -760,7 +830,8 @@ class App:
                 'health', 'recovery', 'logFailed', 'updateAvailable')}
             view['pagefile'] = {k: (hb.get('pagefile') or {}).get(k) for k in ('status', 'reason', 'pendingReboot')}
         return {
-            'app': APP_ID, 'now': now, 'dataDirectory': str(self.data), 'supervisor': sup,
+            'app': APP_ID, 'version': self.version, 'instance': self.instance, 'windows': len(self.pages),
+            'now': now, 'dataDirectory': str(self.data), 'supervisor': sup,
             'prefs': dict(self.prefs, startWithWindows=startup_enabled()),
             'heartbeat': view, 'heartbeatAgeSec': age,
             'history': [{k: v for k, v in p.items() if k != 'hb'} for p in self.history if p['t'] > since],
@@ -850,8 +921,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(500, b'Arkuzo-Control-Center.html is missing next to the Control Center.', 'text/plain; charset=utf-8')
             return self._send(200, html.encode('utf-8'), 'text/html; charset=utf-8')
         if url.path == '/api/ping':
-            return self._send(200, {'app': APP_ID})
+            return self._send(200, {'app': APP_ID, 'version': self.app.version, 'instance': self.app.instance})
         if url.path == '/api/state':
+            self.app.page_seen((query.get('page') or [''])[0][:64])
             try:
                 since = float((query.get('since') or ['0'])[0])
                 events = int((query.get('events') or ['0'])[0])
@@ -872,16 +944,26 @@ class Handler(BaseHTTPRequestHandler):
         if length > 262144:
             return self._send(413, {'error': 'Request too large'})
         raw = self.rfile.read(length) if length else b''  # Drain before any reply.
-        if not self._host_ok() or not secrets.compare_digest(self.headers.get('X-Arkuzo-Token', ''), self.app.token):
+        if not self._host_ok():
             return self._send(403, {'error': 'forbidden'})
         try:
             body = json.loads(raw or b'{}')
             if not isinstance(body, dict):
                 raise ValueError
         except ValueError:
-            return self._send(400, {'error': 'Invalid JSON'})
+            body = None
         app, path = self.app, urllib.parse.urlparse(self.path).path
+        token = self.headers.get('X-Arkuzo-Token', '')
+        if not token and path == '/api/window-closed' and body:
+            token = str(body.get('token') or '')  # A closing window can only send a beacon, which has no headers.
+        if not secrets.compare_digest(token.encode('utf-8', 'replace'), app.token.encode('ascii')):
+            return self._send(403, {'error': 'forbidden'})
+        if body is None:
+            return self._send(400, {'error': 'Invalid JSON'})
         try:
+            if path == '/api/window-closed':
+                app.page_closed(str(body.get('page') or '')[:64])
+                return self._send(200, {'result': 'noted'})
             if path == '/api/saver/start':
                 return self._send(200, {'result': app.supervisor.start()})
             if path == '/api/saver/stop':
@@ -958,18 +1040,65 @@ def default_data_directory() -> Path:
     return RUNTIME.parent.parent / 'data'
 
 
-def already_running(port: int) -> bool:
+def _fetch(port: int, path: str, timeout=5.0, body: bytes | None = None, headers=None) -> bytes:
+    req = urllib.request.Request(f'http://127.0.0.1:{port}{path}', data=body, headers=headers or {}, method='POST' if body is not None else 'GET')
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        return response.read()
+
+
+def running_control_center(port: int) -> dict | None:
     try:
-        with urllib.request.urlopen(f'http://127.0.0.1:{port}/api/ping', timeout=1.5) as response:
-            return json.loads(response.read()).get('app') == APP_ID
+        info = json.loads(_fetch(port, '/api/ping', timeout=1.5))
     except (OSError, ValueError):
-        return False
+        return None
+    return info if isinstance(info, dict) and info.get('app') == APP_ID else None
+
+
+def already_running(port: int) -> bool:
+    return running_control_center(port) is not None
+
+
+def take_over(port: int, data: Path, wait_sec=40.0) -> dict | None:
+    """Replaces an older Control Center that serves the same data folder: it is
+    asked to quit like Settings > Quit app, stopping its saver, and the port is
+    freed. Returns what the new one needs to carry on, or None to leave it be."""
+    info = running_control_center(port)
+    if not info or not should_take_over(RUNTIME_VERSION, info.get('version')):
+        return None
+    try:
+        state = json.loads(_fetch(port, '/api/state'))
+        theirs = str(state.get('dataDirectory') or '')
+        if not theirs or os.path.normcase(str(Path(theirs).resolve())) != os.path.normcase(str(data)):
+            return None
+        sup = state.get('supervisor') or {}
+        age = state.get('heartbeatAgeSec')
+        saver_running = sup.get('state') in ('running', 'starting', 'restarting', 'external') or (
+            isinstance(age, (int, float)) and age <= HEARTBEAT_FRESH_SEC)
+        page = _fetch(port, '/').decode('utf-8', 'replace')
+        token = re.search(r"const TOKEN = '([A-Za-z0-9_\-]+)'", page)
+        if not token:
+            return None
+        # The old saver runs the old engine, so it stops here and restarts from this version.
+        _fetch(port, '/api/quit', timeout=60, body=b'{"stopSaver": true}',
+               headers={'Content-Type': 'application/json', 'X-Arkuzo-Token': token.group(1)})
+    except (OSError, ValueError, AttributeError):
+        return None
+    deadline = time.monotonic() + wait_sec
+    while already_running(port) and time.monotonic() < deadline:
+        time.sleep(0.25)
+    if already_running(port):
+        return None
+    return {'from': info.get('version'), 'saverWasRunning': saver_running, 'windowsOpen': int(state.get('windows') or 0)}
+
+
+def make_server(app: App) -> ThreadingHTTPServer:
+    server = ThreadingHTTPServer(('127.0.0.1', app.port), type('BoundHandler', (Handler,), {'app': app}))
+    server.daemon_threads = True
+    return server
 
 
 def serve(app: App):
-    Handler.app = app
-    app.server = ThreadingHTTPServer(('127.0.0.1', app.port), Handler)
-    app.server.daemon_threads = True
+    app.server = make_server(app)
     threading.Thread(target=app.loop, daemon=True).start()
     app.server.serve_forever(poll_interval=0.5)
 
@@ -983,20 +1112,34 @@ def main(argv=None):
     data = (args.data or default_data_directory()).resolve()
     data.mkdir(parents=True, exist_ok=True)
     url = f'http://127.0.0.1:{args.port}/'
+    handover = None
     if already_running(args.port):
-        if not args.background:
-            open_window(url)
-        return 0
+        handover = take_over(args.port, data)
+        if handover is None:  # Same or newer version, or another data folder: just show it.
+            if not args.background:
+                open_window(url)
+            return 0
     app = App(data, args.port)
-    if not args.background:
+    if handover:
+        # Keep the saver as it was: running stays running (now on this engine), stopped stays stopped.
+        app.supervisor.initial_start = handover['saverWasRunning']
+        before = f"v{handover['from']}" if handover['from'] else 'an earlier version'
+        app.feed.add({'t': time.time(), 'kind': 'SUPERVISOR', 'category': 'saver', 'level': 'info',
+                      'text': f'Control Center updated from {before} to v{RUNTIME_VERSION}'})
+    # Windows of the replaced Control Center reload onto this one by themselves.
+    if not args.background and not (handover and handover['windowsOpen']):
         threading.Timer(0.6, open_window, args=(url,)).start()
-    try:
-        serve(app)
-    except OSError as exc:
-        print(f'Control Center could not listen on 127.0.0.1:{args.port}: {exc}', file=sys.stderr)
-        return 1
-    except KeyboardInterrupt:
-        pass
+    for attempt in range(40):
+        try:
+            serve(app)
+            break
+        except OSError as exc:
+            if not handover or attempt == 39:  # Right after a handover the port can take a moment to free.
+                print(f'Control Center could not listen on 127.0.0.1:{args.port}: {exc}', file=sys.stderr)
+                return 1
+            time.sleep(0.25)
+        except KeyboardInterrupt:
+            break
     return 0
 
 

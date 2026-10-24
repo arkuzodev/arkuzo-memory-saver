@@ -2,7 +2,7 @@
 
 Changes for **Arkuzo Memory Saver with Volt Integration** are recorded here.
 
-## Unreleased
+## v2.1.0 — Arkuzo Client style
 
 - **Control Center in the Arkuzo Client's own style:** rebuilt from the client's theme values: eight themes (Graphite, Midnight, Obsidian, Nord, Ember, Forest, Plum, Frost) with its ten accents, beveled cards with accent glow and film grain, keycaps, the client's vector icons and its boot intro.
 - **The window stays on screen:** long pages scroll inside the window instead of pushing it past the bottom edge.

@@ -201,8 +201,11 @@ class SupervisorTests(unittest.TestCase):
                 self.assertEqual(len(self.launched), n + 1)
         self.assertEqual(sup.state, 'crashed')
         self.assertTrue(sup.crash_loop)
-        sup.tick(None, now + 3600)
-        self.assertEqual(len(self.launched), cc.CRASH_LOOP_LIMIT, 'crash loop pauses autopilot')
+        sup.tick(None, now + cc.CRASH_LOOP_RETRY_SEC - 5)
+        self.assertEqual(len(self.launched), cc.CRASH_LOOP_LIMIT, 'a crash loop backs off to slow retries')
+        self.assertIsNotNone(sup.snapshot(now)['restartInSec'], 'the slow retry is visible')
+        sup.tick(None, now + cc.CRASH_LOOP_RETRY_SEC + 1)
+        self.assertEqual(len(self.launched), cc.CRASH_LOOP_LIMIT + 1, 'autopilot never gives up on the farm for good')
 
     def test_operator_stop_is_respected(self):
         sup = self.make()
@@ -226,6 +229,16 @@ class SupervisorTests(unittest.TestCase):
         sup.tick(self.heartbeat(proc, start + 5), late)
         self.assertTrue(proc.killed)
         self.assertEqual(sup.state, 'restarting')
+
+    def test_hang_kill_names_the_stalled_phase(self):
+        sup = self.make()
+        start = time.time()
+        sup.tick(None, start)
+        proc = self.launched[0]
+        (self.data / 'saver-stall.json').write_text(json.dumps({'pid': proc.pid, 'phase': 'client 6372: first contact', 'stalledSec': 200}))
+        sup.tick(self.heartbeat(proc, start + 5), start + cc.START_GRACE_SEC + cc.HANG_SEC + 10)
+        self.assertTrue(proc.killed)
+        self.assertIn("client 6372: first contact", sup.message)
 
     def test_autopilot_off_does_not_restart(self):
         sup = self.make(autopilot=False)

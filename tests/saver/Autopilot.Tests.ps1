@@ -115,8 +115,30 @@ try {
     Write-Output 'PASS: heartbeat publishes settings, totals, alerts and quarantine'
 } finally { Remove-Item -LiteralPath $scratch -Recurse -Force }
 
+# Stall watchdog: compiled from the production source, observed on its own timer thread.
+$watchdogType=$ast.Find({param($n) $n -is [Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Add-Type' -and $n.Extent.Text -match 'LoopWatchdogV1'},$true)
+Assert ($null -ne $watchdogType) 'Watchdog type definition exists'
+. ([scriptblock]::Create($watchdogType.Extent.Text))
+$stallFile=Join-Path ([IO.Path]::GetTempPath()) ('stall-'+[guid]::NewGuid().ToString('N')+'.json')
+try {
+    [Arkuzo.LoopWatchdogV1]::Start($stallFile, 1)
+    [Arkuzo.LoopWatchdogV1]::Mark('client 42: first contact')
+    Start-Sleep -Milliseconds 6500  # The timer checks every 5 seconds.
+    Assert (Test-Path -LiteralPath $stallFile) 'A blocked phase is written while the main thread is busy'
+    $stall=[IO.File]::ReadAllText($stallFile)|ConvertFrom-Json
+    Assert ($stall.phase -eq 'client 42: first contact' -and $stall.stalledSec -ge 1 -and $stall.pid -eq $PID) 'Stall file names the phase, duration and process'
+    Assert ($null -eq [Arkuzo.LoopWatchdogV1]::TakeRecovered()) 'No recovery is reported while still stalled'
+    [Arkuzo.LoopWatchdogV1]::Mark('idle')
+    $recovered=[Arkuzo.LoopWatchdogV1]::TakeRecovered()
+    Assert ($recovered -like 'client 42: first contact|*') 'The ended stall is reported once with its phase'
+    Assert ($null -eq [Arkuzo.LoopWatchdogV1]::TakeRecovered()) 'A recovered stall is reported only once'
+} finally { Remove-Item -LiteralPath $stallFile -Force -ErrorAction SilentlyContinue }
+Write-Output 'PASS: stall watchdog reports blocked phase from its own thread, then recovery once'
+
 # Production wiring.
 $text=$ast.Extent.Text
+Assert (([regex]::Matches($text,'Get-CimInstance Win32_Process[^\r\n]*')|Where-Object { $_.Value -notmatch '-OperationTimeoutSec' }).Count -eq 0) 'Every Win32_Process query is time-bounded'
+Assert ($text -match "LoopWatchdogV1\]::Start\(\(Join-Path \`$DataDirectory 'saver-stall\.json'\), 60\)" -and ([regex]::Matches($text,'LoopWatchdogV1\]::Mark\(')).Count -ge 12) 'Watchdog is armed and the loop marks its phases'
 Assert ($text -match "'MemoryPriority'\s*\{\s*#\s*Only change what can be restored" -and $text -match 'SetMemoryPriority\(\$Client\.Handle, \[uint32\]\$State\.MemoryPriority\)') 'Memory priority is applied and restored'
 Assert ($text -match '\$trimPlan = Get-ArkuzoTrimPlan' -and $text -match '-ge \$trimPlan\.IntervalSec') 'Trim loop uses the adaptive plan'
 Assert ($text -match 'Update-ArkuzoLiveSettings \$pendingLiveSettings') 'Main loop applies live settings'

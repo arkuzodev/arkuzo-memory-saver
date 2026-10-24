@@ -47,6 +47,8 @@ START_GRACE_SEC = 150
 STABLE_RESET_SEC = 600
 CRASH_LOOP_WINDOW_SEC = 1800
 CRASH_LOOP_LIMIT = 8
+# After a crash loop, keep trying slowly: an unmanaged farm is worse than a retry.
+CRASH_LOOP_RETRY_SEC = 600
 
 # Mirrors Get-ArkuzoPresets in the engine; tests cross-check the two.
 PRESETS = {
@@ -553,9 +555,10 @@ class Supervisor:
                         if now - self.proc_started > STABLE_RESET_SEC:
                             self.failures = 0
                     elif now - self.proc_started > START_GRACE_SEC and silent > HANG_SEC:
+                        phase = self.stall_phase(self.proc.pid)
                         self.proc.kill()
                         self.proc = None
-                        self._record_failure(now, f'Saver stopped responding for {int(silent)}s and was terminated.')
+                        self._record_failure(now, f'Saver stopped responding for {int(silent)}s{phase} and was terminated.')
                     elif self.state != 'running':
                         self.state, self.message = 'starting', 'Saver starting...'
                     else:
@@ -568,8 +571,9 @@ class Supervisor:
                     self.state, self.message = 'external', 'Saver running (started outside the Control Center).'
                     return
                 if ext['age'] is not None and ext['age'] > HANG_SEC and autopilot and not self.operator_stopped:
+                    phase = self.stall_phase(ext['pid'])
                     if WIN32.terminate(ext['pid'], ext['ticks']):
-                        self._record_failure(now, f"Saver PID {ext['pid']} stopped responding and was terminated.")
+                        self._record_failure(now, f"Saver PID {ext['pid']} stopped responding{phase} and was terminated.")
                     return
                 self.state, self.message = 'external', 'Saver is running but its heartbeat is late.'
                 return
@@ -580,23 +584,36 @@ class Supervisor:
                 self.message = 'Saver stopped by operator.' if self.operator_stopped else 'Saver is not running.'
             return self._maybe_restart(now, heartbeat, autopilot)
 
+    def stall_phase(self, pid: int) -> str:
+        """' while <phase>' from the saver's own stall watchdog, if it wrote one."""
+        stall = read_json(self.data / 'saver-stall.json')
+        if isinstance(stall, dict) and int(stall.get('pid') or 0) == pid and stall.get('phase'):
+            return f" while busy with '{str(stall['phase'])[:80]}'"
+        return ''
+
     def _record_failure(self, now: float, message: str):
         self.failures += 1
         self.crashes.append(now)
         self.next_restart = now + restart_delay(self.failures)
         recent = [t for t in self.crashes if now - t <= CRASH_LOOP_WINDOW_SEC]
         self.crash_loop = len(recent) >= CRASH_LOOP_LIMIT
+        if self.crash_loop:
+            self.next_restart = now + CRASH_LOOP_RETRY_SEC
         autopilot = bool(self.prefs.get('autopilot', True))
         self.state = 'restarting' if autopilot and not self.crash_loop else 'crashed'
         if self.crash_loop:
-            message += ' Autopilot paused: too many crashes, check the saver log.'
+            message += ' Repeated failures: retrying every 10 minutes; see the saver log.' if autopilot else ' Repeated failures.'
         elif not autopilot:
             message += ' Autopilot is off.'
         self.message = message
         self.feed.add({'t': now, 'kind': 'SUPERVISOR', 'category': 'error', 'level': 'critical', 'text': self.message})
 
     def _maybe_restart(self, now, heartbeat, autopilot):
-        if self.proc is not None or self.operator_stopped or self.crash_loop:
+        if self.proc is not None or self.operator_stopped:
+            return
+        if self.crash_loop:
+            if autopilot and now >= self.next_restart and not self.external(heartbeat, now):
+                self.start('autopilot')
             return
         if self.initial_start:
             self.initial_start = False
@@ -614,7 +631,7 @@ class Supervisor:
                 'state': self.state, 'message': self.message, 'pid': self.proc.pid if self.proc else None,
                 'autopilot': bool(self.prefs.get('autopilot', True)), 'operatorStopped': self.operator_stopped,
                 'failures': self.failures, 'crashLoop': self.crash_loop, 'lastExit': self.last_exit,
-                'restartInSec': max(0, round(self.next_restart - now)) if self.state == 'restarting' else None,
+                'restartInSec': max(0, round(self.next_restart - now)) if self.state == 'restarting' or (self.state == 'crashed' and self.crash_loop) else None,
             }
 
 
@@ -626,13 +643,17 @@ def derive_issues(hb, age, supervisor_state) -> list:
         issues.append({'level': level, 'title': title, 'detail': detail})
 
     if supervisor_state.get('crashLoop'):
-        add('critical', 'Autopilot paused after repeated saver crashes', 'Check data/Arkuzo-Logs/saver-console.log, then press Start.')
+        add('critical', 'The saver keeps failing', (supervisor_state.get('message') or '') + ' Press Start to retry now.')
     if not isinstance(hb, dict):
         if supervisor_state.get('state') not in ('stopped',):
             add('warning', 'No saver heartbeat yet')
         return issues
-    if age is not None and age > HEARTBEAT_FRESH_SEC and supervisor_state.get('state') != 'stopped':
-        add('warning', f'Saver heartbeat is {int(age)}s old', 'The saver may be busy with Volt or recovery IO.')
+    if age is not None and age > HEARTBEAT_FRESH_SEC:
+        if supervisor_state.get('state') in ('running', 'external', 'starting'):
+            add('warning', f'Saver heartbeat is {int(age)}s old', 'The saver may be busy with Volt or recovery IO.')
+        else:
+            add('warning', 'Saver is not running: figures below are its last report',
+                time.strftime('Last report %H:%M:%S', time.localtime(time.time() - age)) + '. Clients are not being managed or recovered.')
     if hb.get('logFailed'):
         add('critical', 'Saver audit logging failed', 'Destructive recovery is blocked until the saver restarts.')
     if not hb.get('recoveryJournalHealthy'):

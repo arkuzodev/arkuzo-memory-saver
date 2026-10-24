@@ -2,6 +2,13 @@
 
 Changes for **Arkuzo Memory Saver with Volt Integration** are recorded here.
 
+## Unreleased
+
+- **Saver no longer freezes on a stalled WMI query:** every `Win32_Process`/`Win32_ComputerSystem` query now times out after 5 s. On 23 Oct, a freeze while all clients were unresponsive left the farm unmanaged overnight.
+- **Stall watchdog:** a background timer records which step the saver is blocked in (`data/saver-stall.json`). The Control Center names that step when it restarts a hung saver, and the saver logs `SAVER_STALL_RECOVERED` when a long step ends.
+- **Autopilot never gives up for good:** after repeated failures it retries every 10 minutes instead of pausing until someone presses Start.
+- **Stale data is marked:** when the saver isn't reporting, the dashboard dims the figures and says they're its last report, instead of showing them as live.
+
 ## v1.2.0 — Control Center & Autopilot
 
 ### Control Center (new)

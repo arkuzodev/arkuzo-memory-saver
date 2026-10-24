@@ -59,7 +59,7 @@ function Get-Process {
     throw $missing
 }
 function Get-CimInstance {
-    param($ClassName, $Filter, $Property, $ErrorAction)
+    param($ClassName, $Filter, $Property, $OperationTimeoutSec, $ErrorAction)
     $script:fixture.Queries++
     if ($Filter -like '*RobloxCrashHandler*' -and $script:fixture.MultipleCandidates) {
         return @([pscustomobject]@{ProcessId=[uint32]4141},[pscustomobject]@{ProcessId=[uint32]4242})

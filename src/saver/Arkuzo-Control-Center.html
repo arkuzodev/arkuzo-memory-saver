@@ -174,6 +174,7 @@ td.r, th.r { text-align: right; }
 .membar > i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 999px; background: var(--s1); }
 .membar > b { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--ink-2); border-radius: 1px; }
 .empty-state { padding: 36px 16px; text-align: center; color: var(--muted); }
+.stale { opacity: 0.5; filter: grayscale(0.6); transition: opacity 0.2s; }
 .empty-state strong { display: block; color: var(--ink); font-size: 15px; margin-bottom: 4px; }
 @media (max-width: 900px) { .hide-sm { display: none; } .membar { width: 80px; } }
 
@@ -435,7 +436,7 @@ function renderHeader(st) {
   $('saverPill').title = sup.message || '';
   let meta = '';
   if ((sup.state === 'running' || sup.state === 'external') && hb) meta = 'up ' + fmtDur(hb.uptimeSec);
-  else if (sup.state === 'restarting' && sup.restartInSec != null) meta = 'in ' + sup.restartInSec + 's';
+  else if ((sup.state === 'restarting' || sup.state === 'crashed') && sup.restartInSec != null) meta = 'retry in ' + fmtDur(sup.restartInSec);
   $('saverMeta').textContent = meta;
   const live = ['running', 'external', 'starting'].includes(sup.state);
   $('btnStart').hidden = live;
@@ -739,6 +740,10 @@ async function poll() {
     if (st.history.length) { S.history.push(...st.history); const cut = st.now - 3700; while (S.history.length && S.history[0].t < cut) S.history.shift(); }
     if (st.events.length) { S.events.push(...st.events); S.lastEvent = st.events[st.events.length - 1].id; if (S.events.length > 400) S.events.splice(0, S.events.length - 400); }
     renderHeader(st); renderIssues(st); renderKpis(st); renderClients(st); renderAccounts(st); renderFeed(); redrawCharts();
+    // A report the saver stopped refreshing must not look live.
+    const stale = !st.heartbeat || st.heartbeatAgeSec == null || st.heartbeatAgeSec > 15;
+    for (const node of [$('kpis'), $('clients').closest('.card'), $('accounts').closest('.card')]) node.classList.toggle('stale', stale);
+    $('clientsSub').textContent = stale && st.heartbeat ? 'last report, not live' : $('clientsSub').textContent;
     const hb = st.heartbeat;
     $('footVersion').textContent = hb ? `Saver v${hb.version} · PID ${hb.pid}` : 'Saver offline';
     $('footData').textContent = 'Data: ' + st.dataDirectory;

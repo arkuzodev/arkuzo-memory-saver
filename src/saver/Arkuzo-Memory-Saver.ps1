@@ -48,7 +48,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$ArkuzoRuntimeVersion = '1.2.0'
+$ArkuzoRuntimeVersion = '2.0.0'
 # Explicit CLI values win over config, including later hot reloads.
 $cliBoundParameters = @($PSBoundParameters.Keys)
 # Resolve persistent data independently of the versioned program files.
@@ -1148,7 +1148,7 @@ function Test-ArkuzoTargetRecovery($Watcher, [int]$ClientId, [long]$StartTicks) 
         if (-not (Test-ArkuzoClientIdentity $Watcher $ClientId $StartTicks)) { return $false }
         $trackerId = $null
         try {
-            $records = @(Get-CimInstance Win32_Process -Filter "ProcessId=$ClientId" -ErrorAction Stop)
+            $records = @(Get-CimInstance Win32_Process -Filter "ProcessId=$ClientId" -OperationTimeoutSec 5 -ErrorAction Stop)
             if ($records.Count -eq 1 -and $records[0].ProcessId -eq $ClientId -and $records[0].Name -eq 'RobloxPlayerBeta.exe' -and $records[0].CommandLine -is [string]) {
                 $trackerId = Get-ArkuzoBrowserTrackerId $records[0].CommandLine
             }
@@ -3040,6 +3040,59 @@ namespace Arkuzo {
 '@
 }
 
+if (-not ('Arkuzo.LoopWatchdogV1' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Threading;
+namespace Arkuzo {
+ // Runs on a thread-pool timer, so it can still report while the main loop is
+ // blocked. The loop marks each phase; a phase older than the threshold is
+ // written to the stall file for the supervisor and the next session.
+ public static class LoopWatchdogV1 {
+  static Timer timer;
+  static string path;
+  static int threshold = 60;
+  static string phase = "starting";
+  static long markTicks = DateTime.UtcNow.Ticks;
+  static string stalledPhase;
+  static double stalledSec;
+  static string recovered;
+  static readonly object gate = new object();
+  public static void Start(string stallPath, int thresholdSec) {
+   lock (gate) { path = stallPath; threshold = thresholdSec; }
+   Mark("starting");
+   if (timer == null) timer = new Timer(Check, null, 5000, 5000);
+  }
+  public static void Mark(string next) {
+   lock (gate) {
+    if (stalledPhase != null) { recovered = stalledPhase + "|" + Math.Round(stalledSec); stalledPhase = null; }
+    phase = next; markTicks = DateTime.UtcNow.Ticks;
+   }
+  }
+  // "phase|seconds" of a stall that has ended since the last call, else null.
+  public static string TakeRecovered() { lock (gate) { var r = recovered; recovered = null; return r; } }
+  static void Check(object state) {
+   string current, target; double age;
+   lock (gate) {
+    age = (DateTime.UtcNow.Ticks - markTicks) / (double)TimeSpan.TicksPerSecond;
+    if (age < threshold || path == null) return;
+    stalledPhase = phase; stalledSec = age; current = phase; target = path;
+   }
+   try {
+    var now = DateTime.UtcNow;
+    var json = "{\"pid\":" + System.Diagnostics.Process.GetCurrentProcess().Id +
+     ",\"phase\":\"" + current.Replace("\\", "\\\\").Replace("\"", "'") + "\"" +
+     ",\"stalledSec\":" + Math.Round(age) +
+     ",\"sinceUtc\":\"" + now.AddSeconds(-age).ToString("o") + "\",\"updatedUtc\":\"" + now.ToString("o") + "\"}";
+    File.WriteAllText(target, json);
+   } catch { }
+  }
+ }
+}
+'@
+}
+
 function Get-ArkuzoConsoleInputModeMask([int]$CurrentMode) {
     # Clear ENABLE_QUICK_EDIT_MODE (0x0040) and ENABLE_INSERT_MODE (0x0020)
     # Set ENABLE_EXTENDED_FLAGS (0x0080) so changes take effect
@@ -3245,7 +3298,7 @@ $voltControlCheckedUtc = [datetime]::MinValue
 $nextOutcomeCheck = 0.0; $nextPolicyCheck = 0.0; $nextRuntimeHeartbeat = 0.0
 $quarantinedAccounts = @{}; $pendingLiveSettings = $null; $lastTotals = $null; $trimPlan = $null
 $trimNowSignalPath = Join-Path $DataDirectory 'trim-now.signal'
-try { $totalPhysicalMB = [math]::Round([double](Get-CimInstance Win32_ComputerSystem -Property TotalPhysicalMemory -ErrorAction Stop).TotalPhysicalMemory / 1MB, 1) }
+try { $totalPhysicalMB = [math]::Round([double](Get-CimInstance Win32_ComputerSystem -Property TotalPhysicalMemory -OperationTimeoutSec 5 -ErrorAction Stop).TotalPhysicalMemory / 1MB, 1) }
 catch { $totalPhysicalMB = 0 } # Adaptive trimming then keeps the configured interval.
 $controllerStartTicks = ([Diagnostics.Process]::GetCurrentProcess()).StartTime.ToUniversalTime().Ticks
 if (-not $StopFile -and -not $MonitorOnly) { $StopFile = Join-Path $DataDirectory 'controller.stop' }
@@ -3907,6 +3960,7 @@ try {
         $controllerMutex = New-Object Threading.Mutex($false, 'Local\ArkuzoSaver-ProcessController')
         try { $ownsControllerMutex = $controllerMutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $ownsControllerMutex = $true }
         if (-not $ownsControllerMutex) { throw 'Another ArkuzoSaver controller is already running.' }
+        [Arkuzo.LoopWatchdogV1]::Start((Join-Path $DataDirectory 'saver-stall.json'), 60)
         Initialize-ArkuzoNativePrivileges | Out-Null
         Initialize-ArkuzoGraphicsSettings
         Initialize-ArkuzoRecoveryJournal
@@ -3914,6 +3968,13 @@ try {
         Sync-ArkuzoAutoexecSignals
     }
     while ($true) {
+        [Arkuzo.LoopWatchdogV1]::Mark('loop: executor signals')
+        $recoveredStall = [Arkuzo.LoopWatchdogV1]::TakeRecovered()
+        if ($recoveredStall) {
+            $stallParts = $recoveredStall.Split('|')
+            Write-Diagnostic 'SAVER_STALL_RECOVERED' @{ phase = $stallParts[0]; stalledSec = [double]$stallParts[1] }
+            Warn-Throttled 'saver-stall' ("Saver was blocked for $($stallParts[1])s during '$($stallParts[0])'.")
+        }
         Process-ArkuzoExecutorSignals
         $swPhase = [Diagnostics.Stopwatch]::StartNew()
         Invoke-ArkuzoHealthObservation
@@ -3926,6 +3987,7 @@ try {
         if (($StopFile -and (Test-Path -LiteralPath $StopFile)) -or (Test-Path -LiteralPath (Join-Path $DataDirectory 'stop.signal'))) { break }
         if ($clock.Elapsed.TotalSeconds -ge $nextPolicyCheck) {
             $swPhase = [Diagnostics.Stopwatch]::StartNew()
+            [Arkuzo.LoopWatchdogV1]::Mark('policy reload')
             Update-ArkuzoLivePolicy
             if ($null -ne $pendingLiveSettings) { Update-ArkuzoLiveSettings $pendingLiveSettings; $pendingLiveSettings = $null }
             Sync-ArkuzoAutoexecSignals
@@ -3946,6 +4008,7 @@ try {
         }
         if ($clock.Elapsed.TotalSeconds -ge $nextPagefileCheck) {
             $swPhase = [Diagnostics.Stopwatch]::StartNew()
+            [Arkuzo.LoopWatchdogV1]::Mark('pagefile check')
             Update-ArkuzoPagefileStatus
             if ($pagefilePolicy.enabled) {
                 try { $systemMemory = Get-ArkuzoSystemMemory } catch { $systemMemory=$null; Warn-Throttled 'memory-query' 'OS commit telemetry unavailable after pagefile observation.' }
@@ -3958,6 +4021,7 @@ try {
         }
         Poll-ArkuzoVoltControlAsync
         if ($clock.Elapsed.TotalSeconds -ge $nextVoltCheck) {
+            [Arkuzo.LoopWatchdogV1]::Mark('Volt status')
             Update-VoltRecoveryCapability
             Start-ArkuzoVoltControlStatusAsync
             $nextVoltCheck = $clock.Elapsed.TotalSeconds + 15
@@ -3985,6 +4049,7 @@ try {
         $totalResident = [int64]0
         $totalPrivate = [int64]0
         foreach ($client in $clients) {
+            [Arkuzo.LoopWatchdogV1]::Mark('client ' + $client.Id + ': sample')
             Invoke-ArkuzoHealthObservation
             $id = $null
             try {
@@ -4005,6 +4070,7 @@ try {
                 if ($tracked.ContainsKey($id) -and $tracked[$id].StartTicks -ne $ticks) { Record-ClientExit $id $tracked[$id] 'PID reused'; $tracked.Remove($id); if ($script:accountNameCache.ContainsKey($id)) { $script:accountNameCache.Remove($id) } }
                 # Manage clients even while loading or with no visible window.
                 if (-not $tracked.ContainsKey($id)) {
+                    [Arkuzo.LoopWatchdogV1]::Mark('client ' + $id + ': first contact')
                     $slot = 0
                     $taken = @($tracked.Values | ForEach-Object { $_.Slot })
                     while ($taken -contains $slot) { $slot++ }
@@ -4022,7 +4088,7 @@ try {
                         GameReady = $false; EverGameReady = $false; StartupGameHistory = 'UNKNOWN'; GameLogScanned = $false; LogPath = $null; LogOffset = [int64]0; TrackerId = $null; isDisconnected = $false; DisconnectReason = $null
                     }
                     try {
-                        $procRecord = Get-CimInstance Win32_Process -Filter "ProcessId=$id" -ErrorAction Stop
+                        $procRecord = Get-CimInstance Win32_Process -Filter "ProcessId=$id" -OperationTimeoutSec 5 -ErrorAction Stop
                         $state.ParentId = [int]$procRecord.ParentProcessId
                         if ($procRecord.CommandLine) {
                             $state.TrackerId = Get-ArkuzoBrowserTrackerId $procRecord.CommandLine
@@ -4062,7 +4128,7 @@ try {
                     }
                     if ($state.ParentId -le 0) {
                         try {
-                            $procRecord = Get-CimInstance Win32_Process -Filter "ProcessId=$id" -ErrorAction Stop
+                            $procRecord = Get-CimInstance Win32_Process -Filter "ProcessId=$id" -OperationTimeoutSec 5 -ErrorAction Stop
                             $state.ParentId = [int]$procRecord.ParentProcessId
                             if ($procRecord.CommandLine -and [string]::IsNullOrWhiteSpace($state.TrackerId)) {
                                 $state.TrackerId = Get-ArkuzoBrowserTrackerId $procRecord.CommandLine
@@ -4144,6 +4210,7 @@ try {
                 if ($client.MainWindowHandle -eq [IntPtr]::Zero) { $status = 'LOADING' }
                 elseif ([Arkuzo.MemorySaverNativeV1]::IsIconic($client.MainWindowHandle)) { $status = 'MINIMIZED' }
                 if (-not $isResponding -and $window -ne [IntPtr]::Zero) { $status = 'NOT RESPONDING' }
+                [Arkuzo.LoopWatchdogV1]::Mark('client ' + $id + ': game log')
                 if ($null -eq $state.LogPath) {
                     $state.LogPath = Find-RobloxProcessLog -TargetProcessId $id -TrackerId $state.TrackerId -StartTimeUtc $client.StartTime.ToUniversalTime()
                     if ($null -ne $state.LogPath) {
@@ -4173,6 +4240,7 @@ try {
                 }
                 # Log discovery/tailing may have been slow. Recollect window/memory
                 # evidence and timestamp it after IO, never reuse the earlier probe.
+                [Arkuzo.LoopWatchdogV1]::Mark('client ' + $id + ': health probe')
                 $healthSample = Get-ArkuzoRecoveryHealthSample $client $(if ($state.isDisconnected) { 'IN_GAME_DISCONNECT' } else { '' }) $state
                 $healthSample.systemCommitPercent = if ($null -ne $systemMemory) { $systemMemory.commitPercent } else { 0 }
                 $healthSample.eligible = (-not $MonitorOnly -and $healthPolicy.enabled -and $voltStatus.safeToRecycle -and (Test-ArkuzoVoltOwnership $state.ParentId $script:voltParents[$state.ParentId] $state.StartTicks $voltPath))
@@ -4215,10 +4283,12 @@ try {
         $lastTotals = @{ detected = $clients.Count; managed = $tracked.Count; cpuPercent = [Math]::Round($totalCpu, 2)
             residentMB = [Math]::Round($totalResident / 1MB, 1); privateMB = [Math]::Round($totalPrivate / 1MB, 1) }
         if ($clock.Elapsed.TotalSeconds -ge $nextOutcomeCheck) {
+            [Arkuzo.LoopWatchdogV1]::Mark('recovery outcomes')
             Update-ArkuzoRecoveryOutcomes
             $nextOutcomeCheck = $clock.Elapsed.TotalSeconds + 10
         }
         if ($clock.Elapsed.TotalSeconds -ge $nextRuntimeHeartbeat) {
+            [Arkuzo.LoopWatchdogV1]::Mark('heartbeat')
             Write-ArkuzoRuntimeStatus
             # Two seconds keeps the Control Center live; the file is small.
             $nextRuntimeHeartbeat = $clock.Elapsed.TotalSeconds + 2
@@ -4235,6 +4305,7 @@ try {
                 # target must not starve a startup error with its own safe budget.
                 Warn-Throttled 'recovery-budget' 'Recovery cooldown/hourly budget reached. No restart storm.'; continue
             }
+            [Arkuzo.LoopWatchdogV1]::Mark('recovering client ' + $candidate.Key)
             Invoke-ClientRecovery $candidate.Key $candidate.Value
             if ($candidate.Value.RecoveryRequested) { break }
         }
@@ -4248,6 +4319,7 @@ try {
             $nextLogSample = $clock.Elapsed.TotalSeconds + $LogEverySec
         }
         if ($clock.Elapsed.TotalSeconds -ge $nextEventCheck) {
+            [Arkuzo.LoopWatchdogV1]::Mark('crash events and handlers')
             Read-CrashEvents
             try {
                 # WerFault is Windows-wide crash reporting and is deliberately never enumerated or modified.
@@ -4261,7 +4333,7 @@ try {
                     )) {
                         if (-not [string]::IsNullOrWhiteSpace($base.Path)) { $trustedHandlerRoots += Join-Path $base.Path $base.Child }
                     }
-                    foreach ($listedHandler in @(Get-CimInstance Win32_Process -Filter "Name='RobloxCrashHandler.exe'" -Property ProcessId -ErrorAction Stop)) {
+                    foreach ($listedHandler in @(Get-CimInstance Win32_Process -Filter "Name='RobloxCrashHandler.exe'" -Property ProcessId -OperationTimeoutSec 5 -ErrorAction Stop)) {
                         $ch = $null; $owner = $null; $handlerId = $null; $phase = 'OpenHandle'
                         try {
                             $handlerId = [int]$listedHandler.ProcessId
@@ -4276,7 +4348,7 @@ try {
                             foreach ($verification in 1..2) {
                                 if ($null -ne $owner) { $owner.Dispose(); $owner = $null }
                                 $phase = 'IdentityAndParentVerification'
-                                $records = @(Get-CimInstance Win32_Process -Filter ("ProcessId=" + $handlerId) -Property ProcessId,Name,ExecutablePath,ParentProcessId -ErrorAction Stop)
+                                $records = @(Get-CimInstance Win32_Process -Filter ("ProcessId=" + $handlerId) -Property ProcessId,Name,ExecutablePath,ParentProcessId -OperationTimeoutSec 5 -ErrorAction Stop)
                                 if ($records.Count -ne 1) { throw 'Crash handler metadata unavailable/ambiguous' }
                                 $record = $records[0]
                                 $signature = Get-AuthenticodeSignature -LiteralPath $expected.Path -ErrorAction Stop
@@ -4291,7 +4363,7 @@ try {
                                 $parentId = $handler.ParentId
                                 if ($parentId -le 0 -or $parentId -eq $handlerId) { throw 'Crash handler parent identity unavailable' }
                                 # Only a successful, empty CIM query proves absence. Access errors are unknown.
-                                $parents = @(Get-CimInstance Win32_Process -Filter ("ProcessId=" + $parentId) -Property ProcessId,CreationDate -ErrorAction Stop)
+                                $parents = @(Get-CimInstance Win32_Process -Filter ("ProcessId=" + $parentId) -Property ProcessId,CreationDate -OperationTimeoutSec 5 -ErrorAction Stop)
                                 $parent = @{QuerySucceeded=$true;Count=$parents.Count;Id=$parentId}
                                 if ($parents.Count -eq 0) {
                                     # A missing WMI row alone cannot hide a live/inaccessible parent.
@@ -4389,6 +4461,7 @@ try {
             $key = [Console]::ReadKey($true)
             if ($key.Key -eq [ConsoleKey]::Q) { break }
         }
+        [Arkuzo.LoopWatchdogV1]::Mark('idle')
         Start-Sleep -Milliseconds $PollMs
     }
 } catch {

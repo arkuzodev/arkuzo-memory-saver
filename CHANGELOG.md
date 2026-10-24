@@ -2,6 +2,11 @@
 
 Changes for **Arkuzo Memory Saver with Volt Integration** are recorded here.
 
+## v2.1.1 — Control Center fixes
+
+- **No more black bars:** the Control Center fills its app window edge to edge. It used to stop at 1560px wide and keep 22px of padding on every side.
+- **One logo, not two:** the ARKUZO banner had the logo mark built in, so it repeated the logo tile beside it in the sidebar and on the intro. The banner is now the lettering only.
+
 ## v2.1.0 — Arkuzo Client style
 
 - **Control Center in the Arkuzo Client's own style:** rebuilt from the client's theme values: eight themes (Graphite, Midnight, Obsidian, Nord, Ember, Forest, Plum, Frost) with its ten accents, beveled cards with accent glow and film grain, keycaps, the client's vector icons and its boot intro.

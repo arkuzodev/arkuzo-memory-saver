@@ -48,7 +48,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$ArkuzoRuntimeVersion = '2.1.0'
+$ArkuzoRuntimeVersion = '2.1.1'
 # Explicit CLI values win over config, including later hot reloads.
 $cliBoundParameters = @($PSBoundParameters.Keys)
 # Resolve persistent data independently of the versioned program files.

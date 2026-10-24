@@ -8,6 +8,7 @@ Changes for **Arkuzo Memory Saver with Volt Integration** are recorded here.
 - **Stall watchdog:** a background timer records which step the saver is blocked in (`data/saver-stall.json`). The Control Center names that step when it restarts a hung saver, and the saver logs `SAVER_STALL_RECOVERED` when a long step ends.
 - **Autopilot never gives up for good:** after repeated failures it retries every 10 minutes instead of pausing until someone presses Start.
 - **Stale data is marked:** when the saver isn't reporting, the dashboard dims the figures and says they're its last report, instead of showing them as live.
+- **Control Center redesigned in the Arkuzo Client look:** graphite glass panels, the Arkuzo logo and wordmark, a FARM/TOOLS sidebar with live counts, Ctrl+F search across clients, accounts and activity, client-style performance cards, a clients list with a detail pane, a console-style activity log, stacked toasts, a Live/Paused switch, keyboard page switching (1–5) and the client's ten accent colours.
 
 ## v1.2.0 — Control Center & Autopilot
 

@@ -2,6 +2,8 @@ import importlib.util
 import json
 import re
 import shutil
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -313,6 +315,28 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(self.request('/api/trim-now', {}, token=self.app.token)[0], 200)
         self.assertTrue((self.data / 'trim-now.signal').exists())
 
+    def test_ping_and_state_report_version_and_instance(self):
+        status, ping = self.request('/api/ping')
+        self.assertEqual(status, 200)
+        self.assertEqual(ping['version'], cc.RUNTIME_VERSION)
+        self.assertEqual(ping['instance'], self.app.instance)
+        _, state = self.request('/api/state')
+        self.assertEqual((state['version'], state['instance']), (cc.RUNTIME_VERSION, self.app.instance))
+
+    def test_window_close_beacon_carries_its_token_in_the_body(self):
+        self.request('/api/state?page=win1')
+        self.assertIn('win1', self.app.pages)
+        self.assertEqual(self.request('/api/window-closed', {'page': 'win1', 'token': 'wrong'})[0], 403)
+        self.assertEqual(self.request('/api/trim-now', {'token': self.app.token})[0], 403, 'only the beacon may put its token in the body')
+        self.app.pages.clear()
+        self.request('/api/state?page=win1')
+        status, _ = self.request('/api/window-closed', {'page': 'win1', 'token': self.app.token})
+        self.assertEqual(status, 200)
+        self.assertIsNotNone(self.app.close_at, 'closing the last window schedules the quit')
+        self.request('/api/state?page=win2')
+        self.assertIsNone(self.app.close_at, 'a reloaded page cancels it')
+        self.app.pages.clear()
+
     def test_config_round_trip_with_backup(self):
         status, body = self.request('/api/config', {'changes': {'settings': {'target_ram_mb': 500}}}, token=self.app.token)
         self.assertEqual(status, 200)
@@ -321,6 +345,170 @@ class HttpTests(unittest.TestCase):
         status, body = self.request('/api/config', {'changes': {'settings': {'target_ram_mb': 5}}}, token=self.app.token)
         self.assertEqual(status, 400)
         self.assertIn('between', body['error'])
+
+
+class VersionTests(unittest.TestCase):
+    def test_engine_version_is_read_from_the_engine(self):
+        stamped = re.search(r"^\$ArkuzoRuntimeVersion = '([\d.]+)'", ENGINE.read_text(encoding='utf-8-sig'), re.M).group(1)
+        self.assertEqual(cc.RUNTIME_VERSION, stamped)
+        self.assertIsNone(cc.engine_version(ROOT / 'missing.ps1'))
+
+    def test_only_a_newer_version_takes_over(self):
+        self.assertTrue(cc.should_take_over('2.1.2', '2.1.1'))
+        self.assertTrue(cc.should_take_over('v2.10.0', '2.9.9'))
+        self.assertTrue(cc.should_take_over('2.1.2', None), 'Control Centers from before the handover report no version')
+        self.assertFalse(cc.should_take_over('2.1.2', '2.1.2'))
+        self.assertFalse(cc.should_take_over('2.1', '2.1.0'))
+        self.assertFalse(cc.should_take_over('2.1.2', '3.0.0'))
+        self.assertFalse(cc.should_take_over(None, '1.0.0'), 'an unknown own version never takes over')
+
+
+class WindowCloseTests(unittest.TestCase):
+    def setUp(self):
+        self.data = Path(tempfile.mkdtemp())
+        self.app = cc.App(self.data, 48698)
+        self.stops = []
+        self.app.supervisor.stop = lambda wait_sec=25.0: self.stops.append(wait_sec)
+
+    def tearDown(self):
+        shutil.rmtree(self.data)
+
+    def test_quits_only_after_the_last_window_closes_and_stays_closed(self):
+        now = time.time()
+        self.assertFalse(self.app.window_close_due(now + 3600), 'no window yet (started with Windows): keep running')
+        self.app.page_seen('a')
+        self.app.page_seen('b')
+        self.app.page_closed('a', now)
+        self.assertFalse(self.app.window_close_due(now + 3600), 'another window is still open')
+        self.app.page_closed('b', now)
+        self.assertFalse(self.app.window_close_due(now + cc.WINDOW_CLOSE_GRACE_SEC - 1), 'a reload gets a grace period')
+        self.assertTrue(self.app.window_close_due(now + cc.WINDOW_CLOSE_GRACE_SEC))
+        self.app.page_seen('c')
+        self.assertFalse(self.app.window_close_due(now + 3600), 'the reloaded page cancels the quit')
+        self.app.page_closed('never-seen', now)
+        self.assertFalse(self.app.window_close_due(now + 3600), 'a page this instance never served cannot close it')
+
+    def test_loop_stops_the_saver_and_exits_when_due(self):
+        self.app.page_seen('a')
+        self.app.page_closed('a', time.time() - cc.WINDOW_CLOSE_GRACE_SEC - 1)
+        worker = threading.Thread(target=self.app.loop, daemon=True)
+        worker.start()
+        worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(self.stops), 1, 'the saver is stopped cleanly, like Stop farm & quit')
+        self.assertTrue(self.app.stop_event.is_set())
+
+    def test_a_window_reopened_while_the_saver_stops_keeps_it_running(self):
+        starts = []
+        self.app.supervisor.initial_start = False
+        self.app.supervisor.start = lambda reason='operator': starts.append(reason)
+        def stop(wait_sec=25.0):
+            self.stops.append(wait_sec)
+            self.app.supervisor.operator_stopped = True  # As the real stop does.
+            self.app.page_seen('reopened')  # The user opened the window again during the stop.
+            self.app.stop_event.set()  # End the loop after this pass.
+        self.app.supervisor.stop = stop
+        self.app.page_seen('a')
+        self.app.page_closed('a', time.time() - cc.WINDOW_CLOSE_GRACE_SEC - 1)
+        self.app.loop()
+        self.assertEqual((len(self.stops), len(starts)), (1, 1), 'the saver comes back')
+        self.assertIsNone(self.app.server, 'and the Control Center never shut down')
+
+
+class TakeoverTests(unittest.TestCase):
+    port = 48690
+
+    def setUp(self):
+        TakeoverTests.port += 1
+        self.data = Path(tempfile.mkdtemp()).resolve()
+        (self.data / 'config.json').write_text('{}', encoding='utf-8')
+        self.old = cc.App(self.data, self.port)
+        self.old.version = '1.0.0'
+        self.old.supervisor.initial_start = False
+        self.old.server = cc.make_server(self.old)
+        threading.Thread(target=self.old.server.serve_forever, kwargs={'poll_interval': 0.1}, daemon=True).start()
+
+    def tearDown(self):
+        self.old.server.shutdown()
+        self.old.server.server_close()
+        shutil.rmtree(self.data)
+
+    def test_an_older_control_center_on_the_same_data_is_replaced(self):
+        self.old.page_seen('open-window')
+        self.old.supervisor.state = 'running'
+        result = cc.take_over(self.port, self.data, wait_sec=10)
+        self.assertEqual(result, {'from': '1.0.0', 'saverWasRunning': True, 'windowsOpen': 1})
+        self.assertTrue(self.old.stop_event.is_set(), 'the old Control Center quit')
+        self.assertTrue((self.data / 'controller.stop').exists(), 'and stopped its saver the clean way')
+
+    def test_a_control_center_without_a_version_is_replaced(self):
+        self.old.version = None
+        result = cc.take_over(self.port, self.data, wait_sec=10)
+        self.assertIsNotNone(result)
+        self.assertEqual((result['from'], result['saverWasRunning']), (None, False))
+
+    def test_same_or_newer_version_is_left_running(self):
+        for version in (cc.RUNTIME_VERSION, '99.0.0'):
+            self.old.version = version
+            self.assertIsNone(cc.take_over(self.port, self.data, wait_sec=2))
+            self.assertTrue(cc.already_running(self.port))
+            self.assertFalse(self.old.stop_event.is_set())
+
+    def test_another_data_folder_is_left_running(self):
+        self.assertIsNone(cc.take_over(self.port, self.data / 'elsewhere', wait_sec=2))
+        self.assertTrue(cc.already_running(self.port))
+
+
+class ProcessHandoverTests(unittest.TestCase):
+    """Real processes: an old Control Center keeps the port until a newer one starts."""
+
+    def setUp(self):
+        self.work = Path(tempfile.mkdtemp()).resolve()
+        self.data = self.work / 'data'
+        self.data.mkdir()
+        (self.data / 'config.json').write_text('{}', encoding='utf-8')
+        # No saver processes in this test: the old one never starts one.
+        (self.data / 'control-center.json').write_text(json.dumps({'autopilot': False, 'startSaverOnLaunch': False}), encoding='utf-8')
+        self.old_dir = self.work / 'old'
+        self.old_dir.mkdir()
+        for name in ('Arkuzo-Control-Center.py', 'Arkuzo-Control-Center.html'):
+            shutil.copyfile(SOURCE.parent / name, self.old_dir / name)
+        (self.old_dir / 'Arkuzo-Memory-Saver.ps1').write_text("$ArkuzoRuntimeVersion = '1.0.0'\n", encoding='utf-8')
+        self.procs = []
+
+    def tearDown(self):
+        for proc in self.procs:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(10)
+        shutil.rmtree(self.work, ignore_errors=True)
+
+    def start(self, script, port):
+        proc = subprocess.Popen([sys.executable, '-I', str(script), '--data', str(self.data), '--port', str(port), '--background'],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.procs.append(proc)
+        return proc
+
+    def wait_for(self, port, version, seconds=20):
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            info = cc.running_control_center(port)
+            if info and info.get('version') == version:
+                return info
+            time.sleep(0.2)
+        self.fail(f'no Control Center {version} on port {port}')
+
+    def test_newer_process_takes_over_the_port(self):
+        port = 48689
+        old = self.start(self.old_dir / 'Arkuzo-Control-Center.py', port)
+        self.wait_for(port, '1.0.0')
+        new = self.start(SOURCE, port)
+        self.wait_for(port, cc.RUNTIME_VERSION, seconds=60)
+        self.assertEqual(old.wait(30), 0, 'the old Control Center exited cleanly')
+        self.assertIsNone(new.poll(), 'the new one keeps serving')
+        replay = self.start(self.old_dir / 'Arkuzo-Control-Center.py', port)
+        self.assertEqual(replay.wait(30), 0, 'an older one started later just opens the newer one')
+        self.assertEqual(cc.running_control_center(port)['version'], cc.RUNTIME_VERSION)
 
 
 if __name__ == '__main__':

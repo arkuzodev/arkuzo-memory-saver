@@ -487,7 +487,7 @@ body.light .console li.warning .txt { color: #92400e; } body.light .console li.c
             <div class="card-b">
               <div class="field"><label class="name" for="pAutopilot">Keep the saver running</label><span class="hint2">Restart it with backoff after a crash, exit or hang.</span><div class="ctl"><label class="sw"><input type="checkbox" id="pAutopilot"><span class="track"></span></label></div></div>
               <div class="field"><label class="name" for="pLaunch">Start saver with the Control Center</label><span class="hint2">Manage clients as soon as this app opens.</span><div class="ctl"><label class="sw"><input type="checkbox" id="pLaunch"><span class="track"></span></label></div></div>
-              <div class="field"><label class="name" for="pWindows">Start with Windows</label><span class="hint2">Runs in the background at sign-in.</span><div class="ctl"><label class="sw"><input type="checkbox" id="pWindows"><span class="track"></span></label></div></div>
+              <div class="field"><label class="name" for="pWindows">Start with Windows</label><span class="hint2">Starts the farm when you sign in.</span><div class="ctl"><label class="sw"><input type="checkbox" id="pWindows"><span class="track"></span></label></div></div>
             </div>
           </article>
         </div>
@@ -497,7 +497,7 @@ body.light .console li.warning .txt { color: #92400e; } body.light .console li.c
         </article>
         <form id="settingsForm" class="set-grid" novalidate></form>
         <article class="card">
-          <div class="card-h"><span class="cap">Application</span></div>
+          <div class="card-h"><span class="cap">Application</span><span class="card-s">Closing this window stops the saver and quits, like Stop farm &amp; quit.</span></div>
           <div class="card-b" style="display:flex;gap:8px;flex-wrap:wrap">
             <button class="btn" id="btnQuit" title="Close the Control Center; the saver keeps running"><span data-icon="x"></span>Quit Control Center</button>
             <button class="btn danger" id="btnQuitAll"><span data-icon="power"></span>Stop farm &amp; quit</button>
@@ -1000,13 +1000,21 @@ function renderAll() {
   const stale = isStale(st);
   for (const id of ['kpis', 'ovClientsCard', 'clientsCard', 'accountsCard']) $(id).classList.toggle('stale', stale);
 }
+// Each open window registers with its id; closing the last one quits the Control Center cleanly.
+const PAGE_ID = Math.random().toString(36).slice(2, 12);
+addEventListener('pagehide', () => {
+  try { navigator.sendBeacon('/api/window-closed', new Blob([JSON.stringify({ page: PAGE_ID, token: TOKEN })], { type: 'text/plain' })); } catch (e) { /* best effort */ }
+});
 async function poll() {
   try {
     const since = S.history.length ? S.history[S.history.length - 1].t : 0;
-    const r = await fetch(`/api/state?since=${since}&events=${S.lastEvent}`, { cache: 'no-store' });
+    const r = await fetch(`/api/state?since=${since}&events=${S.lastEvent}&page=${PAGE_ID}`, { cache: 'no-store' });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const st = await r.json();
     $('offline').hidden = true;
+    // A newer Control Center took over (update): load its page and token.
+    if (S.instance && st.instance && st.instance !== S.instance) { location.reload(); return; }
+    S.instance = st.instance;
     S.state = st;
     if (st.history.length) { S.history.push(...st.history); const cut = st.now - 3700; while (S.history.length && S.history[0].t < cut) S.history.shift(); }
     if (st.events.length) { S.events.push(...st.events); S.lastEvent = st.events[st.events.length - 1].id;

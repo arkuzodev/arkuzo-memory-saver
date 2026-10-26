@@ -100,7 +100,7 @@ EVENT_KINDS = {
     'SESSION_START': 'saver', 'SESSION_STOP': 'saver', 'SAVER_FATAL_ERROR': 'error',
     'CLIENT_START': 'client', 'CLIENT_EXIT': 'client', 'CLIENT_STATE_CHANGED': 'client',
     'CLIENT_LOG_DISCONNECT_DETECTED': 'recovery', 'EXECUTOR_KICK_SIGNAL_TRIGGERED': 'recovery',
-    'RECOVERY_REQUESTED': 'recovery', 'CLIENT_CLOSED_FOR_RECOVERY': 'recovery', 'ACCOUNT_RESTORED_VERIFIED': 'recovery',
+    'RECOVERY_REQUESTED': 'recovery', 'CLIENT_CLOSED_FOR_RECOVERY': 'recovery', 'EXITED_CLIENT_RECOVERY_QUEUED': 'recovery', 'ACCOUNT_RESTORED_VERIFIED': 'recovery',
     'VOLT_MISSING_LAUNCH_REQUEST': 'recovery', 'VOLT_MISSING_LAUNCH_RESULT': 'recovery', 'MISSING_ACCOUNT_DETECTED': 'recovery',
     'RECOVERY_OUTCOME_STATE': 'recovery', 'RECOVERY_QUARANTINED': 'recovery', 'RECOVERY_CANCELLED_BY_POLICY': 'recovery',
     'LAUNCH_REFUSED_DEAD_COOKIE': 'recovery', 'COOKIE_ACCOUNT_SUSPENDED': 'recovery', 'COOKIE_ACCOUNT_RESUMED': 'recovery',
@@ -364,6 +364,8 @@ def summarize_event(record: dict, names: dict) -> dict | None:
         level, text = 'good', f"{who()} restored and back in game"
     elif kind == 'MISSING_ACCOUNT_DETECTED':
         level, text = 'warning', f"{who()} is missing; relaunch queued"
+    elif kind == 'EXITED_CLIENT_RECOVERY_QUEUED':
+        level, text = 'warning', f"{who()} closed after a disconnect; relaunch queued"
     elif kind == 'VOLT_MISSING_LAUNCH_REQUEST':
         text = f"Asked Volt to launch {who()} (attempt {data.get('attempt')})"
     elif kind == 'VOLT_MISSING_LAUNCH_RESULT':

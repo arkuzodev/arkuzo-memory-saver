@@ -133,6 +133,9 @@ class FeedTests(unittest.TestCase):
         self.assertIsNone(cc.summarize_event({'event': 'WORKING_SET_TRIM', 'data': {'pid': 1}}, names))
         self.assertIsNone(cc.summarize_event({'event': 'CLIENT_STATE_CHANGED', 'data': {'sample': {'state': 'WINDOW OPEN'}}}, names))
         self.assertIsNotNone(cc.summarize_event({'event': 'CLIENT_STATE_CHANGED', 'data': {'sample': {'state': 'STUCK CLIENT', 'pid': 4}}}, names))
+        queued = cc.summarize_event({'time': '2026-10-26T13:44:14Z', 'event': 'EXITED_CLIENT_RECOVERY_QUEUED', 'data': {'accountId': 'a', 'pid': 4856}}, names)
+        self.assertEqual((queued['level'], queued['category']), ('warning', 'recovery'))
+        self.assertIn('Farmer01 closed after a disconnect', queued['text'])
 
     def test_log_tail_follows_new_lines_and_sessions(self):
         folder = Path(tempfile.mkdtemp())

@@ -3369,6 +3369,36 @@ function Record-ClientExit([int]$ClientId, $State, [string]$Reason = 'No longer 
         reason = $Reason; lastSample = $State.LastSnapshot; recoveryRequested = [bool]$State.RecoveryRequested
         note = 'An exit alone does not prove a crash; correlate with Windows events.'
     }
+    Register-ArkuzoExitedClientRecovery $ClientId $State
+}
+function Register-ArkuzoExitedClientRecovery([int]$ClientId, $State) {
+    # When a whole server kicks the farm, recovery is serialized and most kicked
+    # clients close themselves before their turn. Their accounts still need the
+    # bounded Volt relaunch, independent of restore_missing: the exit becomes a
+    # pending handoff instead of a silently missing account.
+    if ($MonitorOnly -or -not $ownsControllerMutex -or -not $restorePolicy.enabled -or -not $recoveryJournalHealthy -or $script:recoveryJournalCorrupt) { return }
+    if ($null -eq $State -or $State.RecoveryRequested) { return }
+    $recycle = $null -ne $State.HealthDecision -and $State.HealthDecision.Recycle
+    if (-not $State.isDisconnected -and -not $recycle) { return }
+    $key = [string]$State.BoundAccountId
+    if ($key -notmatch '\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\z' -or $recoveryPending.ContainsKey($key)) { return }
+    if ($restorePolicy.excluded_account_ids -contains $key -or ($null -ne $script:suspendedAccounts -and $script:suspendedAccounts.ContainsKey($key))) { return }
+    $utc = [datetime]::UtcNow
+    if (Test-ArkuzoAccountQuarantined $key $utc) { return }
+    $entry = New-ArkuzoPendingEntry $key ([string]$State.BoundTrackerId) $ClientId ([long]$State.StartTicks)
+    # The client is already gone: Volt's own relaunch gets restore_wait_sec from now.
+    $entry.closedUtc = $utc.ToString('o')
+    $previous = $recoveryPending.Clone()
+    try {
+        $script:recoveryPending[$key] = $entry
+        Save-ArkuzoRecoveryJournal
+        $why = if ($State.isDisconnected) { 'IN_GAME_DISCONNECT' } else { [string]$State.HealthDecision.Reason }
+        Write-Diagnostic 'EXITED_CLIENT_RECOVERY_QUEUED' @{ accountId = $key; pid = $ClientId; startTicks = $State.StartTicks; reason = $why; disconnectReason = $State.DisconnectReason
+            note = 'Client closed itself before its recovery turn; its account is queued for a bounded Volt relaunch.' }
+    } catch {
+        $script:recoveryPending = $previous; $script:recoveryJournalHealthy = $false
+        Warn-Throttled 'recovery-journal' 'Recovery outcome persistence/audit failed. Destructive recovery blocked.'
+    }
 }
 # Pure crash-handler authorization; snapshots contain no process operations.
 function Test-ArkuzoCrashHandlerIdentity($Snapshot, [string[]]$TrustedRoots) {
@@ -4086,6 +4116,7 @@ try {
                         LastCpu = $client.TotalProcessorTime.TotalSeconds; CpuTime = $clock.Elapsed.TotalSeconds
                         HangSince = -1.0; StartupErrorSince = -1.0; DisconnectSince = -1.0; ParentId = 0; HealthDecision = $null; RecoveryRequested = $false
                         GameReady = $false; EverGameReady = $false; StartupGameHistory = 'UNKNOWN'; GameLogScanned = $false; LogPath = $null; LogOffset = [int64]0; TrackerId = $null; isDisconnected = $false; DisconnectReason = $null
+                        BoundAccountId = $null; BoundTrackerId = $null
                     }
                     try {
                         $procRecord = Get-CimInstance Win32_Process -Filter "ProcessId=$id" -OperationTimeoutSec 5 -ErrorAction Stop
@@ -4097,7 +4128,10 @@ try {
                     if ($state.TrackerId) {
                         try {
                             $bound = Get-ArkuzoControlledAccount $state.TrackerId $id
-                            if ($null -ne $bound) { $script:sessionObservedAccounts[[string]$bound.accountId] = $true }
+                            if ($null -ne $bound) {
+                                $script:sessionObservedAccounts[[string]$bound.accountId] = $true
+                                $state.BoundAccountId = [string]$bound.accountId; $state.BoundTrackerId = [string]$bound.trackerId
+                            }
                         } catch { }
                     }
                     $tracked[$id] = $state
@@ -4142,7 +4176,10 @@ try {
                     if ($state.TrackerId) {
                         try {
                             $bound = Get-ArkuzoControlledAccount $state.TrackerId $id
-                            if ($null -ne $bound) { $script:sessionObservedAccounts[[string]$bound.accountId] = $true }
+                            if ($null -ne $bound) {
+                                $script:sessionObservedAccounts[[string]$bound.accountId] = $true
+                                $state.BoundAccountId = [string]$bound.accountId; $state.BoundTrackerId = [string]$bound.trackerId
+                            }
                         } catch { }
                     }
                 }
@@ -4249,6 +4286,14 @@ try {
                 $window = $client.MainWindowHandle
                 $state.HealthDecision = Get-ArkuzoHealthDecision $state $healthSample $healthPolicy $sampleTime
                 if ($state.HealthDecision.Status) { $status = $state.HealthDecision.Status }
+                # Bind the exact Volt account while it is still verifiable: a kicked client
+                # often closes itself before its turn in the serialized recovery queue.
+                if (-not $state.BoundAccountId -and $state.TrackerId -and ($state.isDisconnected -or $state.HealthDecision.Recycle)) {
+                    try {
+                        $bound = Get-ArkuzoControlledAccount $state.TrackerId $id
+                        if ($null -ne $bound) { $state.BoundAccountId = [string]$bound.accountId; $state.BoundTrackerId = [string]$bound.trackerId }
+                    } catch { }
+                }
                 $clientAgeSec = ([DateTime]::UtcNow - $client.StartTime.ToUniversalTime()).TotalSeconds
                 $nextTrimText = Get-ArkuzoTrimCountdown $clientAgeSec $healthPolicy.warmup_sec $trimPlan.IntervalSec $sampleTime $state.LastTrim ([bool]$EnableTrimming) ([bool]$MonitorOnly)
                 $clientIssues = @($dashboardIssues.Keys | Where-Object { $_ -eq [string]$id -or $_ -like "$id-*" })

@@ -2,7 +2,7 @@
 
 Changes for **Arkuzo Memory Saver with Volt Integration** are recorded here.
 
-## Unreleased
+## v2.1.3 — Kicked clients come back
 
 - **Kicked clients that close themselves are relaunched:** when a server kicks the whole farm at once, the saver recovers clients one at a time, and most kicked clients close themselves before their turn. Those exits used to leave the accounts missing for good unless `restore_missing` was on. Now each one is queued for the same bounded, verified Volt relaunch as any other recovery. On 26 Oct this left 6 of 7 accounts offline after one kick.
 

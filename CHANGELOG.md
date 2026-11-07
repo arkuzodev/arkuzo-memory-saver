@@ -2,6 +2,13 @@
 
 Changes for **Arkuzo Memory Saver with Volt Integration** are recorded here.
 
+## Unreleased
+
+- **The Control Center no longer kills a healthy saver.** One unreadable heartbeat (the saver replaces the file every 2 s) made the supervisor measure silence from the saver's start, so after 150 s any bad read killed it as "stopped responding for <session age>" (217 s, 836 s and 12,849 s on 24 Oct; the two unexplained saver restarts on 26 Oct with the farm running fit the same pattern). Silence now counts from the last heartbeat seen, a briefly missing file is retried, waking from sleep gives the saver time to write again, and a briefly unreadable heartbeat is no verdict on a saver started elsewhere (after 2 minutes the normal check applies again).
+- **Supervisor actions are logged** to `data/Arkuzo-Logs/control-center.log`, so a stop, restart or kill can be explained afterwards.
+- **Clients that quit while frozen are relaunched.** When every client freezes at once (in the logs, each Chrome Remote Desktop disconnect while clients were running was followed by such a freeze), they quit after about three minutes while still in hang grace. Those exits are now queued for the same bounded, verified Volt relaunch as kicked clients, even with `restore_missing` off.
+- **Closing the window quits after an update too.** A page left from the replaced Control Center polled once before reloading and stayed registered as an open window, so closing the real window never quit. Only pages of the current Control Center register now, and registrations from older pages expire after 3 minutes without a poll.
+
 ## v2.1.3 — Kicked clients come back
 
 - **Kicked clients that close themselves are relaunched:** when a server kicks the whole farm at once, the saver recovers clients one at a time, and most kicked clients close themselves before their turn. Those exits used to leave the accounts missing for good unless `restore_missing` was on. Now each one is queued for the same bounded, verified Volt relaunch as any other recovery. On 26 Oct this left 6 of 7 accounts offline after one kick.

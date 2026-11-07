@@ -1008,7 +1008,7 @@ addEventListener('pagehide', () => {
 async function poll() {
   try {
     const since = S.history.length ? S.history[S.history.length - 1].t : 0;
-    const r = await fetch(`/api/state?since=${since}&events=${S.lastEvent}&page=${PAGE_ID}`, { cache: 'no-store' });
+    const r = await fetch(`/api/state?since=${since}&events=${S.lastEvent}&page=${PAGE_ID}&inst=${S.instance || ''}`, { cache: 'no-store' });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const st = await r.json();
     $('offline').hidden = true;

@@ -49,8 +49,13 @@ CRASH_LOOP_WINDOW_SEC = 1800
 CRASH_LOOP_LIMIT = 8
 # After a crash loop, keep trying slowly: an unmanaged farm is worse than a retry.
 CRASH_LOOP_RETRY_SEC = 600
+# A pause this long in the 2 s supervisor loop means the PC slept or stalled; that is not the saver's silence.
+SUSPEND_GAP_SEC = 30
 # After the last window closes the Control Center quits; a page reload reconnects well within this.
 WINDOW_CLOSE_GRACE_SEC = 8
+# Open windows poll every 2 s (a minimized, throttled one about once a minute). A page id
+# not seen for this long belongs to a window that is gone, e.g. one reloaded after an update.
+PAGE_STALE_SEC = 180
 
 # Mirrors Get-ArkuzoPresets in the engine; tests cross-check the two.
 PRESETS = {
@@ -161,12 +166,15 @@ def parse_utc(value) -> float | None:
     return base.replace(tzinfo=tz).timestamp() + frac
 
 
-def read_json(path: Path):
+def read_json(path: Path, retry_missing=False):
+    # retry_missing: the file is replaced, never deleted, so a brief absence is a replace in flight.
     for _ in range(3):
         try:
             return json.loads(path.read_text(encoding='utf-8-sig'))
         except FileNotFoundError:
-            return None
+            if not retry_missing:
+                return None
+            time.sleep(0.05)
         except (OSError, ValueError):
             time.sleep(0.05)  # Atomic replace in progress or a transient lock.
     return None
@@ -365,7 +373,8 @@ def summarize_event(record: dict, names: dict) -> dict | None:
     elif kind == 'MISSING_ACCOUNT_DETECTED':
         level, text = 'warning', f"{who()} is missing; relaunch queued"
     elif kind == 'EXITED_CLIENT_RECOVERY_QUEUED':
-        level, text = 'warning', f"{who()} closed after a disconnect; relaunch queued"
+        why = {'IN_GAME_DISCONNECT': 'disconnected', 'UNRESPONSIVE_EXIT': 'frozen', 'SUSTAINED_HANG': 'frozen'}.get(data.get('reason'), 'waiting for recovery')
+        level, text = 'warning', f"{who()} closed while {why}; relaunch queued"
     elif kind == 'VOLT_MISSING_LAUNCH_REQUEST':
         text = f"Asked Volt to launch {who()} (attempt {data.get('attempt')})"
     elif kind == 'VOLT_MISSING_LAUNCH_RESULT':
@@ -421,6 +430,21 @@ class LogTail:
             self.seq += 1
             event['id'] = self.seq
             self.events.append(event)
+        if event.get('kind') == 'SUPERVISOR':
+            self._persist(event)
+
+    def _persist(self, event: dict):
+        """Supervisor actions (starts, stops, kills) outlive the Control Center for diagnosis."""
+        try:
+            self.directory.mkdir(parents=True, exist_ok=True)
+            path = self.directory / 'control-center.log'
+            if path.exists() and path.stat().st_size > 1048576:
+                path.replace(self.directory / 'control-center.previous.log')
+            stamp = time.strftime('%Y-%m-%dT%H:%M:%S', time.localtime(event.get('t') or time.time()))
+            with open(path, 'a', encoding='utf-8') as out:
+                out.write(json.dumps({'time': stamp, 'level': event.get('level'), 'text': event.get('text')}, ensure_ascii=False) + '\n')
+        except OSError:
+            pass  # Diagnostics never stop supervision.
 
     def poll(self, names: dict):
         try:
@@ -487,6 +511,10 @@ class Supervisor:
         self.next_restart = 0.0
         self.crash_loop = False
         self.last_exit = None
+        self.last_beat = None   # updatedUtc of the newest heartbeat from our own saver process.
+        self.last_tick = None
+        self.resume_grace_until = 0.0
+        self.unreadable_since = None  # When the heartbeat file last turned unreadable.
         self.lock = threading.RLock()
 
     # -- launching
@@ -538,6 +566,7 @@ class Supervisor:
             self._clear_stop_signals()
             self.proc = self.launcher()
             self.proc_started = time.time()
+            self.last_beat = None
             self.state = 'starting'
             self.message = 'Saver starting...'
             text = {'autopilot': 'Autopilot restarted the saver', 'launch': 'Saver started with the Control Center'}.get(reason, 'Saver started from the Control Center')
@@ -573,6 +602,15 @@ class Supervisor:
         now = time.time() if now is None else now
         with self.lock:
             autopilot = bool(self.prefs.get('autopilot', True))
+            if self.last_tick is not None and now - self.last_tick > SUSPEND_GAP_SEC:
+                # After sleep or a stall every heartbeat looks old; give the saver time to write a new one.
+                self.resume_grace_until = now + HANG_SEC
+            self.last_tick = now
+            if heartbeat is None:
+                if self.unreadable_since is None:
+                    self.unreadable_since = now
+            else:
+                self.unreadable_since = None
             if self.proc is not None:
                 code = self.proc.poll()
                 if code is not None:
@@ -585,13 +623,17 @@ class Supervisor:
                 else:
                     hb_pid = int(heartbeat.get('pid') or 0) if isinstance(heartbeat, dict) else 0
                     updated = parse_utc(heartbeat.get('updatedUtc')) if isinstance(heartbeat, dict) else None
-                    fresh = hb_pid == self.proc.pid and updated is not None and now - updated <= HEARTBEAT_FRESH_SEC
-                    silent = now - (updated if hb_pid == self.proc.pid and updated else self.proc_started)
+                    if hb_pid == self.proc.pid and updated is not None:
+                        self.last_beat = updated if self.last_beat is None else max(self.last_beat, updated)
+                    # Silence counts from the last heartbeat ever seen, so one unreadable or
+                    # replaced-in-flight sample never looks like silence since the saver started.
+                    fresh = self.last_beat is not None and now - self.last_beat <= HEARTBEAT_FRESH_SEC
+                    silent = now - (self.last_beat if self.last_beat is not None else self.proc_started)
                     if fresh:
                         self.state, self.message = 'running', 'Saver running under autopilot.' if autopilot else 'Saver running.'
                         if now - self.proc_started > STABLE_RESET_SEC:
                             self.failures = 0
-                    elif now - self.proc_started > START_GRACE_SEC and silent > HANG_SEC:
+                    elif now - self.proc_started > START_GRACE_SEC and silent > HANG_SEC and now >= self.resume_grace_until:
                         phase = self.stall_phase(self.proc.pid)
                         self.proc.kill()
                         self.proc = None
@@ -601,13 +643,15 @@ class Supervisor:
                     else:
                         self.message = f'Waiting for saver heartbeat ({int(silent)}s).'
                 return self._maybe_restart(now, heartbeat, autopilot)
+            if heartbeat is None and self.state in ('running', 'starting', 'external') and now - self.unreadable_since < HANG_SEC:
+                return  # Heartbeat briefly unreadable: no verdict on a running saver yet, no restart.
             ext = self.external(heartbeat, now)
             if ext:
                 self.initial_start = False
                 if ext['age'] is not None and ext['age'] <= HEARTBEAT_FRESH_SEC:
                     self.state, self.message = 'external', 'Saver running (started outside the Control Center).'
                     return
-                if ext['age'] is not None and ext['age'] > HANG_SEC and autopilot and not self.operator_stopped:
+                if ext['age'] is not None and ext['age'] > HANG_SEC and autopilot and not self.operator_stopped and now >= self.resume_grace_until:
                     phase = self.stall_phase(ext['pid'])
                     if WIN32.terminate(ext['pid'], ext['ticks']):
                         self._record_failure(now, f"Saver PID {ext['pid']} stopped responding{phase} and was terminated.")
@@ -737,8 +781,9 @@ class App:
         # Open pages poll with their own id and send a beacon when their window closes.
         self.version = RUNTIME_VERSION
         self.instance = secrets.token_hex(6)  # Pages reload when this changes (an update took over).
-        self.pages = set()
+        self.pages = {}  # page id -> last poll time
         self.close_at = None
+        self.close_pending = False  # A window closed while other registrations remained.
         self.pages_lock = threading.Lock()
 
     def save_prefs(self):
@@ -749,25 +794,36 @@ class App:
         if self.server:
             self.server.shutdown()
 
-    def page_seen(self, page: str):
+    def page_seen(self, page: str, now: float | None = None):
         if page:
             with self.pages_lock:
-                self.pages.add(page)
+                self.pages[page] = time.time() if now is None else now
                 self.close_at = None
+                self.close_pending = False  # A live window polled: nothing is closing.
 
     def page_closed(self, page: str, now: float | None = None):
+        now = time.time() if now is None else now
         with self.pages_lock:
             if page not in self.pages:
                 return  # Only a window this Control Center served can close it.
-            self.pages.discard(page)
+            del self.pages[page]
+            # Ids left behind by windows that reloaded or vanished must not keep it running.
+            for stale in [p for p, seen in self.pages.items() if now - seen > PAGE_STALE_SEC]:
+                del self.pages[stale]
             if not self.pages:
-                self.close_at = (time.time() if now is None else now) + WINDOW_CLOSE_GRACE_SEC
+                self.close_at = now + WINDOW_CLOSE_GRACE_SEC
+            else:
+                self.close_pending = True
 
     def window_close_due(self, now: float) -> bool:
-        """The last window closed and none reopened within the grace period.
-        A page that vanishes without its beacon keeps the Control Center running."""
+        """The last window closed and none reopened within the grace period. If a window
+        closed while other ids stayed registered, it quits once none of them has polled for
+        PAGE_STALE_SEC (they were reloaded or vanished). A page that disappears without its
+        beacon and with no other window ever closing keeps the Control Center running."""
         with self.pages_lock:
-            return self.close_at is not None and not self.pages and now >= self.close_at
+            if self.close_at is not None and not self.pages and now >= self.close_at:
+                return True
+            return self.close_pending and bool(self.pages) and all(now - seen > PAGE_STALE_SEC for seen in self.pages.values())
 
     def names(self) -> dict:
         hb = self.heartbeat if isinstance(self.heartbeat, dict) else {}
@@ -777,15 +833,22 @@ class App:
         while not self.stop_event.is_set():
             now = time.time()
             if self.window_close_due(now):
-                # Closing the window exits like Stop farm & quit, saver included.
+                # Closing the window exits like Stop farm & quit, saver included. Only a window
+                # that polls during the stop counts as reopened; stale ids are forgotten here.
+                with self.pages_lock:
+                    self.pages.clear()
+                    self.close_at = None
+                    self.close_pending = False
+                was_running = self.supervisor.state in ('running', 'starting', 'restarting', 'external')
                 self.supervisor.stop()
                 with self.pages_lock:
                     reopened = bool(self.pages)
                 if not reopened:
                     self.shutdown()
                     return
-                self.supervisor.start()  # A window came back while the saver stopped: carry on.
-            self.heartbeat = read_json(self.data / 'runtime-status.json')
+                if was_running:
+                    self.supervisor.start()  # A window came back while the saver stopped: carry on.
+            self.heartbeat = read_json(self.data / 'runtime-status.json', retry_missing=True)
             try:
                 self.supervisor.tick(self.heartbeat, now)
             except Exception as exc:  # The supervisor must outlive any single failure.
@@ -832,7 +895,7 @@ class App:
                 'health', 'recovery', 'logFailed', 'updateAvailable')}
             view['pagefile'] = {k: (hb.get('pagefile') or {}).get(k) for k in ('status', 'reason', 'pendingReboot')}
         return {
-            'app': APP_ID, 'version': self.version, 'instance': self.instance, 'windows': len(self.pages),
+            'app': APP_ID, 'version': self.version, 'instance': self.instance, 'windows': sum(1 for seen in list(self.pages.values()) if now - seen <= PAGE_STALE_SEC),
             'now': now, 'dataDirectory': str(self.data), 'supervisor': sup,
             'prefs': dict(self.prefs, startWithWindows=startup_enabled()),
             'heartbeat': view, 'heartbeatAgeSec': age,
@@ -925,7 +988,10 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == '/api/ping':
             return self._send(200, {'app': APP_ID, 'version': self.app.version, 'instance': self.app.instance})
         if url.path == '/api/state':
-            self.app.page_seen((query.get('page') or [''])[0][:64])
+            # A page still showing a replaced Control Center polls once before it reloads;
+            # it must not count as an open window here, or closing the real one never quits.
+            if (query.get('inst') or [''])[0] in ('', self.app.instance):
+                self.app.page_seen((query.get('page') or [''])[0][:64])
             try:
                 since = float((query.get('since') or ['0'])[0])
                 events = int((query.get('events') or ['0'])[0])

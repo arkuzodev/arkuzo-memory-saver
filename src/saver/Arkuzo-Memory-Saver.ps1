@@ -3373,13 +3373,16 @@ function Record-ClientExit([int]$ClientId, $State, [string]$Reason = 'No longer 
 }
 function Register-ArkuzoExitedClientRecovery([int]$ClientId, $State) {
     # When a whole server kicks the farm, recovery is serialized and most kicked
-    # clients close themselves before their turn. Their accounts still need the
-    # bounded Volt relaunch, independent of restore_missing: the exit becomes a
-    # pending handoff instead of a silently missing account.
+    # clients close themselves before their turn. A display change (remote desktop
+    # disconnect, driver reload) freezes every client at once and they quit after
+    # about three minutes. Their accounts still need the bounded Volt relaunch,
+    # independent of restore_missing: the exit becomes a pending handoff instead
+    # of a silently missing account.
     if ($MonitorOnly -or -not $ownsControllerMutex -or -not $restorePolicy.enabled -or -not $recoveryJournalHealthy -or $script:recoveryJournalCorrupt) { return }
     if ($null -eq $State -or $State.RecoveryRequested) { return }
     $recycle = $null -ne $State.HealthDecision -and $State.HealthDecision.Recycle
-    if (-not $State.isDisconnected -and -not $recycle) { return }
+    $frozen = $null -ne $State.HangSince -and [double]$State.HangSince -ge 0
+    if (-not $State.isDisconnected -and -not $recycle -and -not $frozen) { return }
     $key = [string]$State.BoundAccountId
     if ($key -notmatch '\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\z' -or $recoveryPending.ContainsKey($key)) { return }
     if ($restorePolicy.excluded_account_ids -contains $key -or ($null -ne $script:suspendedAccounts -and $script:suspendedAccounts.ContainsKey($key))) { return }
@@ -3392,9 +3395,9 @@ function Register-ArkuzoExitedClientRecovery([int]$ClientId, $State) {
     try {
         $script:recoveryPending[$key] = $entry
         Save-ArkuzoRecoveryJournal
-        $why = if ($State.isDisconnected) { 'IN_GAME_DISCONNECT' } else { [string]$State.HealthDecision.Reason }
+        $why = if ($State.isDisconnected) { 'IN_GAME_DISCONNECT' } elseif ($recycle) { [string]$State.HealthDecision.Reason } else { 'UNRESPONSIVE_EXIT' }
         Write-Diagnostic 'EXITED_CLIENT_RECOVERY_QUEUED' @{ accountId = $key; pid = $ClientId; startTicks = $State.StartTicks; reason = $why; disconnectReason = $State.DisconnectReason
-            note = 'Client closed itself before its recovery turn; its account is queued for a bounded Volt relaunch.' }
+            note = 'Client closed itself while disconnected, frozen or waiting for recovery; its account is queued for a bounded Volt relaunch.' }
     } catch {
         $script:recoveryPending = $previous; $script:recoveryJournalHealthy = $false
         Warn-Throttled 'recovery-journal' 'Recovery outcome persistence/audit failed. Destructive recovery blocked.'
@@ -4288,7 +4291,7 @@ try {
                 if ($state.HealthDecision.Status) { $status = $state.HealthDecision.Status }
                 # Bind the exact Volt account while it is still verifiable: a kicked client
                 # often closes itself before its turn in the serialized recovery queue.
-                if (-not $state.BoundAccountId -and $state.TrackerId -and ($state.isDisconnected -or $state.HealthDecision.Recycle)) {
+                if (-not $state.BoundAccountId -and $state.TrackerId -and ($state.isDisconnected -or $state.HealthDecision.Recycle -or [double]$state.HangSince -ge 0)) {
                     try {
                         $bound = Get-ArkuzoControlledAccount $state.TrackerId $id
                         if ($null -ne $bound) { $state.BoundAccountId = [string]$bound.accountId; $state.BoundTrackerId = [string]$bound.trackerId }

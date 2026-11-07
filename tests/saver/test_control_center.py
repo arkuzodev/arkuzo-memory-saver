@@ -135,7 +135,11 @@ class FeedTests(unittest.TestCase):
         self.assertIsNotNone(cc.summarize_event({'event': 'CLIENT_STATE_CHANGED', 'data': {'sample': {'state': 'STUCK CLIENT', 'pid': 4}}}, names))
         queued = cc.summarize_event({'time': '2026-10-26T13:44:14Z', 'event': 'EXITED_CLIENT_RECOVERY_QUEUED', 'data': {'accountId': 'a', 'pid': 4856}}, names)
         self.assertEqual((queued['level'], queued['category']), ('warning', 'recovery'))
-        self.assertIn('Farmer01 closed after a disconnect', queued['text'])
+        self.assertIn('Farmer01 closed while waiting for recovery', queued['text'])
+        frozen = cc.summarize_event({'time': '2026-10-26T18:13:24Z', 'event': 'EXITED_CLIENT_RECOVERY_QUEUED', 'data': {'accountId': 'a', 'reason': 'UNRESPONSIVE_EXIT'}}, names)
+        self.assertIn('Farmer01 closed while frozen', frozen['text'])
+        kicked = cc.summarize_event({'time': '2026-10-26T13:44:14Z', 'event': 'EXITED_CLIENT_RECOVERY_QUEUED', 'data': {'accountId': 'a', 'reason': 'IN_GAME_DISCONNECT'}}, names)
+        self.assertIn('Farmer01 closed while disconnected', kicked['text'])
 
     def test_log_tail_follows_new_lines_and_sessions(self):
         folder = Path(tempfile.mkdtemp())
@@ -223,6 +227,14 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(len(self.launched), 1)
         self.assertEqual(sup.state, 'stopped')
 
+    @staticmethod
+    def run_until(sup, beat, start, end, step=2.0):
+        """Ticks every 2 s like App.loop until the first kill; beat(t) is the heartbeat written by then."""
+        proc, t = sup.proc, start
+        while t <= end and not proc.killed:
+            sup.tick(beat(t), t)
+            t += step
+
     def test_hung_saver_is_terminated_and_restarted(self):
         sup = self.make()
         start = time.time()
@@ -231,9 +243,11 @@ class SupervisorTests(unittest.TestCase):
         sup.tick(self.heartbeat(proc, start + 5), start + 6)
         self.assertEqual(sup.state, 'running')
         late = start + cc.START_GRACE_SEC + cc.HANG_SEC + 10
-        sup.tick(self.heartbeat(proc, start + 5), late)
+        self.run_until(sup, lambda t: self.heartbeat(proc, start + 5), start + 8, late)
         self.assertTrue(proc.killed)
         self.assertEqual(sup.state, 'restarting')
+        silent = int(re.search(r'stopped responding for (\d+)s', sup.message).group(1))
+        self.assertLessEqual(silent, cc.START_GRACE_SEC + 5, 'silence is measured from the last heartbeat, not reported as the session age')
 
     def test_hang_kill_names_the_stalled_phase(self):
         sup = self.make()
@@ -241,9 +255,63 @@ class SupervisorTests(unittest.TestCase):
         sup.tick(None, start)
         proc = self.launched[0]
         (self.data / 'saver-stall.json').write_text(json.dumps({'pid': proc.pid, 'phase': 'client 6372: first contact', 'stalledSec': 200}))
-        sup.tick(self.heartbeat(proc, start + 5), start + cc.START_GRACE_SEC + cc.HANG_SEC + 10)
+        self.run_until(sup, lambda t: self.heartbeat(proc, start + 5), start + 2, start + cc.START_GRACE_SEC + cc.HANG_SEC + 10)
         self.assertTrue(proc.killed)
         self.assertIn("client 6372: first contact", sup.message)
+
+    def test_one_unreadable_heartbeat_never_kills_a_healthy_saver(self):
+        # 24-27 Oct: healthy savers were killed as "stopped responding for <session age>".
+        sup = self.make()
+        start = time.time()
+        sup.tick(None, start)
+        proc = self.launched[0]
+        self.run_until(sup, lambda t: self.heartbeat(proc, t - 1), start + 2, start + 600)
+        self.assertEqual(sup.state, 'running')
+        for bad in (None, {'pid': 1, 'updatedUtc': 'garbage'}, {}):
+            sup.tick(bad, start + 602)
+            self.assertFalse(proc.killed, f'one unreadable heartbeat ({bad!r}) is not silence since start')
+        sup.tick(self.heartbeat(proc, start + 603), start + 604)
+        self.assertEqual(sup.state, 'running')
+
+    def test_sleep_gap_is_not_saver_silence(self):
+        sup = self.make()
+        start = time.time()
+        sup.tick(None, start)
+        proc = self.launched[0]
+        self.run_until(sup, lambda t: self.heartbeat(proc, t - 1), start + 2, start + 400)
+        wake = start + 400 + 3600  # The PC slept for an hour; the saver has not written since.
+        sup.tick(self.heartbeat(proc, start + 399), wake)
+        self.assertFalse(proc.killed, 'waking from sleep gives the saver time for a new heartbeat')
+        self.run_until(sup, lambda t: self.heartbeat(proc, t - 1), wake + 2, wake + 30)
+        self.assertEqual(sup.state, 'running')
+        # A saver that really stays silent after waking is still caught once the grace ends.
+        self.run_until(sup, lambda t: self.heartbeat(proc, wake + 29), wake + 32, wake + 32 + 2 * cc.HANG_SEC)
+        self.assertTrue(proc.killed)
+
+    def test_unreadable_heartbeat_of_an_external_saver_is_no_verdict(self):
+        sup = self.make()
+        sup.initial_start = False
+        sup.state = 'external'
+        now = time.time()
+        sup.tick(None, now)
+        self.assertEqual((sup.state, sup.failures, len(self.launched)), ('external', 0, 0))
+        # A heartbeat that stays unreadable (a saver that died mid-write) must not leave the farm
+        # unmanaged forever: after HANG_SEC the normal verdict applies and autopilot restarts it.
+        t = now
+        while t <= now + cc.HANG_SEC + 4 and not self.launched:
+            t += 2
+            sup.tick(None, t)
+        self.assertEqual(sup.failures, 1, 'the vanished external saver is recorded')
+        t += cc.restart_delay(1) + 2
+        sup.tick(None, t)
+        self.assertEqual(len(self.launched), 1, 'and autopilot starts a new one')
+
+    def test_supervisor_actions_are_written_to_a_log(self):
+        sup = self.make()
+        sup.tick(None, time.time())
+        lines = (self.data / 'control-center.log').read_text(encoding='utf-8').splitlines()
+        self.assertTrue(any('Saver started with the Control Center' in json.loads(line)['text'] for line in lines))
+        self.assertFalse(list(self.data.glob('Arkuzo-*.log')), 'never mistaken for a saver session log')
 
     def test_autopilot_off_does_not_restart(self):
         sup = self.make(autopilot=False)
@@ -340,6 +408,15 @@ class HttpTests(unittest.TestCase):
         self.assertIsNone(self.app.close_at, 'a reloaded page cancels it')
         self.app.pages.clear()
 
+    def test_a_page_of_a_replaced_control_center_is_not_a_window(self):
+        self.app.pages.clear()
+        self.request(f'/api/state?page=stale&inst=someoneelse')
+        self.assertNotIn('stale', self.app.pages, 'an old page polling once before it reloads would block the close-to-quit')
+        self.request(f'/api/state?page=fresh&inst=')
+        self.request(f'/api/state?page=current&inst={self.app.instance}')
+        self.assertEqual(set(self.app.pages), {'fresh', 'current'})
+        self.app.pages.clear()
+
     def test_config_round_trip_with_backup(self):
         status, body = self.request('/api/config', {'changes': {'settings': {'target_ram_mb': 500}}}, token=self.app.token)
         self.assertEqual(status, 200)
@@ -382,7 +459,9 @@ class WindowCloseTests(unittest.TestCase):
         self.app.page_seen('a')
         self.app.page_seen('b')
         self.app.page_closed('a', now)
-        self.assertFalse(self.app.window_close_due(now + 3600), 'another window is still open')
+        self.assertFalse(self.app.window_close_due(now + 60), 'another window is still open')
+        self.app.page_seen('b', now + 3500)  # It keeps polling...
+        self.assertFalse(self.app.window_close_due(now + 3600), '...so it never quits while that window lives')
         self.app.page_closed('b', now)
         self.assertFalse(self.app.window_close_due(now + cc.WINDOW_CLOSE_GRACE_SEC - 1), 'a reload gets a grace period')
         self.assertTrue(self.app.window_close_due(now + cc.WINDOW_CLOSE_GRACE_SEC))
@@ -390,6 +469,31 @@ class WindowCloseTests(unittest.TestCase):
         self.assertFalse(self.app.window_close_due(now + 3600), 'the reloaded page cancels the quit')
         self.app.page_closed('never-seen', now)
         self.assertFalse(self.app.window_close_due(now + 3600), 'a page this instance never served cannot close it')
+
+    def test_a_stale_page_id_from_an_update_does_not_block_quitting(self):
+        # A v2.1.3 page polls the new Control Center once before it reloads, without an instance id.
+        now = time.time()
+        self.app.page_seen('reloaded-old-page', now - cc.PAGE_STALE_SEC - 60)
+        self.app.page_seen('real-window', now)
+        self.app.page_closed('real-window', now)
+        self.assertTrue(self.app.window_close_due(now + cc.WINDOW_CLOSE_GRACE_SEC), 'closing the real window still quits')
+        self.app.close_at = None
+        self.app.page_seen('minimized', now - 70)  # Throttled to one poll a minute: still a window.
+        self.app.page_seen('other', now)
+        self.app.page_closed('other', now)
+        self.assertFalse(self.app.window_close_due(now + 60), 'a minimized window keeps it running')
+        self.app.page_seen('minimized', now + 50)  # Its once-a-minute poll.
+        self.assertFalse(self.app.window_close_due(now + 200), 'and keeps doing so while it polls')
+
+    def test_closing_right_after_an_update_still_quits_once_the_stray_id_ages_out(self):
+        now = time.time()
+        self.app.page_seen('old-page-polled-once', now - 5)
+        self.app.page_seen('real-window', now)
+        self.app.page_closed('real-window', now)
+        self.assertFalse(self.app.window_close_due(now + 60), 'the stray id is still recent')
+        self.assertTrue(self.app.window_close_due(now - 5 + cc.PAGE_STALE_SEC + 1), 'it quits once the stray id is stale')
+        self.app.page_seen('reopened', now + 90)
+        self.assertFalse(self.app.window_close_due(now + 3600), 'a window that polls again cancels the pending quit')
 
     def test_loop_stops_the_saver_and_exits_when_due(self):
         self.app.page_seen('a')
@@ -411,11 +515,44 @@ class WindowCloseTests(unittest.TestCase):
             self.app.page_seen('reopened')  # The user opened the window again during the stop.
             self.app.stop_event.set()  # End the loop after this pass.
         self.app.supervisor.stop = stop
+        self.app.supervisor.state = 'running'
         self.app.page_seen('a')
         self.app.page_closed('a', time.time() - cc.WINDOW_CLOSE_GRACE_SEC - 1)
         self.app.loop()
         self.assertEqual((len(self.stops), len(starts)), (1, 1), 'the saver comes back')
         self.assertIsNone(self.app.server, 'and the Control Center never shut down')
+
+    def test_a_held_quit_with_only_a_stray_id_left_really_quits(self):
+        # Found end to end: the stray id of a reloaded old page made every due quit look like a
+        # reopened window, so it stopped and restarted the saver every 7 s instead of quitting.
+        starts = []
+        self.app.supervisor.start = lambda reason='operator': starts.append(reason)
+        self.app.supervisor.state = 'running'
+        now = time.time()
+        self.app.page_seen('stray', now - cc.PAGE_STALE_SEC - 30)
+        self.app.page_seen('real', now - 5)
+        self.app.page_closed('real', now - 5)
+        worker = threading.Thread(target=self.app.loop, daemon=True)
+        worker.start()
+        worker.join(5)
+        self.assertFalse(worker.is_alive(), 'the Control Center quits')
+        self.assertEqual((len(self.stops), starts), (1, []), 'the saver is stopped once and not restarted')
+
+    def test_a_reopened_window_never_starts_a_saver_that_was_not_running(self):
+        starts = []
+        self.app.supervisor.initial_start = False
+        self.app.supervisor.start = lambda reason='operator': starts.append(reason)
+        def stop(wait_sec=25.0):
+            self.stops.append(wait_sec)
+            self.app.supervisor.operator_stopped = True
+            self.app.page_seen('reopened')
+            self.app.stop_event.set()
+        self.app.supervisor.stop = stop
+        self.app.supervisor.state = 'stopped'
+        self.app.page_seen('a')
+        self.app.page_closed('a', time.time() - cc.WINDOW_CLOSE_GRACE_SEC - 1)
+        self.app.loop()
+        self.assertEqual(starts, [], 'a farm the operator had stopped stays stopped')
 
 
 class TakeoverTests(unittest.TestCase):

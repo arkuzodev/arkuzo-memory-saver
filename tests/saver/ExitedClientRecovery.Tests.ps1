@@ -69,6 +69,15 @@ try {
   $states[2].HealthDecision=@{Recycle=$true;Reason='SUSTAINED_HANG'}
   Exit-Client 2
   Assert ((Queued).Count -eq 1 -and (Queued)[0].data.reason -eq 'SUSTAINED_HANG') 'a client waiting for its recovery turn is queued when it exits'
+  # 26 Oct 18:13: a remote desktop disconnect froze all six; they quit while still in hang grace.
+  New-Farm
+  for($i=0;$i -lt 6;$i++){ $states[$i].HangSince=[double](100+$i); $states[$i].HealthDecision=@{Recycle=$false;Reason='';Status='HANG GRACE'} }
+  for($i=0;$i -lt 6;$i++){ Exit-Client $i }
+  Assert ((Queued).Count -eq 6 -and @((Queued) | Where-Object { $_.data.reason -eq 'UNRESPONSIVE_EXIT' }).Count -eq 6) 'clients that quit while frozen are queued for relaunch'
+  New-Farm
+  $states[5].HangSince=-1.0
+  Exit-Client 5
+  Assert ((Queued).Count -eq 0) 'a responsive client that closes is still an ordinary exit'
 
   # Safety: excluded, suspended, quarantined, unbound, monitor-only and unhealthy journal never queue.
   foreach($case in @('excluded','suspended','quarantined','unbound','monitor','journal','already')) {

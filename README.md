@@ -7,17 +7,17 @@
 [![Version](https://img.shields.io/badge/version-2.1.5-38bdf8?style=for-the-badge&labelColor=12141b)](CHANGELOG.md)
 [![Windows x64](https://img.shields.io/badge/Windows-x64-818cf8?style=for-the-badge&labelColor=12141b)](#requirements)
 [![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-a78bfa?style=for-the-badge&labelColor=12141b)](#requirements)
-[![Volt integration](https://img.shields.io/badge/Volt-integration-34d399?style=for-the-badge&labelColor=12141b)](#recovery-is-deliberately-conservative)
+[![Volt optional](https://img.shields.io/badge/Volt-optional-34d399?style=for-the-badge&labelColor=12141b)](docs/accounts.md)
 
 ### [**⬇&nbsp; Download ArkuzoMemorySaver.exe**](https://github.com/arkuzodev/arkuzo-memory-saver/releases/latest/download/ArkuzoMemorySaver.exe)
 
-[Releases](https://github.com/arkuzodev/arkuzo-memory-saver/releases/latest) &nbsp;·&nbsp; [Configuration](docs/configuration.md) &nbsp;·&nbsp; [Troubleshooting](docs/troubleshooting.md) &nbsp;·&nbsp; [Accounts without Volt](docs/accounts.md) &nbsp;·&nbsp; [Farm-freeze recovery](docs/farm-freeze-recovery.md) &nbsp;·&nbsp; [Roadmap](#roadmap) &nbsp;·&nbsp; [Changelog](CHANGELOG.md)
+[Releases](https://github.com/arkuzodev/arkuzo-memory-saver/releases/latest) &nbsp;·&nbsp; [Configuration](docs/configuration.md) &nbsp;·&nbsp; [Troubleshooting](docs/troubleshooting.md) &nbsp;·&nbsp; [Accounts without Volt](docs/accounts.md) &nbsp;·&nbsp; [Farm-freeze recovery](docs/farm-freeze-recovery.md) &nbsp;·&nbsp; [Remote desktop](docs/remote-desktop.md) &nbsp;·&nbsp; [Roadmap](#roadmap) &nbsp;·&nbsp; [Changelog](CHANGELOG.md)
 
 </div>
 
 <br>
 
-<img src="docs/images/readme/stats.png" alt="Farm-wide freezes back in game in about 2.5 min on average (replay), 600 MB soft target per client, one verified Volt relaunch at a time, a four-file checksummed runtime" width="100%">
+<img src="docs/images/readme/stats.png" alt="Farm-wide freezes back in game in about 2.5 min on average (replay), 600 MB soft target per client after a 90 s warm-up, one verified relaunch at a time, a four-file checksummed runtime" width="100%">
 
 <sub>The 2.5 min is the average per account when the four logged farm-wide freezes (23–27 Oct) are replayed against v2.1.5; the logs showed 5.8 min. See [farm-freeze recovery](docs/farm-freeze-recovery.md).</sub>
 
@@ -33,14 +33,14 @@
 <td width="50%" valign="top">
 <img src="docs/images/readme/feature-trim.svg" width="44" align="left" hspace="10" alt="">
 <b>Careful working-set trimming</b><br>
-<sub>600 MB soft target, a 5-minute warm-up per client and a 45 s trim interval. Loading, frozen and startup-error clients are skipped.</sub>
+<sub>600 MB soft target, a 90 s warm-up per client and a 45 s trim interval. Loading, frozen and startup-error clients are skipped.</sub>
 </td>
 </tr>
 <tr>
 <td valign="top">
 <img src="docs/images/readme/feature-freeze.svg" width="44" align="left" hspace="10" alt="">
 <b>Freeze, hang and kick recovery</b><br>
-<sub>A farm-wide freeze is confirmed after 35 s and the frozen clients are closed one every 20 s, so Volt relaunches them cleanly. Kicked and frozen clients that quit on their own are queued too.</sub>
+<sub>A farm-wide freeze is confirmed after 35 s (20 s right after a remote-desktop disconnect), and the frozen clients are closed one every 20 s so each account relaunches cleanly. Kicked and frozen clients that quit on their own are queued too.</sub>
 </td>
 <td valign="top">
 <img src="docs/images/readme/feature-relaunch.svg" width="44" align="left" hspace="10" alt="">
@@ -75,7 +75,7 @@
 </table>
 
 > [!NOTE]
-> **600 MB is a soft target, not a hard cap.** Trimming lowers resident RAM for a while; it doesn't free private allocations or fix a leak. The 82% OS commit threshold picks recovery candidates; it is not a promise against crashes.
+> **600 MB is a soft target, not a hard cap.** Trimming lowers resident RAM for a while; it doesn't free private allocations or fix a leak. The 88% OS commit threshold picks recovery candidates; it is not a promise against crashes.
 
 ## The Control Center
 
@@ -108,9 +108,9 @@ The launcher opens it for you (it needs Python 3 on `PATH`); in a source checkou
 | <kbd>2</kbd> | **Run it.** The first start downloads the latest stable runtime, checks its SHA-256 and installs it. |
 | <kbd>3</kbd> | **Add your accounts** on the Control Center's Accounts page (cookie or browser sign-in), set the place, and press **Start farm**. Using Volt's account manager instead works too. |
 | <kbd>4</kbd> | **Tune** `data/config.json` with the [configuration guide](docs/configuration.md), or use the Control Center's Settings page. |
-| <kbd>5</kbd> | **Give each new client its five-minute warm-up** before expecting regular trimming. |
+| <kbd>5</kbd> | **Give each new client its 90-second warm-up** before expecting regular trimming. |
 
-Monitoring and trimming work without Python or Volt. Without them, recovery stays off: the saver never closes a client it can't bring back.
+Monitoring and trimming work on their own. Recovery needs something that can bring a client back, Arkuzo's account manager or Volt's; without one it stays off, because the saver never closes a client it can't bring back.
 
 ```mermaid
 flowchart LR
@@ -156,15 +156,15 @@ flowchart LR
 - **With Volt, its relaunch delay stays at 30 s or more;** a larger delay you set is kept. Missing-account retries back off for 90–900 s, with cooldowns and hourly budgets that survive saver restarts.
 - **A restore must prove itself:** a new, exactly mapped process, a connected launcher socket, a responsive window without errors and matching server-join evidence, held for a continuous confirmation window.
 - **Farm-wide freezes** (in the logs, Chrome Remote Desktop disconnects and display events) are handled as one event, with closes paced so Volt doesn't show its "Roblox started before Volt could connect" notice. Switch it off with `health.farm_freeze_enabled`.
-- **Remote desktop:** a Chrome Remote Desktop disconnect freezes every client. The saver recognises it and recycles the farm sooner, warns you in the Control Center while a session is connected, and has a "Leave Remote Desktop safely" button for RDP. See [docs/remote-desktop.md](docs/remote-desktop.md).
+- **Remote desktop:** in the logs, 12 of 14 Chrome Remote Desktop disconnects with clients running froze them. The saver recognises a disconnect and recycles the farm sooner, never hangs on a frozen client's log, warns you in the Control Center while a session is connected (minimise it instead of disconnecting), and has a "Leave Remote Desktop safely" button for RDP. See [remote desktop disconnects](docs/remote-desktop.md).
 
 <details>
 <summary><b>Cookie-dead accounts</b></summary>
 <br>
 
-Volt's red cross means a dead account session. The saver shows these accounts in red as **`COOKIE DEAD`**. A dead session can come from expiry, revocation, a challenge or another sign-in problem; it is not proof of a ban.
+A cookie Roblox rejects (Arkuzo's cookie check, or Volt's red cross) means a dead account session. The saver shows these accounts in red as **`COOKIE DEAD`**. A dead session can come from expiry, revocation, a challenge or another sign-in problem; it is not proof of a ban.
 
-A verified idle dead account is paused and left out of launch requests. Its recovery history is kept separately so it doesn't hold the handoff gate for healthy accounts. If a process, launch or identity is uncertain, the gate stays closed. Restore the session in Volt yourself; the saver resumes once the account checks out again. Newly imported accounts with no launch history are shown but never activated automatically.
+A verified idle dead account is paused and left out of launch requests. Its recovery history is kept separately so it doesn't hold the handoff gate for healthy accounts. If a process, launch or identity is uncertain, the gate stays closed. Sign the account in again yourself, on the Accounts page or in Volt; the saver resumes once it checks out again. Newly imported accounts with no launch history are shown but never activated automatically.
 
 </details>
 
@@ -188,7 +188,8 @@ The readiness checks above are criteria for counting a restore, not an overnight
 | **System** | Windows x64 with Windows PowerShell 5.1. No separate .NET install; the launcher is self-contained. |
 | **Folder** | A writable folder for `ArkuzoMemorySaver.exe`, `app/` and `data/`. |
 | **Network** | Internet for the first runtime download and update checks. |
-| **Accounts** | Arkuzo accounts need nothing extra (browser sign-in uses Edge or Chrome). With Volt instead: Python 3 on `PATH` and a running Volt with Account Manager reachable. |
+| **Python** | Python 3.8 or newer on `PATH` for the Control Center, and with it the account manager. Without it the launcher runs the console saver: monitoring and trimming only. |
+| **Accounts** | Arkuzo accounts need nothing else (browser sign-in uses Edge or Chrome). With Volt instead: a running Volt with its Account Manager reachable. |
 
 <details>
 <summary><b>Upgrading a legacy installation</b></summary>
@@ -200,12 +201,14 @@ If `data/config.json` doesn't exist and a `config.json` sits beside `ArkuzoMemor
 
 ## Roadmap
 
-<img src="docs/images/readme/roadmap.png" alt="Roadmap: 1 Volt becomes optional, 2 AI control over MCP, 3 headless farming, 4 Arkuzo execution suite" width="100%">
+Arkuzo started as a memory saver bolted onto Volt. The roadmap turns it into a farm runner of its own, in four phases, each built on the same rule as the saver today: nothing is closed unless it can be brought back, verified. **Phase 1 is done**; phase 2 is next.
+
+<img src="docs/images/readme/roadmap.png" alt="Roadmap: 1 Volt becomes optional (done), 2 AI control over MCP (next), 3 headless farming, 4 Arkuzo execution suite" width="100%">
 
 | Phase | Goal | What it means |
 | :---: | :--- | :--- |
-| <kbd>1</kbd> **Next** | **Volt becomes optional** | Volt moves to an add-on, and other executors get first-class integrations, with the same verified, account-aware recovery. |
-| <kbd>2</kbd> | **AI control over MCP** | An MCP server so AI agents can watch the farm and adjust settings in real time, inside the same safety gates. |
+| <kbd>1</kbd> **Done** | **Volt becomes optional** | Arkuzo's own [account manager](docs/accounts.md) adds accounts, starts the farm and relaunches every client, with the same verified, account-aware recovery. Volt is now just your executor. Still open from this phase: integrations for executors other than Volt. |
+| <kbd>2</kbd> **Next** | **AI control over MCP** | An MCP server so AI agents can watch the farm and adjust settings in real time, inside the same safety gates. |
 | <kbd>3</kbd> | **Headless farming** | More performance work and fully windowless farming: clients run without windows on screen. |
 | <kbd>4</kbd> | **Arkuzo execution suite** | Arkuzo's own execution suite, built in and integrated with the saver from the start. |
 

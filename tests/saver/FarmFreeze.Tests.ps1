@@ -158,6 +158,22 @@ Assert (-not (Test-ArkuzoRecoveryHandoff (Account 1) $tracked[102] 'SUSTAINED_HA
 Assert (-not (Test-ArkuzoRecoveryHandoff (Account 2) $tracked[102] 'FARM_FREEZE' $null)) 'the account must be the member''s own'
 Assert (-not (Test-ArkuzoRecoveryHandoff (Account 5) $tracked[106] 'FARM_FREEZE' $null)) 'a non-member gets no handoff exception'
 
+# ---- Pacing from the last verified exit ------------------------------------------------
+$script:clock.Elapsed.TotalSeconds = 1100.0
+Assert (Test-ArkuzoFarmFreezeSlot) 'the slot is open long after the last member exit'
+$farmFreeze.Members['101'].changedSec = 1090.0
+Assert (-not (Test-ArkuzoFarmFreezeSlot)) 'no next close within 20 s of the previous member''s exit'
+$farmFreeze.Members['101'].changedSec = 1079.0
+Assert (Test-ArkuzoFarmFreezeSlot) 'the next close is allowed 20 s after it'
+# A member that answered again and then quits still counts as gone.
+$farmFreeze.Members['104'].status = 'Recovered'
+Set-ArkuzoFarmFreezeMemberStatus $tracked[104] 'Closed'
+Assert ($farmFreeze.Members['104'].status -ceq 'Recovered') 'a recovered member is never closed by the episode'
+Set-ArkuzoFarmFreezeMemberStatus $tracked[104] 'Exited'
+Assert ($farmFreeze.Members['104'].status -ceq 'Exited') 'but its exit is recorded'
+Assert (-not (Test-ArkuzoFarmFreezeSlot)) 'and paces the next close like any other exit'
+$farmFreeze.Members['104'].changedSec = 1000.0; $farmFreeze.Members['104'].status = 'Planned'
+
 # ---- Exits, completion and re-freeze ---------------------------------------------------
 $tracked[103].Watcher.HasExited = $true
 Record-ClientExit 103 $tracked[103] 'HasExited reported'

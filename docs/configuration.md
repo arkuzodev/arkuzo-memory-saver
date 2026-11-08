@@ -88,7 +88,7 @@ Trimming waits for the **individual client's** warmup, checks its current reside
 | `farm_freeze_min_clients` | `3` | Minimum number of clients that must freeze together. They must also be more than half of the sampled clients. |
 | `farm_freeze_onset_window_sec` | `15` | Clients count as freezing together when their freezes start within this window. |
 | `farm_freeze_max_cpu_percent` | `2` | Highest average CPU (dashboard scale, share of all logical CPUs) since the freeze began. Logged frozen clients averaged under 0.1%. |
-| `farm_freeze_spacing_sec` | `20` | Gap between the fast path's recycles, and so between Volt's relaunches. 10-60; at least 20 with `config_lock`. |
+| `farm_freeze_spacing_sec` | `20` | Gap between one recycled client's exit and the next recycle, and so between Volt's relaunches. 10-60; at least 15 with `config_lock`. With 9-10 clients, 16 fits every recycle in before the clients quit by themselves. |
 | `farm_freeze_refreeze_sec` | `900` | A farm that freezes again within this time after a fast recovery gets the normal `hang_timeout_sec` instead. `0` turns that fallback off. |
 
 Warmup is not an unconditional ban on all recovery paths. Recognized startup errors and disconnects use their own observation timers. Current OS commit pressure is evaluated separately; the engine also has a critical-pressure path at 90% commit utilization that can bypass ordinary startup grace. Every destructive action still needs valid identity, launcher readiness, audit logging, journal state, and budget checks.

@@ -44,7 +44,7 @@ The fast path waits 35 s, and checks each client again right before closing it.
 
 **Recovery.** Episode members get the health reason `FARM_FREEZE` and go through the unchanged `Invoke-ClientRecovery`: exact Volt account mapping, the recovery journal entry saved before the close, audit logging, the hourly budget, quarantine, the live Volt parent, and a fresh sample showing that the client is still frozen. Only three gates are scoped to the running episode:
 
-- **Cooldown:** members are closed `farm_freeze_spacing_sec` (20 s) apart instead of `cooldown_sec`. While an episode runs, nothing else is recycled.
+- **Cooldown:** the next member is closed `farm_freeze_spacing_sec` (20 s) after the previous member's verified exit (Volt counts its relaunch delay from the exit), instead of after `cooldown_sec`. Members go in the order they froze. While an episode runs, nothing else is recycled.
 - **Handoff:** the open handoffs of the episode's other members do not block the next member. Any other reason still needs the normal gate.
 - **Mapping:** while Volt relaunches members the episode already closed, their rows may be unmapped, but nothing else. Process ownership must still be exact (`processMappingSafe`), every other row must map, the member's own row must be Connected with its exact socket, and Volt must be the same manager process. The adapter now reports `processMappingSafe`, `unmappedAccountIds` and a per-row `rowReady` for this; `controlReady` and `globalMappingSafe` mean what they did before.
 
@@ -58,21 +58,34 @@ The fast path waits 35 s, and checks each client again right before closing it.
 
 Before the fast path is judged, the same replay with the fast path off must reproduce the logs. For the three incidents recorded by the v2.x engine it does: within 45 s on the mean, 60 s on the last account and one startup notice. The 23 Oct log came from the v1.2.0 engine, and Volt relaunched that burst in two waves 64-90 s after the exits. The model does not capture that, so this incident is replayed but not used to validate the model.
 
-REPLAY_TABLE
+| Incident | Clients | Logged mean / max / notices | Replayed today mean / max / notices | Fast path first / mean / max / notices | Closest launches | Countdown row unreadable mean / max / notices |
+| --- | --- | --- | --- | --- | --- | --- |
+| 23 Oct 23:16 | 8 | 339 s / 480 s / 4 | 410 s / 565 s / 7 | 95 s / 164 s / 240 s / 0 | 16 s | 242 s / 395 s / 3 |
+| 26 Oct 13:19 | 7 | 384 s / 513 s / 5 | 391 s / 526 s / 6 | 92 s / 150 s / 214 s / 0 | 16 s | 219 s / 355 s / 2 |
+| 26 Oct 18:10 | 6 | 330 s / 457 s / 4 | 371 s / 493 s / 5 | 92 s / 140 s / 189 s / 0 | 16 s | 196 s / 302 s / 1 |
+| 27 Oct 07:38 | 6 | 338 s / 436 s / 4 | 332 s / 449 s / 4 | 99 s / 147 s / 196 s / 0 | 16 s | 202 s / 306 s / 1 |
 
 **Spacing.** Volt's relaunch latency varies by up to 11 s, so evenly spaced closes do not give evenly spaced launches. Over every ordering of the measured latencies, on the 8- and 7-client incidents:
 
-SWEEP_TABLE
+| Spacing | Mean per account | Farm maximum (worst) | Runs with a notice | Closest launches |
+| --- | --- | --- | --- | --- |
+| 12 s | 157 s | 260 s (327 s) | 36 of 36 | 5 s |
+| 15 s | 151 s | 226 s (298 s) | 17 of 36 | 8 s |
+| 20 s | 157 s | 222 s (240 s) | 0 of 36 | 13 s |
 
-20 s is the default: no launches ever came within 10 s of each other, at almost the same mean as 15 s. It is also the floor under `config_lock`.
+20 s is the default: no launches ever came within 10 s of each other, at almost the same mean as 15 s. `config_lock` allows no less than 15 s.
+
+**Larger farms.** The clients quit by themselves 195-201 s after they freeze, so at 20 s the last close of an 8-client farm (about 180 s) is the most that fits. In a synthetic 10-client freeze, 20 s spacing still cut the per-account mean from 449 s to 189 s, but the last two clients quit before their turn and relaunched together. 16 s fit almost all of them in, for a mean of 172 s and a farm maximum of 268 s (318 s at 20 s), with fewer notices.
+
+**Unverified: what Volt shows while it counts down a relaunch.** The speed-up depends on the adapter staying available during a countdown and reporting that row as neither Connected nor Idle. The logs fit that reading (`recovery-mapping` refusals, no adapter failures), but nothing records the row itself, and Volt's UI ships compressed inside `tauri-app.exe`. If a countdown row instead made the adapter fail closed, each close would stall until that relaunch connected. The replay covers this case too (last column). The first close still comes early, and the next close then waits for that relaunch to connect, about 45-50 s per client as today. Members not closed by then quit by themselves. It still beats today: 196-242 s per account against 330-384 s. The first real freeze answers the question: `FARM_FREEZE_DETECTED`, then closes 20 s apart in the log mean it works; closes about 45 s apart mean the adapter needs a countdown state.
 
 ### Expected downtime
 
 | | Today (logs) | With the fast path (replay) |
 | --- | --- | --- |
-| First account back in game | 230-245 s | AFTER_FIRST |
-| Mean per account | 330-384 s (about 5.8 min) | AFTER_MEAN |
-| Whole farm back in game | 436-513 s (7.3-8.6 min) | AFTER_MAX |
+| First account back in game | 230-245 s | 92-99 s |
+| Mean per account | 330-384 s (about 5.8 min) | 140-164 s (about 2.5 min) |
+| Whole farm back in game | 436-513 s (7.3-8.6 min) | 189-240 s (3.2-4 min) |
 | Volt startup notices | 4-5 per freeze | none |
 
 Add about 40 s to any of these for `ACCOUNT_RESTORED_VERIFIED`.

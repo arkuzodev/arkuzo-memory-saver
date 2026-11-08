@@ -107,6 +107,8 @@ function Get-SimVoltStatus {
             suspensionSafe = $false; lastLaunchAtMs = 1; uiStatus = $ui; processId = $procId; rowReady = ($ui -ceq 'Connected'); controlReady = $false }
     }
     $global = ($unmapped.Count -eq 0)
+    # Degraded: the adapter cannot bind a row Volt is relaunching and fails closed.
+    if ($script:DegradedVolt -and -not $global) { return [pscustomobject]@{ available = $false; globalMappingSafe = $false; processMappingSafe = $false; unmappedAccountIds = @(); accounts = @(); reason = 'Volt UI or process snapshot unavailable or changed' } }
     foreach ($r in $rows) { $r.controlReady = ($global -and $r.rowReady) }
     return [pscustomobject]@{ available = $true; globalMappingSafe = $global; processMappingSafe = $true; unmappedAccountIds = $unmapped
         managerId = 7; managerStartTicks = [long]70; relaunchDelayMs = 30000; accounts = $rows }
@@ -178,7 +180,8 @@ function Invoke-EnginePass([double]$Now) {
     Update-ArkuzoFarmFreeze
     Invoke-ArkuzoRecoveryCandidates
 }
-function Invoke-Replay($Incident, [bool]$FastPath, [int]$SpacingSec = 20, [int]$ConfirmSec = 35, [int]$LatencyOffset = 0) {
+function Invoke-Replay($Incident, [bool]$FastPath, [int]$SpacingSec = 20, [int]$ConfirmSec = 35, [int]$LatencyOffset = 0, [bool]$Degraded = $false) {
+    $script:DegradedVolt = $Degraded
     $script:events = New-Object Collections.ArrayList; $script:warned = New-Object Collections.ArrayList; $script:kills = New-Object Collections.ArrayList
     $script:clock = @{ Elapsed = @{ TotalSeconds = 0.0 } }; $script:simNow = 0.0
     $script:MonitorOnly = $false; $script:ownsControllerMutex = $true; $script:logFailed = $false
@@ -277,8 +280,21 @@ try {
             Assert ($req.Count -ge 1 -and $req[-1].data.reason -ceq 'FARM_FREEZE' -and $req[-1].data.farmFreezeEpisode) "$($incident.name): each closure was journaled and audited as FARM_FREEZE first"
         }
         Assert ($after.Notices -eq 0) "$($incident.name): paced relaunches raise no Volt startup notice"
-        Assert ($after.Mean -le 180 -and $after.Max -le 240) "$($incident.name): per-account mean $($after.Mean) s <= 3 min and farm maximum $($after.Max) s <= 4 min"
+        $n = $incident.onsets.Count
+        $ceiling = $lastOnset + 36 + ($n - 1) * 20 + $IoSec + ($RelaunchLatency | Measure-Object -Maximum).Maximum + $InGameSec + 5
+        Assert ($after.Mean -le 180) "$($incident.name): per-account mean $($after.Mean) s <= 3 min"
+        Assert ($after.Max -le $ceiling) "$($incident.name): farm maximum $($after.Max) s within the paced ceiling $ceiling s (last close, slowest relaunch, in game)"
         Assert ($after.Mean -lt $before.Mean / 2) "$($incident.name): downtime at least halved"
+        # If the adapter cannot read a row Volt is relaunching, the episode stalls after
+        # each close until that relaunch connects. That must never be worse than today.
+        $degraded = Invoke-Replay $incident $true 20 35 0 $true
+        Assert ($degraded.Mean -le $before.Mean -and $degraded.Max -le $before.Max -and $degraded.Notices -le $before.Notices) "$($incident.name): with an unreadable countdown row the fast path is no worse than today ($($degraded.Mean) s vs $($before.Mean) s)"
+        foreach ($k in @($degraded.Kills)) {
+            $req = @($degraded.Events | Where-Object { $_.kind -eq 'RECOVERY_REQUESTED' -and $_.data.pid -eq $k.pid -and $_.t -le $k.t })
+            Assert ($req.Count -ge 1) "$($incident.name): degraded closures are journaled and audited first"
+        }
+        Assert (@($degraded.Events | Where-Object { $_.kind -eq 'FARM_FREEZE_EPISODE_END' }).Count -eq 1) "$($incident.name): a stalled episode still ends and hands members back"
+        $rows[-1] | Add-Member DegradedMean $degraded.Mean; $rows[-1] | Add-Member DegradedMax $degraded.Max; $rows[-1] | Add-Member DegradedNotices $degraded.Notices
         $end = @($after.Events | Where-Object { $_.kind -eq 'FARM_FREEZE_EPISODE_END' })
         Assert ($end.Count -eq 1 -and $end[0].data.outcome -ceq 'Completed') "$($incident.name): the episode completes and releases its exceptions"
     }
@@ -291,11 +307,11 @@ try {
         Assert ($r.SelfExits -eq 0) "latency order ${offset}: every member closed before it would quit by itself"
     }
     if ($Report) {
-        Write-Host '| Incident | Clients | Logged mean / max / notices | Replayed today mean / max / notices | Fast path first / mean / max / notices | Closest launches |'
-        Write-Host '| --- | --- | --- | --- | --- | --- |'
+        Write-Host '| Incident | Clients | Logged mean / max / notices | Replayed today mean / max / notices | Fast path first / mean / max / notices | Closest launches | Countdown row unreadable mean / max / notices |'
+        Write-Host '| --- | --- | --- | --- | --- | --- | --- |'
         foreach ($r in $rows) {
-            Write-Host ('| {0} | {1} | {2} s / {3} s / {4} | {5} s / {6} s / {7} | {8} s / {9} s / {10} s / {11} | {12} s |' -f $r.Incident, $r.Clients, $r.LoggedMean, $r.LoggedMax, $r.LoggedNotices,
-                $r.BeforeMean, $r.BeforeMax, $r.BeforeNotices, $r.AfterFirst, $r.AfterMean, $r.AfterMax, $r.AfterNotices, $r.AfterMinLaunchGap)
+            Write-Host ('| {0} | {1} | {2} s / {3} s / {4} | {5} s / {6} s / {7} | {8} s / {9} s / {10} s / {11} | {12} s | {13} s / {14} s / {15} |' -f $r.Incident, $r.Clients, $r.LoggedMean, $r.LoggedMax, $r.LoggedNotices,
+                $r.BeforeMean, $r.BeforeMax, $r.BeforeNotices, $r.AfterFirst, $r.AfterMean, $r.AfterMax, $r.AfterNotices, $r.AfterMinLaunchGap, $r.DegradedMean, $r.DegradedMax, $r.DegradedNotices)
         }
         # Sensitivity: every rotation of the measured relaunch latencies, per spacing.
         foreach ($spacing in @(12, 15, 20)) {

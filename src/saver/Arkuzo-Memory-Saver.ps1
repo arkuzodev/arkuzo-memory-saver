@@ -1483,8 +1483,21 @@ function Test-ArkuzoFarmFreezeMember($State) {
 }
 function Set-ArkuzoFarmFreezeMemberStatus($State, [string]$Status) {
     $member = Get-ArkuzoFarmFreezeMemberRecord $State
-    if ($null -eq $member -or $member.status -cne 'Planned') { return }
+    # Planned members move on once; a member that answered again can still quit later.
+    if ($null -eq $member -or -not ($member.status -ceq 'Planned' -or ($member.status -ceq 'Recovered' -and $Status -ceq 'Exited'))) { return }
     $member.status = $Status; $member.changedUtc = [datetime]::UtcNow.ToString('o')
+    if ($null -ne $clock) { $member.changedSec = [double]$clock.Elapsed.TotalSeconds }
+}
+function Test-ArkuzoFarmFreezeSlot {
+    # Volt counts its relaunch delay from each exit, so pace members from the last
+    # verified exit of any member (closed by the saver or quit by itself), not
+    # from when the previous attempt started.
+    if (-not (Test-ArkuzoFarmFreezeActive) -or $null -eq $clock) { return $true }
+    $now = [double]$clock.Elapsed.TotalSeconds
+    foreach ($m in @($script:farmFreeze.Members.Values)) {
+        if ($m.status -cin @('Closed','Exited') -and $null -ne $m.changedSec -and ($now - [double]$m.changedSec) -lt [double]$healthPolicy.farm_freeze_spacing_sec) { return $false }
+    }
+    return $true
 }
 function Get-ArkuzoRecoveryCooldown([string]$Reason, $Policy) {
     # Reason-specific spacing for Test-ArkuzoRecoveryBudget. A confirmed farm
@@ -1817,9 +1830,9 @@ function Update-ArkuzoLivePolicy {
             $newHealth.max_recycles_per_hour = [math]::Max($newHealth.max_recycles_per_hour, 20)
             # Production floors for the farm-freeze fast path: no earlier than 30 s
             # (some correlated stalls clear by themselves within ~30 s) and Volt
-            # launches at least 20 s apart (closer launches raise its startup notice).
+            # launches at least 15 s apart (closer launches raise its startup notice).
             $newHealth.farm_freeze_confirm_sec = [math]::Max($newHealth.farm_freeze_confirm_sec, 30)
-            $newHealth.farm_freeze_spacing_sec = [math]::Max($newHealth.farm_freeze_spacing_sec, 20)
+            $newHealth.farm_freeze_spacing_sec = [math]::Max($newHealth.farm_freeze_spacing_sec, 15)
         }
         $newPagefile=Get-ArkuzoPagefilePolicy -Input $cfg.pagefile -PressurePercent $newHealth.pressure_percent
         if (-not $newPagefile.valid) { throw ('Invalid pagefile policy: '+($newPagefile.errors -join '; ')) }
@@ -2032,7 +2045,7 @@ function Invoke-ClientRecovery([int]$ClientId, $State) {
         Warn-Throttled 'recovery-budget' 'Recovery cooldown/hourly budget reached. No restart storm.'; return
     }
     $farmEpisode = $(if ($reason -ceq 'FARM_FREEZE' -and (Test-ArkuzoFarmFreezeMember $State)) { [string]$script:farmFreeze.Id } else { $null })
-    if ($reason -ceq 'FARM_FREEZE' -and -not $farmEpisode) { return }
+    if ($reason -ceq 'FARM_FREEZE' -and (-not $farmEpisode -or -not (Test-ArkuzoFarmFreezeSlot))) { return }
     $watcher = $State.Watcher
     if (-not (Test-ArkuzoClientIdentity $watcher $ClientId $State.StartTicks)) { Reset-ArkuzoHealthSample $State; return }
     # An unmapped target is not a termination attempt. Do not charge its budget.
@@ -2124,12 +2137,15 @@ function Invoke-ArkuzoRecoveryCandidates {
     # only its members are recycled, so Volt launches stay paced. Try largest
     # first, skipping unready targets without charging a budget.
     $farmFreezeActive = Test-ArkuzoFarmFreezeActive
-    foreach ($candidate in @($tracked.GetEnumerator() | Where-Object {
+    $eligible = @($tracked.GetEnumerator() | Where-Object {
         $_.Value.HealthDecision.Recycle -and
         -not $_.Value.RecoveryRequested -and
         (-not $farmFreezeActive -or (Test-ArkuzoFarmFreezeMember $_.Value)) -and
         ($null -eq $_.Value.LastRecoveryRefusalUtc -or (([DateTime]::UtcNow) - $_.Value.LastRecoveryRefusalUtc).TotalSeconds -ge 30)
-    } | Sort-Object { $_.Value.LastSnapshot.privateMB } -Descending)) {
+    })
+    # Episode members in the order they froze: the earliest also quits first.
+    $ordered = if ($farmFreezeActive) { @($eligible | Sort-Object { [double]$_.Value.HangSince }) } else { @($eligible | Sort-Object { $_.Value.LastSnapshot.privateMB } -Descending) }
+    foreach ($candidate in $ordered) {
         $effectiveCooldown = Get-ArkuzoRecoveryCooldown ([string]$candidate.Value.HealthDecision.Reason) $healthPolicy
         if (-not (Test-ArkuzoRecoveryBudget $recoveryAttempts ([DateTime]::UtcNow) $effectiveCooldown $healthPolicy.max_recycles_per_hour)) {
             # Cooldown is reason-specific: a larger blocked hang/memory
@@ -3054,7 +3070,7 @@ if ($isConfigLocked) {
         $healthPolicy.cooldown_sec = [math]::Min($healthPolicy.cooldown_sec, 90)
         $healthPolicy.max_recycles_per_hour = [math]::Max($healthPolicy.max_recycles_per_hour, 20)
         $healthPolicy.farm_freeze_confirm_sec = [math]::Max($healthPolicy.farm_freeze_confirm_sec, 30)
-        $healthPolicy.farm_freeze_spacing_sec = [math]::Max($healthPolicy.farm_freeze_spacing_sec, 20)
+        $healthPolicy.farm_freeze_spacing_sec = [math]::Max($healthPolicy.farm_freeze_spacing_sec, 15)
     }
 }
 $lastConfigText = [IO.File]::ReadAllText($configFilePath)

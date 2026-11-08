@@ -187,11 +187,27 @@ try {
     $all = ($script:events | ConvertTo-Json -Depth 8) + ($script:warned -join "`n") + ((Get-ArkuzoNativeStatus) | ConvertTo-Json -Depth 8)
     Assert ($all -notmatch 'WARNING:-DO-NOT|LinkCode123|dpapi:|TICKET-') 'no cookie, ticket or link code in diagnostics, warnings or status'
 
-    # --- Provider choice: auto follows the vault; explicit settings win.
+    # --- Provider choice: auto follows the vault unless Volt runs the farm; explicit settings win.
     $script:accountProvider = 'volt'; $script:accountProviderSetting = 'auto'
     function Clear-VoltRecoveryCapability { }
+    $script:voltRunning = $true
+    function Test-ArkuzoVoltManagerRunning { $script:voltRunning }
     Resolve-ArkuzoAccountProvider
-    Assert ($script:accountProvider -eq 'arkuzo') 'auto picks Arkuzo once the vault has accounts'
+    Assert ($script:accountProvider -eq 'volt' -and $script:accountProviderNotice -match 'Volt is running') 'auto keeps a running Volt farm on Volt (its clients are not in the vault)'
+    $script:voltRunning = $false
+    Resolve-ArkuzoAccountProvider
+    Assert ($script:accountProvider -eq 'arkuzo') 'auto picks Arkuzo once the vault has accounts and Volt is closed'
+    $script:voltRunning = $true
+    Resolve-ArkuzoAccountProvider
+    Assert ($script:accountProvider -eq 'arkuzo') 'starting Volt later does not flip an active Arkuzo farm back'
+    # Suspensions belong to the launcher that made them: account ids differ between the two.
+    $script:suspendedAccounts = @{ 'aaaaaaaa-0000-4000-8000-000000000009' = @{ accountId = 'aaaaaaaa-0000-4000-8000-000000000009'; reason = 'COOKIE_DEAD' } }
+    $script:voltControlStatus = [pscustomobject]@{ available = $true; globalMappingSafe = $true; accounts = @() }
+    Assert (Test-ArkuzoSuspendedRowsSafe) 'a Volt suspension does not block Arkuzo recovery'
+    $script:configFilePath = $null
+    $script:voltControlCheckedUtc = [datetime]::UtcNow
+    Update-ArkuzoCookieSuspensions
+    Assert (@($restorePolicy.excluded_account_ids).Count -eq 0) 'a Volt suspension is never auto-excluded after switching to Arkuzo'
     $script:accountProviderSetting = 'volt'; Resolve-ArkuzoAccountProvider
     Assert ($script:accountProvider -eq 'volt') 'volt setting keeps Volt'
     Remove-Item -LiteralPath (Get-ArkuzoVaultPath)

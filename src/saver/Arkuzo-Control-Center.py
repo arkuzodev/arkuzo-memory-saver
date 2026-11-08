@@ -504,6 +504,8 @@ def normalize_vault(raw) -> dict:
             except VaultError:
                 pass
     seen_ids, seen_trackers, seen_users = set(), set(), set()
+    # Rows that can't be used are kept as they are, never dropped: they may hold the only copy of a cookie.
+    vault['unreadable'] = [r for r in raw.get('unreadable') or [] if isinstance(r, dict)][:200]
     for s in raw.get('privateServers') or []:
         if isinstance(s, dict) and GUID.match(str(s.get('id') or '')) and DIGITS.match(str(s.get('placeId') or '')) and str(s.get('linkCode') or '').startswith(SECRET_PREFIX):
             vault['privateServers'].append({'id': s['id'], 'name': str(s.get('name') or '')[:60], 'placeId': str(s['placeId']),
@@ -513,9 +515,8 @@ def normalize_vault(raw) -> dict:
         if not isinstance(a, dict):
             continue
         aid, tracker, uid = str(a.get('id') or ''), str(a.get('browserTrackerId') or ''), a.get('userId')
-        if not GUID.match(aid) or not TRACKER.match(tracker) or not isinstance(uid, int) or isinstance(uid, bool) or uid <= 0:
-            continue
-        if aid.lower() in seen_ids or tracker in seen_trackers or uid in seen_users or not str(a.get('cookie') or '').startswith(SECRET_PREFIX):
+        if not GUID.match(aid) or not TRACKER.match(tracker) or not isinstance(uid, int) or isinstance(uid, bool) or uid <= 0                 or aid.lower() in seen_ids or tracker in seen_trackers or uid in seen_users or not str(a.get('cookie') or '').startswith(SECRET_PREFIX):
+            vault['unreadable'].append(a)
             continue
         seen_ids.add(aid.lower()); seen_trackers.add(tracker); seen_users.add(uid)
         status = a.get('cookieStatus') if a.get('cookieStatus') in ('alive', 'dead', 'unknown') else 'unknown'
@@ -537,7 +538,27 @@ def normalize_vault(raw) -> dict:
 
 
 def load_vault(data: Path) -> dict:
-    return normalize_vault(read_json(data / VAULT_FILE, retry_missing=False))
+    """A missing vault is empty; a damaged one raises, so nothing ever overwrites it."""
+    path = data / VAULT_FILE
+    for attempt in range(3):
+        try:
+            raw = path.read_text(encoding='utf-8-sig')
+        except FileNotFoundError:
+            return empty_vault()
+        except OSError:
+            time.sleep(0.05)
+            continue
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            if attempt == 2:
+                raise VaultError('data/accounts.json is damaged and was left untouched; restore it from a backup or fix it')
+            time.sleep(0.05)
+            continue
+        if not isinstance(parsed, dict):
+            raise VaultError('data/accounts.json is damaged and was left untouched; restore it from a backup or fix it')
+        return normalize_vault(parsed)
+    raise VaultError('data/accounts.json could not be read')
 
 
 def update_vault(data: Path, change):
@@ -555,7 +576,8 @@ def public_account(a: dict) -> dict:
 
 def public_vault(vault: dict) -> dict:
     return {'settings': dict(vault['settings']), 'accounts': [public_account(a) for a in vault['accounts']],
-            'privateServers': [{k: v for k, v in s.items() if k != 'linkCode'} for s in vault['privateServers']]}
+            'privateServers': [{k: v for k, v in s.items() if k != 'linkCode'} for s in vault['privateServers']],
+            'unreadableCount': len(vault.get('unreadable') or [])}
 
 
 def find_account(vault: dict, account_id: str) -> dict:
@@ -1585,6 +1607,8 @@ class App:
         self.pages_lock = threading.Lock()
         self.cookies = CookieChecker(data)
         self.login = BrowserLogin(data, find_app_browser())
+        # A sign-in window cut off by a crash leaves a signed-in throwaway profile behind.
+        shutil.rmtree(data / 'browser-login', ignore_errors=True)
 
     def save_prefs(self):
         write_json_atomic(self.prefs_path, self.prefs)

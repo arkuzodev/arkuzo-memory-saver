@@ -190,7 +190,7 @@ class VaultTests(unittest.TestCase):
         self.assertIsNone(vault['accounts'][0]['privateServerId'])
         self.assertIsNone(vault['settings']['sharedPrivateServerId'])
 
-    def test_malformed_rows_are_dropped_not_fatal(self):
+    def test_malformed_rows_are_kept_not_fatal(self):
         good = cc.protect_secret(fake_cookie('m'))
         (self.data / cc.VAULT_FILE).write_text(json.dumps({'accounts': [
             {'id': '11111111-1111-4111-8111-111111111111', 'userId': 5, 'browserTrackerId': '123456789012', 'cookie': good},
@@ -202,6 +202,25 @@ class VaultTests(unittest.TestCase):
         self.assertEqual([a['userId'] for a in vault['accounts']], [5])
         self.assertEqual(vault['settings']['launchDelaySec'], 12)
         self.assertTrue(vault['settings']['farmRunning'])
+        # Unusable rows are kept untouched (they may hold the only copy of a cookie), across writes.
+        self.assertEqual(len(vault['unreadable']), 3)
+        cc.update_vault_settings(self.data, {'launchDelaySec': 20})
+        saved = json.loads((self.data / cc.VAULT_FILE).read_text(encoding='utf-8'))
+        self.assertEqual(len(saved['unreadable']), 3)
+        self.assertEqual(len(cc.load_vault(self.data)['unreadable']), 3, 'not duplicated by a reload')
+        self.assertEqual(cc.public_vault(cc.load_vault(self.data))['unreadableCount'], 3)
+
+    def test_damaged_vault_is_never_overwritten(self):
+        path = self.data / cc.VAULT_FILE
+        path.write_text('{"accounts": [ {"id": "half-written', encoding='utf-8')
+        with self.assertRaises(cc.VaultError):
+            cc.load_vault(self.data)
+        self.roblox.users[fake_cookie('n')] = (400, 'Farm', 'F')
+        with self.assertRaises(cc.VaultError):
+            cc.add_account(self.data, fake_cookie('n'))
+        with self.assertRaises(cc.VaultError):
+            cc.update_vault_settings(self.data, {'launchDelaySec': 20})
+        self.assertEqual(path.read_text(encoding='utf-8'), '{"accounts": [ {"id": "half-written', 'damaged file left untouched')
 
     def test_login_cookie_selection(self):
         cookies = [{'name': 'RBXEventTrackerV2', 'domain': '.roblox.com', 'value': 'x'},

@@ -1377,14 +1377,26 @@ function Get-ArkuzoVaultSetting($Vault, [string]$Name, $Default, [double]$Min = 
     return $value
 }
 
+function Test-ArkuzoVoltManagerRunning {
+    $managers = @(Get-Process -Name tauri-app -ErrorAction SilentlyContinue)
+    try { return (@($managers | Where-Object { try { [string]::Equals($_.Path, $voltPath, [StringComparison]::OrdinalIgnoreCase) } catch { $false } }).Count -gt 0) }
+    finally { foreach ($m in $managers) { $m.Dispose() } }
+}
 function Resolve-ArkuzoAccountProvider {
-    # auto: Arkuzo accounts once the vault holds an account, Volt otherwise.
+    # auto: Arkuzo once the vault holds an account and Volt's manager is not
+    # running. A Volt farm keeps Volt (its clients are not in the vault, so
+    # switching would silently stop recovering them); once Arkuzo is active, a
+    # Volt start does not flip it back (the conflict guard covers that).
     $setting = [string]$script:accountProviderSetting
     $next = 'volt'
+    $hasAccounts = $false
     if ($setting -ceq 'arkuzo') { $next = 'arkuzo' }
     elseif ($setting -cne 'volt') {
-        try { $vault = Read-ArkuzoVaultFile; if ($null -ne $vault -and @($vault.accounts).Count -gt 0) { $next = 'arkuzo' } } catch { }
+        try { $vault = Read-ArkuzoVaultFile; $hasAccounts = $null -ne $vault -and @($vault.accounts).Count -gt 0 } catch { }
+        if ($hasAccounts -and ((Test-ArkuzoNativeProvider) -or -not (Test-ArkuzoVoltManagerRunning))) { $next = 'arkuzo' }
+        elseif ($hasAccounts) { $script:accountProviderNotice = 'Volt is running, so Volt still launches clients. Close Volt (or set "Who launches clients" to Arkuzo) to farm with these accounts.' }
     }
+    if ($next -ceq 'volt' -and -not $hasAccounts) { $script:accountProviderNotice = $null }
     if ($next -cne $script:accountProvider) {
         $script:accountProvider = $next
         Clear-VoltRecoveryCapability
@@ -1823,10 +1835,16 @@ function Get-ArkuzoControlledAccount([string]$TrackerId, [int]$ClientId) {
     if ($matchedAccounts.Count -ne 1 -or $matchedAccounts[0].cookieStatus -ceq 'dead' -or ($null -ne $script:suspendedAccounts -and $script:suspendedAccounts.ContainsKey([string]$matchedAccounts[0].accountId)) -or $restorePolicy.excluded_account_ids -contains $matchedAccounts[0].accountId) { return $null }
     return $matchedAccounts[0]
 }
+function Test-ArkuzoSuspensionInScope($Entry) {
+    # Entries without a provider were made by Volt (before Arkuzo accounts existed).
+    $owner = if ($null -ne $Entry -and $Entry.provider) { [string]$Entry.provider } else { 'volt' }
+    return ($owner -ceq [string]$script:accountProvider)
+}
 function Test-ArkuzoSuspendedRowsSafe {
     # A suspended (dead-cookie) account must still be an exact idle row.
     foreach($key in @($script:suspendedAccounts.Keys)) {
         if ($restorePolicy.excluded_account_ids -contains $key) { continue }
+        if (-not (Test-ArkuzoSuspensionInScope $script:suspendedAccounts[$key])) { continue } # The other launcher's account.
         $rows=@($voltControlStatus.accounts | Where-Object { $_.accountId -ceq $key })
         if ($rows.Count -ne 1) { return $false }
         $a=$rows[0]
@@ -2093,7 +2111,7 @@ function Update-ArkuzoCookieSuspensions {
                 $script:suspendedAccounts.Remove($key)
             } else {
                 $history=$null;if ($recoveryPending.ContainsKey($key)) { $history=$recoveryPending[$key].Clone();$history.readySinceUtc=$null;$history.lastObservedUtc=$null }
-                $script:suspendedAccounts[$key]=@{accountId=$key;username=$a.username;reason='COOKIE_DEAD';suspendedUtc=$utc.ToString('o');pending=$history}
+                $script:suspendedAccounts[$key]=@{accountId=$key;username=$a.username;reason='COOKIE_DEAD';suspendedUtc=$utc.ToString('o');pending=$history;provider=$script:accountProvider}
                 $script:recoveryPending.Remove($key)
             }
             Save-ArkuzoRecoveryJournal
@@ -2104,6 +2122,7 @@ function Update-ArkuzoCookieSuspensions {
     }
     $autoExcluded = $false
     foreach ($key in @($script:suspendedAccounts.Keys)) {
+        if (-not (Test-ArkuzoSuspensionInScope $script:suspendedAccounts[$key])) { continue } # Never exclude the other launcher's accounts.
         if (@($voltControlStatus.accounts | Where-Object { $_.accountId -ceq $key }).Count -eq 0) {
             if ($restorePolicy.excluded_account_ids -notcontains $key) {
                 $restorePolicy.excluded_account_ids += @($key)

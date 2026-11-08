@@ -1108,7 +1108,8 @@ function renderVault() {
   $('farmStats').replaceChildren(...[['In game', `${inGame}/${accounts.length}`], ['Relaunch on', relaunch], ['Signed out', dead]].map(([k, n]) => el('div', {}, el('b', { text: String(n) }), el('span', { text: k }))));
   $('btnFarmStart').hidden = farm; $('btnFarmStop').hidden = !farm; $('btnFarmStopClose').hidden = !farm;
   $('btnFarmStart').disabled = !accounts.length;
-  const notice = v.providerNotice || (hb && hb.accountProviderNotice) || v.error;
+  const notice = v.error || v.providerNotice || (hb && hb.accountProviderNotice) ||
+    (v.unreadableCount ? `${v.unreadableCount} account row${v.unreadableCount === 1 ? '' : 's'} in data/accounts.json could not be read and ${v.unreadableCount === 1 ? 'is' : 'are'} kept untouched there.` : '');
   $('farmNotice').hidden = !notice; $('farmNotice').textContent = notice || '';
   // Sign-in line.
   const login = v.login || {};
@@ -1177,7 +1178,7 @@ function accountEditor(a, servers, settings) {
       el('button', { class: 'btn accent sm', type: 'submit' }, icon('check'), 'Save')));
 }
 const FARM_FIELDS = [
-  ['provider', 'Who launches clients', 'Arkuzo uses the accounts above; Volt uses its own account manager. Auto picks Arkuzo once you add an account.', ['enum', ['auto', 'arkuzo', 'volt']]],
+  ['provider', 'Who launches clients', 'Arkuzo uses the accounts above; Volt uses its own account manager. Auto picks Arkuzo once you add an account and Volt is closed.', ['enum', ['auto', 'arkuzo', 'volt']]],
   ['defaultPlaceId', 'Place to farm', 'Place ID from the game link (roblox.com/games/<b>ID</b>/...).', ['text']],
   ['launchDelaySec', 'Launch spacing', 'Seconds between two launches. Roblox and executors cope better with some space.', ['int', 5, 120, 's']],
   ['relaunchDelaySec', 'Relaunch delay', 'Wait after a client closed before launching it again.', ['int', 0, 600, 's']],

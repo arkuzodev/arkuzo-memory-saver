@@ -2,7 +2,7 @@
 
 Changes for **Arkuzo Memory Saver with Volt Integration** are recorded here.
 
-## Unreleased
+## v2.1.4 — No false saver kills, frozen clients come back
 
 - **The Control Center no longer kills a healthy saver.** One unreadable heartbeat (the saver replaces the file every 2 s) made the supervisor measure silence from the saver's start, so after 150 s any bad read killed it as "stopped responding for <session age>" (217 s, 836 s and 12,849 s on 24 Oct; the two unexplained saver restarts on 26 Oct with the farm running fit the same pattern). Silence now counts from the last heartbeat seen, a briefly missing file is retried, waking from sleep gives the saver time to write again, and a briefly unreadable heartbeat is no verdict on a saver started elsewhere (after 2 minutes the normal check applies again).
 - **Supervisor actions are logged** to `data/Arkuzo-Logs/control-center.log`, so a stop, restart or kill can be explained afterwards.

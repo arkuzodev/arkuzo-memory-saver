@@ -348,6 +348,71 @@ function Test-ArkuzoRecoveryBudget($AttemptTimes, [datetime]$NowUtc, [int]$Coold
         return $true
     } catch { return $false }
 }
+function Read-ArkuzoBoundedFile([string]$Path, [long]$Offset, [int]$MaxBytes, [int]$TimeoutMs = 2000) {
+    # Every read of a Roblox log goes through here. The log of a client that froze
+    # at a remote-desktop disconnect could not even be opened: CreateFile blocked
+    # until the client was gone, and the saver hung on it at every start
+    # (8 Nov 16:28-17:21). The open and read run on a worker thread; a read that
+    # outlasts TimeoutMs reports TimedOut, and until it finishes that file is
+    # skipped at once, so at most one worker per file can be stuck.
+    # Offset < 0 reads the last MaxBytes; a gap larger than MaxBytes is skipped.
+    if (-not ('Arkuzo.BoundedReadV1' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Text;
+using System.Threading.Tasks;
+namespace Arkuzo {
+ public sealed class BoundedReadResult { public bool Ok; public bool TimedOut; public long Length; public long Start; public int Count; public string Text = ""; }
+ public static class BoundedReadV1 {
+  static readonly object Gate = new object();
+  static readonly Dictionary<string, Task<BoundedReadResult>> Pending = new Dictionary<string, Task<BoundedReadResult>>(StringComparer.OrdinalIgnoreCase);
+  public static BoundedReadResult Read(string path, long offset, int maxBytes, int timeoutMs) {
+   Task<BoundedReadResult> task;
+   lock (Gate) {
+    if (Pending.TryGetValue(path, out task) && !task.IsCompleted) return new BoundedReadResult { TimedOut = true };
+    task = Task.Run(() => ReadNow(path, offset, maxBytes));
+    Pending[path] = task;
+   }
+   if (!task.Wait(timeoutMs)) return new BoundedReadResult { TimedOut = true };
+   lock (Gate) { Task<BoundedReadResult> current; if (Pending.TryGetValue(path, out current) && current == task) Pending.Remove(path); }
+   return task.Result;
+  }
+  public static int Stuck() { lock (Gate) { int n = 0; foreach (var t in Pending.Values) if (!t.IsCompleted) n++; return n; } }
+  static BoundedReadResult ReadNow(string path, long offset, int maxBytes) {
+   try {
+    if (!File.Exists(path)) return new BoundedReadResult();
+    using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)) {
+     long len = fs.Length;
+     long start = offset < 0 ? Math.Max(0L, len - maxBytes) : offset;
+     if (start > len) return new BoundedReadResult { Ok = true, Length = len, Start = start };
+     if (offset >= 0 && len - start > maxBytes) start = len - maxBytes;
+     int want = (int)Math.Min((long)maxBytes, len - start);
+     var buffer = new byte[want];
+     fs.Seek(start, SeekOrigin.Begin);
+     int got = 0;
+     while (got < want) { int n = fs.Read(buffer, got, want - got); if (n <= 0) break; got += n; }
+     return new BoundedReadResult { Ok = true, Length = len, Start = start, Count = got, Text = Encoding.UTF8.GetString(buffer, 0, got) };
+    }
+   } catch (Exception) { return new BoundedReadResult(); }
+  }
+ }
+}
+'@
+    }
+    $result = [Arkuzo.BoundedReadV1]::Read($Path, $Offset, $MaxBytes, $TimeoutMs)
+    if ($result.TimedOut) {
+        Warn-Throttled 'roblox-log-blocked' 'A Roblox log file did not open within 2 s (a frozen client can hold it); it is skipped until it opens again.'
+    }
+    return $result
+}
+function Read-ArkuzoLogHeadLines([string]$Path, [int]$Lines, [int]$MaxBytes = 262144) {
+    # The first $Lines lines of a log, read through Read-ArkuzoBoundedFile.
+    $r = Read-ArkuzoBoundedFile $Path 0 $MaxBytes
+    if (-not $r.Ok -or [string]::IsNullOrEmpty($r.Text)) { return @() }
+    return @($r.Text -split "`r?`n" | Select-Object -First $Lines)
+}
 function Find-RobloxProcessLog([int]$TargetProcessId, [string]$TrackerId = $null, [datetime]$StartTimeUtc = [datetime]::MinValue, [string]$LogsDir = $null) {
     try {
         if ($TrackerId -notmatch '\A[0-9]+\z' -or $StartTimeUtc -eq [datetime]::MinValue) { return $null }
@@ -362,7 +427,7 @@ function Find-RobloxProcessLog([int]$TargetProcessId, [string]$TrackerId = $null
                     if ($f.Name -notmatch '_(\d{8}T\d{6}Z)_Player_') { continue }
                     $fTime = [DateTime]::ParseExact($matches[1], 'yyyyMMdd\THHmmss\Z', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal).ToUniversalTime()
                     if ([Math]::Abs(($fTime - $StartTimeUtc.ToUniversalTime()).TotalSeconds) -gt 30) { continue }
-                    $lines = Get-Content -LiteralPath $f.FullName -TotalCount 100 -ErrorAction SilentlyContinue
+                    $lines = Read-ArkuzoLogHeadLines $f.FullName 100 131072
                     $content = $lines -join "`n"
                     if ($content -match "websiteBTId is\s*(\d+)" -or $content -match "BTID is overriden to\s*(\d+)") {
                         if ($matches[1] -eq $TrackerId) { return $f.FullName }
@@ -504,33 +569,16 @@ function Resolve-ArkuzoAccountName([int]$ProcessId, [string]$TrackerId = $null, 
     return 'Unknown account'
 }
 function Read-RobloxLogTail([string]$Path, [ref]$CurrentOffset) {
-    if (-not (Test-Path -LiteralPath $Path)) { return $null }
-    $fs = $null
-    try {
-        $fs = [IO.FileStream]::new($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
-        $len = $fs.Length
-        if ($len -le 0) { return $null }
-        if ($CurrentOffset.Value -le 0) {
-            # Initial read: inspect up to 64KB tail to catch recent disconnects without reading massive files
-            $start = [Math]::Max(0L, $len - 65536L)
-            $fs.Seek($start, [IO.SeekOrigin]::Begin) | Out-Null
-            $toRead = [int]($len - $start)
-            $buf = New-Object byte[] $toRead
-            $read = $fs.Read($buf, 0, $toRead)
-            $CurrentOffset.Value = $len
-            return [Text.Encoding]::UTF8.GetString($buf, 0, $read)
-        }
-        if ($len -lt $CurrentOffset.Value) { $CurrentOffset.Value = 0; return $null }
-        if ($len -eq $CurrentOffset.Value) { return $null }
-        if (($len - $CurrentOffset.Value) -gt 65536) { $CurrentOffset.Value = $len - 65536 }
-        $fs.Seek($CurrentOffset.Value, [IO.SeekOrigin]::Begin) | Out-Null
-        $toRead = [int]($len - $CurrentOffset.Value)
-        $buf = New-Object byte[] $toRead
-        $read = $fs.Read($buf, 0, $toRead)
-        $CurrentOffset.Value += $read
-        return [Text.Encoding]::UTF8.GetString($buf, 0, $read)
-    } catch { return $null }
-    finally { if ($null -ne $fs) { $fs.Dispose() } }
+    # New text since $CurrentOffset (the last 64 KB on the first read or after a
+    # larger gap). Bounded: a log that cannot be opened returns $null and keeps the offset.
+    $offset = [long]$CurrentOffset.Value
+    $r = Read-ArkuzoBoundedFile $Path $(if ($offset -le 0) { -1 } else { $offset }) 65536
+    if (-not $r.Ok -or $r.Length -le 0) { return $null }
+    if ($offset -le 0) { $CurrentOffset.Value = $r.Length; return $r.Text }
+    if ($r.Length -lt $offset) { $CurrentOffset.Value = 0; return $null }
+    if ($r.Count -le 0) { return $null }
+    $CurrentOffset.Value = $r.Start + $r.Count
+    return $r.Text
 }
 function Get-RobloxLogDisconnectReason([string]$NewText) {
     if ([string]::IsNullOrWhiteSpace($NewText)) { return $null }
@@ -5603,7 +5651,7 @@ try {
                     $state.LogPath = Find-RobloxProcessLog -TargetProcessId $id -TrackerId $state.TrackerId -StartTimeUtc $client.StartTime.ToUniversalTime()
                     if ($null -ne $state.LogPath) {
                         try {
-                            $headLines = @(Get-Content -LiteralPath $state.LogPath -TotalCount 350 -ErrorAction SilentlyContinue)
+                            $headLines = @(Read-ArkuzoLogHeadLines $state.LogPath 350)
                             $headText = $headLines -join "`n"
                             if ($headText -match '(?i)\[DFLog::NetworkClient\] Connection accepted from') {
                                 $state.GameReady = $true; $state.EverGameReady = $true

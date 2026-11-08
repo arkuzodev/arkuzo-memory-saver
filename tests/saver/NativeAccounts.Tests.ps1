@@ -61,7 +61,7 @@ function Reset-Engine {
     $script:sessionObservedAccounts = @{}; $script:saverSessionStartEpochMs = $null; $script:tracked = @{}; $script:systemMemory = @{ commitPercent = 30 }
     $script:accountProvider = 'arkuzo'; $script:accountProviderSetting = 'auto'; $script:accountProviderNotice = $null
     $script:nativeLaunches = @{}; $script:nativeLastLaunchUtc = $null; $script:nativeSingletons = @(); $script:nativeVault = $null
-    $script:nativeVoltConflict = @{ checkedUtc = [datetime]::UtcNow; userIds = @() }
+    $script:nativeVoltConflict = @{ checkedUtc = [datetime]::UtcNow; userIds = @(); usernames = @() }
     $script:lastClientStartUtc = $null; $script:farmFreeze = $null
     $script:clients = @(); $script:posts = New-Object Collections.ArrayList; $script:starts = New-Object Collections.ArrayList
     $script:roblox = @{}  # cookie -> @{ status; rotate }
@@ -150,9 +150,9 @@ try {
     Assert (-not (Invoke-ArkuzoNativeLaunch $B $TB).requestAccepted) 'stopped farm: no automatic launch'
     Assert ((Invoke-ArkuzoNativeLaunch $B $TB -Manual).requestAccepted) 'stopped farm: the Launch button still works'
     Reset-Engine; New-Vault; $script:roblox[(Fake-Cookie 'b')] = @{ }
-    $script:nativeVoltConflict = @{ checkedUtc = [datetime]::UtcNow; userIds = @('102') }
+    $script:nativeVoltConflict = @{ checkedUtc = [datetime]::UtcNow; userIds = @('102'); usernames = @('farmbravo') }
     Assert (-not (Invoke-ArkuzoNativeLaunch $B $TB).requestAccepted -and $script:starts.Count -eq 0) 'Volt auto-relaunch on the same account blocks Arkuzo launches'
-    Assert ((Get-ArkuzoNativeStatus).accounts[1].voltConflict -and $script:accountProviderNotice -match 'Volt') 'conflict is shown'
+    Assert ((Get-ArkuzoNativeStatus).accounts[1].voltConflict -and $script:accountProviderNotice -match 'Volt is running 1') 'conflict is shown'
     Reset-Engine; New-Vault; $script:roblox[(Fake-Cookie 'b')] = @{ }
     $script:clients = @([pscustomobject]@{ processId = 600; trackerId = $TB; path = '' })
     Assert (-not (Invoke-ArkuzoNativeLaunch $B $TB).requestAccepted -and $script:starts.Count -eq 0) 'an account already in game is not launched again'
@@ -193,7 +193,7 @@ try {
     $script:voltRunning = $true
     function Test-ArkuzoVoltRelaunching { $script:voltRunning }
     Resolve-ArkuzoAccountProvider
-    Assert ($script:accountProvider -eq 'volt' -and $script:accountProviderNotice -match 'auto-relaunch is on') 'auto keeps a relaunching Volt farm on Volt (its clients are not in the vault)'
+    Assert ($script:accountProvider -eq 'volt' -and $script:accountProviderNotice -match 'Volt is running its own clients') 'auto keeps a relaunching Volt farm on Volt (its clients are not in the vault)'
     $script:voltRunning = $false
     Resolve-ArkuzoAccountProvider
     Assert ($script:accountProvider -eq 'arkuzo') 'auto picks Arkuzo once the vault has accounts and Volt is closed'

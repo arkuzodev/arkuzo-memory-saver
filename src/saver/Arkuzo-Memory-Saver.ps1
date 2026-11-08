@@ -1310,7 +1310,7 @@ $script:nativeLaunches = @{}        # accountId -> launch [datetime] UTC, until 
 $script:nativeLastLaunchUtc = $null
 $script:nativeSingletons = @()
 $script:nativeVaultFailed = $false
-$script:nativeVoltConflict = @{ checkedUtc = [datetime]::MinValue; userIds = @() }
+$script:nativeVoltConflict = @{ checkedUtc = [datetime]::MinValue; userIds = @(); usernames = $null }
 $script:nativeVault = $null
 $script:NativeVaultMutexName = 'Local\ArkuzoAccountVault'
 $script:NativeVaultEntropy = [Text.Encoding]::ASCII.GetBytes('Arkuzo.AccountVault.v1')
@@ -1384,8 +1384,9 @@ function Test-ArkuzoVoltManagerRunning {
     finally { foreach ($m in $managers) { $m.Dispose() } }
 }
 function Test-ArkuzoVoltRelaunching {
-    # Volt open as an executor is fine; Volt acting as the launcher (auto-relaunch on) is not.
-    if (-not (Test-ArkuzoVoltManagerRunning)) { return $false }
+    # Volt open as an executor is fine. Volt is the launcher only while it runs
+    # clients of its own with auto-relaunch on (a Volt farm).
+    if (@((Get-ArkuzoVoltRunningAccounts).usernames).Count -eq 0) { return $false }
     $status = Get-ArkuzoVoltRecoveryStatus -Root $PSScriptRoot
     return ($status.safeToRecycle -is [bool] -and $status.safeToRecycle)
 }
@@ -1401,7 +1402,7 @@ function Resolve-ArkuzoAccountProvider {
     elseif ($setting -cne 'volt') {
         try { $vault = Read-ArkuzoVaultFile; $hasAccounts = $null -ne $vault -and @($vault.accounts).Count -gt 0 } catch { }
         if ($hasAccounts -and ((Test-ArkuzoNativeProvider) -or -not (Test-ArkuzoVoltRelaunching))) { $next = 'arkuzo' }
-        elseif ($hasAccounts) { $script:accountProviderNotice = 'Volt''s auto-relaunch is on, so Volt still launches clients. Turn off auto-relaunch in Volt (keep Volt open as your executor), or set "Who launches clients" to Arkuzo.' }
+        elseif ($hasAccounts) { $script:accountProviderNotice = 'Volt is running its own clients with auto-relaunch on, so Volt still launches. Close Volt''s clients (Volt can stay open as your executor), or set "Who launches clients" to Arkuzo.' }
     }
     if ($next -ceq 'volt' -and -not $hasAccounts) { $script:accountProviderNotice = $null }
     if ($next -cne $script:accountProvider) {
@@ -1427,29 +1428,38 @@ function Enable-ArkuzoMultiInstance {
     }
 }
 
-function Get-ArkuzoVoltRelaunchConflict($Vault) {
-    # Two launchers on one account kick each other in a loop ("signed in
-    # elsewhere"). While Volt runs with auto-relaunch on for an account that is
-    # also in the vault, Arkuzo launches nothing for that account.
+function Get-ArkuzoVoltRunningAccounts {
+    # Accounts Volt is running a client for right now: live clients whose browser
+    # tracker id is one of Volt's. Volt relaunches only clients it started itself,
+    # so these are the only accounts where Volt and Arkuzo could both launch (and
+    # kick each other, "signed in elsewhere"). Returns @{ userIds; usernames }.
     $utc = [datetime]::UtcNow
-    if (($utc - $script:nativeVoltConflict.checkedUtc).TotalSeconds -lt 30) { return $script:nativeVoltConflict.userIds }
-    $ids = @()
+    if (($utc - $script:nativeVoltConflict.checkedUtc).TotalSeconds -lt 10 -and $null -ne $script:nativeVoltConflict.usernames) { return $script:nativeVoltConflict }
+    $result = @{ checkedUtc = $utc; userIds = @(); usernames = @() }
     try {
-        $managers = @(Get-Process -Name tauri-app -ErrorAction SilentlyContinue)
-        $running = @($managers | Where-Object { try { [string]::Equals($_.Path, $voltPath, [StringComparison]::OrdinalIgnoreCase) } catch { $false } }).Count -gt 0
-        foreach ($m in $managers) { $m.Dispose() }
-        if ($running) {
-            $status = Get-ArkuzoVoltRecoveryStatus -Root $PSScriptRoot
-            if ($status.safeToRecycle -is [bool] -and $status.safeToRecycle) {
-                $map = Invoke-ArkuzoVoltProbe '--map'
-                $voltUsers = @()
-                if ($null -ne $map -and $null -ne $map.byUserId) { $voltUsers = @($map.byUserId.PSObject.Properties.Name) }
-                $ids = @($Vault.accounts | Where-Object { $voltUsers -contains [string]$_.userId } | ForEach-Object { [string]$_.userId })
+        if (Test-ArkuzoVoltManagerRunning) {
+            $map = Invoke-ArkuzoVoltProbe '--map'
+            if ($null -ne $map -and $null -ne $map.byTracker) {
+                $names = @()
+                foreach ($c in @(Get-ArkuzoNativeClients)) {
+                    if ($c.trackerId -and $map.byTracker.PSObject.Properties.Name -contains [string]$c.trackerId) { $names += ([string]$map.byTracker.([string]$c.trackerId)).ToLowerInvariant() }
+                }
+                $result.usernames = @($names | Select-Object -Unique)
+                if ($null -ne $map.byUserId) {
+                    $result.userIds = @($map.byUserId.PSObject.Properties | Where-Object { $result.usernames -contains ([string]$_.Value).ToLowerInvariant() } | ForEach-Object { [string]$_.Name })
+                }
             }
         }
-    } catch { $ids = @() }
-    $script:nativeVoltConflict = @{ checkedUtc = $utc; userIds = $ids }
-    return $ids
+    } catch { }
+    $script:nativeVoltConflict = $result
+    return $result
+}
+function Get-ArkuzoVoltRelaunchConflict($Vault) {
+    # Arkuzo leaves an account alone while Volt is running a client for it.
+    $volt = Get-ArkuzoVoltRunningAccounts
+    $ids = @($volt.userIds)
+    $names = @($volt.usernames)
+    return @($Vault.accounts | Where-Object { $ids -contains [string]$_.userId -or $names -contains ([string]$_.username).ToLowerInvariant() } | ForEach-Object { [string]$_.userId })
 }
 function Invoke-ArkuzoVoltProbe([string]$Mode) {
     $child = $null
@@ -1516,7 +1526,7 @@ function Get-ArkuzoNativeStatus($Clients = $null) {
             processId = $(if ($live.Count -eq 1) { $live[0].processId } else { $null }); controlReady = [bool]$ready; rowReady = [bool]$ready
             launchRequestedAtMs = [long]$a.launchRequestedAtMs; closeRequestedAtMs = [long]$a.closeRequestedAtMs; voltConflict = [bool]$blocked }
     }
-    $script:accountProviderNotice = if ($conflicts.Count -gt 0) { 'Volt is running with auto-relaunch on for ' + $conflicts.Count + ' of these accounts. Turn off Volt''s auto-relaunch (or close Volt): two launchers on one account kick each other.' } else { $null }
+    $script:accountProviderNotice = if ($conflicts.Count -gt 0) { 'Volt is running ' + $conflicts.Count + ' of these accounts, so Arkuzo leaves them to Volt (two launchers on one account kick each other). Close those clients in Volt to hand them over.' } else { $null }
     return [pscustomobject]@{ available = $true; globalMappingSafe = [bool]$mappingSafe; processMappingSafe = [bool]$mappingSafe; unmappedAccountIds = @()
         managerId = $PID; managerStartTicks = $script:controllerStartTicks; relaunchDelayMs = ([int]$restorePolicy.relaunch_delay_sec * 1000)
         accounts = $accounts; farmRunning = [bool]$farmRunning; provider = 'arkuzo'; reason = 'Arkuzo account vault' }
@@ -2496,6 +2506,7 @@ function Update-ArkuzoRecoveryOutcomes {
                 $launchGap = if ($native) { [int](Get-ArkuzoVaultSetting $script:nativeVault 'launchDelaySec' 12 5 120) } else { [int]$restorePolicy.retry_base_sec }
                 $launchCap = if ($native) { [math]::Max([int]$restorePolicy.retry_max_per_hour, 120) } else { [int]$restorePolicy.retry_max_per_hour }
                 if (-not (Test-ArkuzoRecoveryBudget $launchAttempts $utc $launchGap $launchCap)) {
+                    if ($native) { continue } # Launch spacing: normal, not worth a warning.
                     Warn-Throttled 'restore-budget' 'Missing-account launch budget/backoff active. Other clients remain protected; automatic retry will resume.';continue
                 }
                 if ($null -eq $systemMemory -or $systemMemory.commitPercent -ge $healthPolicy.pressure_percent) {

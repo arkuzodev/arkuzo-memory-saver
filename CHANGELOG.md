@@ -2,6 +2,14 @@
 
 Changes for **Arkuzo Memory Saver with Volt Integration** are recorded here.
 
+## Unreleased — Accounts without Volt
+
+- **Arkuzo has its own account manager.** The Accounts page keeps your Roblox accounts: add one by pasting its cookie or by signing in through a small browser window. Each cookie is checked with Roblox (Alive, Dead or Unchecked, with a check button per account, Check all, and a check every 60 minutes), and Roblox's re-issued cookies replace the stored ones, so accounts stay signed in. Cookies and private-server link codes are stored encrypted with Windows DPAPI for your Windows user and never appear in a page, log or command line.
+- **Start farm, and relaunching, without Volt.** The saver now launches clients itself: Start farm launches every account with Relaunch on, 12 s apart, and keeps them in game. A client that closes, crashes, is kicked or freezes is relaunched 8 s later, with no growing backoff; only a launch that produces no client is retried (after 120 s). The recovery core is the same one Volt used (journal, exact mapping, in-game verification, budgets, farm-freeze handling), now fed by Arkuzo's account list; each client is mapped by its account's own tracker id. Launch / Close per account, Stop farm and Stop & close clients.
+- **Multiple clients without Volt:** the saver holds Roblox's single-instance lock (on by default, "Multiple clients").
+- **Places and private servers:** a farm-wide place, a per-account place, and private servers from share links or `privateServerLinkCode` links, one for all or per account.
+- **Who launches clients** (`accounts.provider`): *auto* uses Arkuzo once an account is added, otherwise Volt; *volt* keeps the previous behaviour exactly. While Volt runs with auto-relaunch on for the same account, Arkuzo refuses to launch it and says why, because two launchers on one account kick each other. Guide: [docs/accounts.md](docs/accounts.md).
+
 ## v2.1.5 — Farm freezes recover in about 2.5 minutes
 
 - **A farm-wide freeze is over in about 2.5 minutes instead of 6.** When most clients freeze together at 0% CPU (Chrome Remote Desktop disconnects and display events in the logs), the saver no longer waits the full hang timeout. After 35 s it recycles the frozen clients one every 20 s, so Volt relaunches them one at a time instead of all at once, and doesn't bring up its "Roblox started before Volt could connect" notice (behind 18 of the 21 recoveries during the four logged freezes, 23-27 Oct). Every recycle keeps the exact Volt account mapping, the journal entry written first, the hourly budget and quarantine. Replaying those four freezes, each account is back in game after 150 s on average (348 s in the logs), and the whole farm after 210 s (436-513 s in the logs). Turn it off with `health.farm_freeze_enabled`. Details: [docs/farm-freeze-recovery.md](docs/farm-freeze-recovery.md).

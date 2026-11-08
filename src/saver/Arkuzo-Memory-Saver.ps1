@@ -330,6 +330,13 @@ function Test-ArkuzoVoltOwnership([int]$ParentId, $Parent, [long]$ClientStartTic
         [long]$Parent.StartTicks -ge $ClientStartTicks -or [string]::IsNullOrWhiteSpace($VoltPath)) { return $false }
     return [string]::Equals([string]$Parent.Path, $VoltPath, [StringComparison]::OrdinalIgnoreCase)
 }
+function Test-ArkuzoClientOwnership($State) {
+    if (Test-ArkuzoNativeProvider) {
+        if ($null -eq $State -or [string]::IsNullOrWhiteSpace([string]$State.TrackerId) -or -not $voltControlStatus.available) { return $false }
+        return (@($voltControlStatus.accounts | Where-Object { $_.trackerId -ceq [string]$State.TrackerId }).Count -eq 1)
+    }
+    return (Test-ArkuzoVoltOwnership $State.ParentId $script:voltParents[$State.ParentId] $State.StartTicks $voltPath)
+}
 function Test-ArkuzoRecoveryBudget($AttemptTimes, [datetime]$NowUtc, [int]$CooldownSec = 60, [int]$MaxPerHour = 20) {
     try {
         $recent = @($AttemptTimes | ForEach-Object { ([datetime]$_).ToUniversalTime() } | Where-Object { ($NowUtc.ToUniversalTime() - $_).TotalSeconds -lt 3600 })
@@ -900,7 +907,7 @@ function Invoke-ArkuzoHealthObservation {
                 if (-not (Test-ArkuzoClientIdentity $state.Watcher $id $state.StartTicks)) { Reset-ArkuzoHealthSample $state; continue }
                 $sample.systemCommitPercent = if ($null -ne $systemMemory) { $systemMemory.commitPercent } else { 0 }
                 $sample.eligible = (-not $MonitorOnly -and $healthPolicy.enabled -and $voltStatus.safeToRecycle -and
-                    (Test-ArkuzoVoltOwnership $state.ParentId $script:voltParents[$state.ParentId] $state.StartTicks $voltPath))
+                    (Test-ArkuzoClientOwnership $state))
                 # Timestamp after collecting; never replay or synthesize missed samples.
                 $state.HealthDecision = Get-ArkuzoHealthDecision $state $sample $healthPolicy $clock.Elapsed.TotalSeconds
                 if (-not $sample.windowPresent -or -not $sample.responding -or $sample.launchError -or
@@ -981,6 +988,11 @@ function Clear-VoltRecoveryCapability {
 function Update-VoltRecoveryCapability {
     param([switch]$SyncControl = $false)
     Clear-VoltRecoveryCapability
+    if (Test-ArkuzoNativeProvider) {
+        if ($SyncControl) { Update-ArkuzoVoltControl }
+        $script:voltStatus = [pscustomobject]@{ safeToRecycle = [bool]($voltControlStatus.available -and $voltControlStatus.provider -ceq 'arkuzo'); reason = 'Arkuzo account vault' }
+        return
+    }
     $script:voltStatus = Get-ArkuzoVoltRecoveryStatus -Root $PSScriptRoot
     if ($SyncControl) {
         Update-ArkuzoVoltControl
@@ -1167,6 +1179,9 @@ function Test-ArkuzoTargetRecovery($Watcher, [int]$ClientId, [long]$StartTicks) 
         # A retained exact process alive on both sides of the metadata query
         # binds the PID query to this generation, without timestamp/slot guesses.
         if ([string]::IsNullOrEmpty($trackerId) -or -not (Test-ArkuzoClientIdentity $Watcher $ClientId $StartTicks)) { return $false }
+        if (Test-ArkuzoNativeProvider) {
+            return ($null -ne (Get-ArkuzoControlledAccount $trackerId $ClientId) -and (Test-ArkuzoClientIdentity $Watcher $ClientId $StartTicks))
+        }
         $target = Get-ArkuzoVoltRecoveryStatus -Root $PSScriptRoot -TrackerId $trackerId
         if ($null -eq (Get-ArkuzoControlledAccount $trackerId $ClientId)) { return $false }
         return ($target.safeToRecycle -is [bool] -and $target.safeToRecycle -and
@@ -1188,6 +1203,12 @@ function Get-ArkuzoRestorePolicy($Config) {
     if ($p.retry_max_sec -lt $p.retry_base_sec) { throw 'Retry maximum must cover base delay' }
     foreach ($id in @($p.excluded_account_ids)) { if ($id -notmatch '\A[0-9a-fA-F-]{36}\z') { throw 'Invalid excluded account identifier' } }
     return $p
+}
+function Get-ArkuzoProviderSetting($Config) {
+    $value = $null
+    if ($null -ne $Config -and $null -ne $Config.accounts) { $value = [string]$Config.accounts.provider }
+    if ($value -cin @('auto', 'arkuzo', 'volt')) { return $value }
+    return 'auto'
 }
 function Get-ArkuzoRetryDelay([int]$Attempt, $Policy) {
     return [int][math]::Min([double]$Policy.retry_max_sec, [double]$Policy.retry_base_sec * [math]::Pow(2,[math]::Min(20,[math]::Max(0,$Attempt-1))))
@@ -1266,10 +1287,411 @@ function Get-ArkuzoLiveResourceSettings($Settings, [hashtable]$Current) {
     }
     return $next
 }
+# ---------------------------------------------------------------------------
+# Arkuzo account provider: launching and relaunching without Volt.
+# The Control Center keeps accounts in data/accounts.json (cookies encrypted
+# with DPAPI for this Windows user). Here the engine builds the same control
+# status the Volt adapter reports, so the recovery core (journal, outcomes,
+# budgets, farm-freeze, handoff) is shared; only status, launch, ownership and
+# the manager checks differ. Differences that matter:
+#  - The engine itself is the launcher: a closed client is relaunched by the
+#    engine after the vault's relaunchDelaySec, paced by launchDelaySec. There is
+#    no exponential backoff for normal relaunches; only a launch that produces no
+#    client within launchTimeoutSec counts as a failed attempt.
+#  - Ownership is the account's unique browser tracker id in the client's
+#    command line (we put it there). Clients with unknown trackers are ignored.
+#  - Cookies, tickets and link codes stay in memory: never logged, never in the
+#    heartbeat, never in an error message.
+# ---------------------------------------------------------------------------
+$script:accountProvider = 'volt'
+$script:accountProviderSetting = 'auto'
+$script:accountProviderNotice = $null
+$script:nativeLaunches = @{}        # accountId -> launch [datetime] UTC, until its client appears or launchTimeoutSec passes
+$script:nativeLastLaunchUtc = $null
+$script:nativeSingletons = @()
+$script:nativeVaultFailed = $false
+$script:nativeVoltConflict = @{ checkedUtc = [datetime]::MinValue; userIds = @() }
+$script:nativeVault = $null
+$script:NativeVaultMutexName = 'Local\ArkuzoAccountVault'
+$script:NativeVaultEntropy = [Text.Encoding]::ASCII.GetBytes('Arkuzo.AccountVault.v1')
+$script:NativeUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36'
+
+function Test-ArkuzoNativeProvider { return $script:accountProvider -ceq 'arkuzo' }
+function Get-ArkuzoVaultPath { return (Join-Path $DataDirectory 'accounts.json') }
+
+function Invoke-ArkuzoVaultLocked([scriptblock]$Action) {
+    # Shared with the Control Center. Never held across a network request.
+    $mutex = New-Object Threading.Mutex($false, $script:NativeVaultMutexName)
+    $owned = $false
+    try {
+        try { $owned = $mutex.WaitOne(10000) } catch [Threading.AbandonedMutexException] { $owned = $true }
+        if (-not $owned) { throw 'Account vault is busy' }
+        return (& $Action)
+    } finally {
+        if ($owned) { try { $mutex.ReleaseMutex() } catch { } }
+        $mutex.Dispose()
+    }
+}
+function Read-ArkuzoVaultFile {
+    $path = Get-ArkuzoVaultPath
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    return ([IO.File]::ReadAllText($path, [Text.Encoding]::UTF8) | ConvertFrom-Json)
+}
+function ConvertFrom-ArkuzoSecret([string]$Value) {
+    if ([string]::IsNullOrEmpty($Value) -or -not $Value.StartsWith('dpapi:')) { throw 'Account secret missing' }
+    Add-Type -AssemblyName System.Security
+    $bytes = [Security.Cryptography.ProtectedData]::Unprotect([Convert]::FromBase64String($Value.Substring(6)), $script:NativeVaultEntropy, [Security.Cryptography.DataProtectionScope]::CurrentUser)
+    return [Text.Encoding]::UTF8.GetString($bytes)
+}
+function ConvertTo-ArkuzoSecret([string]$Text) {
+    Add-Type -AssemblyName System.Security
+    $bytes = [Security.Cryptography.ProtectedData]::Protect([Text.Encoding]::UTF8.GetBytes($Text), $script:NativeVaultEntropy, [Security.Cryptography.DataProtectionScope]::CurrentUser)
+    return 'dpapi:' + [Convert]::ToBase64String($bytes)
+}
+function Update-ArkuzoVaultAccount([string]$AccountId, [hashtable]$Fields, [string]$OnlyIfCookie = $null) {
+    # Read-modify-write one account. OnlyIfCookie: write only if the stored
+    # (encrypted) cookie is still the one this change was based on.
+    return (Invoke-ArkuzoVaultLocked {
+        $vault = Read-ArkuzoVaultFile
+        if ($null -eq $vault) { return $false }
+        $rows = @($vault.accounts | Where-Object { [string]$_.id -eq $AccountId })
+        if ($rows.Count -ne 1) { return $false }
+        if ($OnlyIfCookie -and [string]$rows[0].cookie -cne $OnlyIfCookie) { return $false }
+        foreach ($name in $Fields.Keys) {
+            if ($rows[0].PSObject.Properties.Name -contains $name) { $rows[0].$name = $Fields[$name] }
+            else { $rows[0] | Add-Member -NotePropertyName $name -NotePropertyValue $Fields[$name] }
+        }
+        Save-ArkuzoAtomicJson (Get-ArkuzoVaultPath) $vault
+        return $true
+    })
+}
+function Get-ArkuzoVaultSetting($Vault, [string]$Name, $Default, [double]$Min = [double]::NaN, [double]$Max = [double]::NaN) {
+    $value = $null
+    if ($null -ne $Vault -and $null -ne $Vault.settings) { $value = $Vault.settings.$Name }
+    if ($null -eq $value) { return $Default }
+    if (-not [double]::IsNaN($Min)) {
+        try { $n = [double]$value } catch { return $Default }
+        if ($n -lt $Min -or $n -gt $Max) { return $Default }
+        return [int]$n
+    }
+    return $value
+}
+
+function Resolve-ArkuzoAccountProvider {
+    # auto: Arkuzo accounts once the vault holds an account, Volt otherwise.
+    $setting = [string]$script:accountProviderSetting
+    $next = 'volt'
+    if ($setting -ceq 'arkuzo') { $next = 'arkuzo' }
+    elseif ($setting -cne 'volt') {
+        try { $vault = Read-ArkuzoVaultFile; if ($null -ne $vault -and @($vault.accounts).Count -gt 0) { $next = 'arkuzo' } } catch { }
+    }
+    if ($next -cne $script:accountProvider) {
+        $script:accountProvider = $next
+        Clear-VoltRecoveryCapability
+        $script:voltControlStatus = [pscustomobject]@{ available = $false; accounts = @(); reason = 'Account provider changed' }
+        $script:voltControlCheckedUtc = $null
+        Write-Diagnostic 'ACCOUNT_PROVIDER' @{ provider = $next; setting = $setting; note = $(if ($next -ceq 'arkuzo') { 'Arkuzo launches and relaunches clients from data/accounts.json; Volt is not needed.' } else { 'Volt account manager launches and relaunches clients.' }) }
+    }
+    if (Test-ArkuzoNativeProvider) { Enable-ArkuzoMultiInstance }
+}
+
+function Enable-ArkuzoMultiInstance {
+    # Roblox allows one client per session while it can own its singleton
+    # objects. Holding them first lets several clients run (what Volt's
+    # multi-instance option does). Created once and held until the engine exits.
+    if ($script:nativeSingletons.Count -gt 0) { return }
+    $vault = $script:nativeVault
+    if ($null -ne $vault -and (Get-ArkuzoVaultSetting $vault 'multiInstance' $true) -eq $false) { return }
+    foreach ($name in @('ROBLOX_singletonMutex', 'ROBLOX_singletonEvent')) {
+        try { $created = $false; $script:nativeSingletons += @(New-Object Threading.Mutex($true, $name, [ref]$created)) }
+        catch { } # Exists as another kind of object, e.g. a running client's event: nothing to hold.
+    }
+}
+
+function Get-ArkuzoVoltRelaunchConflict($Vault) {
+    # Two launchers on one account kick each other in a loop ("signed in
+    # elsewhere"). While Volt runs with auto-relaunch on for an account that is
+    # also in the vault, Arkuzo launches nothing for that account.
+    $utc = [datetime]::UtcNow
+    if (($utc - $script:nativeVoltConflict.checkedUtc).TotalSeconds -lt 30) { return $script:nativeVoltConflict.userIds }
+    $ids = @()
+    try {
+        $managers = @(Get-Process -Name tauri-app -ErrorAction SilentlyContinue)
+        $running = @($managers | Where-Object { try { [string]::Equals($_.Path, $voltPath, [StringComparison]::OrdinalIgnoreCase) } catch { $false } }).Count -gt 0
+        foreach ($m in $managers) { $m.Dispose() }
+        if ($running) {
+            $status = Get-ArkuzoVoltRecoveryStatus -Root $PSScriptRoot
+            if ($status.safeToRecycle -is [bool] -and $status.safeToRecycle) {
+                $map = Invoke-ArkuzoVoltProbe '--map'
+                $voltUsers = @()
+                if ($null -ne $map -and $null -ne $map.byUserId) { $voltUsers = @($map.byUserId.PSObject.Properties.Name) }
+                $ids = @($Vault.accounts | Where-Object { $voltUsers -contains [string]$_.userId } | ForEach-Object { [string]$_.userId })
+            }
+        }
+    } catch { $ids = @() }
+    $script:nativeVoltConflict = @{ checkedUtc = $utc; userIds = $ids }
+    return $ids
+}
+function Invoke-ArkuzoVoltProbe([string]$Mode) {
+    $child = $null
+    try {
+        $probe = Join-Path $PSScriptRoot 'Arkuzo-Volt-Probe.py'
+        if (-not (Test-Path -LiteralPath $probe)) { return $null }
+        $python = Get-Command python3.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -eq $python) { $python = Get-Command python.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1 }
+        $info = New-Object Diagnostics.ProcessStartInfo
+        $info.FileName = $python.Source; $info.Arguments = '-B "' + $probe + '" ' + $Mode
+        $info.UseShellExecute = $false; $info.CreateNoWindow = $true; $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
+        $child = [Diagnostics.Process]::Start($info)
+        $out = $child.StandardOutput.ReadToEndAsync()
+        if (-not (Wait-ArkuzoObservedProcess $child 3000)) { $child.Kill(); return $null }
+        return ($out.Result | ConvertFrom-Json)
+    } catch { return $null } finally { if ($null -ne $child) { $child.Dispose() } }
+}
+
+function Get-ArkuzoNativeClients {
+    # Live clients and their tracker ids. Command lines stay inside this function.
+    $result = @()
+    foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name='RobloxPlayerBeta.exe'" -Property ProcessId, CommandLine, ExecutablePath -OperationTimeoutSec 5 -ErrorAction Stop)) {
+        $result += [pscustomobject]@{ processId = [int]$p.ProcessId; trackerId = (Get-ArkuzoBrowserTrackerId ([string]$p.CommandLine)); path = [string]$p.ExecutablePath }
+    }
+    return ,$result
+}
+
+function Get-ArkuzoNativeStatus($Clients = $null) {
+    $utc = [datetime]::UtcNow
+    $unavailable = [pscustomobject]@{ available = $false; globalMappingSafe = $false; managerId = $null; managerStartTicks = $null; relaunchDelayMs = $null; accounts = @(); reason = 'Arkuzo account vault unavailable'; provider = 'arkuzo' }
+    try {
+        $vault = Invoke-ArkuzoVaultLocked { Read-ArkuzoVaultFile }
+        if ($null -eq $vault) { $unavailable.reason = 'No Arkuzo accounts yet (add them in the Control Center)'; return $unavailable }
+        $script:nativeVault = $vault
+        if ($null -eq $Clients) { $Clients = Get-ArkuzoNativeClients }
+    } catch { $script:nativeVaultFailed = $true; return $unavailable }
+    $script:nativeVaultFailed = $false
+    $launchTimeout = Get-ArkuzoVaultSetting $vault 'launchTimeoutSec' 120 30 600
+    $autoEnabled = (Get-ArkuzoVaultSetting $vault 'autoRelaunchEnabled' $true) -eq $true
+    $farmRunning = (Get-ArkuzoVaultSetting $vault 'farmRunning' $false) -eq $true
+    $conflicts = @(Get-ArkuzoVoltRelaunchConflict $vault)
+    $mappingSafe = $true
+    $accounts = @()
+    $seenTrackers = @{}
+    foreach ($a in @($vault.accounts)) {
+        $id = [string]$a.id; $tracker = [string]$a.browserTrackerId
+        if ($id -notmatch '\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\z' -or $tracker -notmatch '\A[1-9][0-9]{9,15}\z' -or $seenTrackers.ContainsKey($tracker)) { continue }
+        $seenTrackers[$tracker] = $true
+        $live = @($Clients | Where-Object { $_.trackerId -ceq $tracker })
+        if ($live.Count -gt 1) { $mappingSafe = $false } # Two clients for one account: never guess which one.
+        $inFlight = $false
+        if ($script:nativeLaunches.ContainsKey($id)) {
+            if ($live.Count -gt 0 -or ($utc - $script:nativeLaunches[$id]).TotalSeconds -ge $launchTimeout) { $script:nativeLaunches.Remove($id) }
+            else { $inFlight = $true }
+        }
+        $cookieStatus = if ([string]$a.cookieStatus -ceq 'alive' -or [string]$a.cookieStatus -ceq 'dead') { [string]$a.cookieStatus } else { 'unknown' }
+        $uiStatus = if ($live.Count -eq 1) { 'Connected' } elseif ($live.Count -gt 1) { 'Unknown' } elseif ($inFlight) { 'Launching' } else { 'Idle' }
+        $blocked = $conflicts -contains [string]$a.userId
+        $ready = $cookieStatus -ceq 'alive' -and -not $blocked -and $live.Count -le 1
+        $label = if ([string]$a.alias) { [string]$a.alias } elseif ([string]$a.displayName) { [string]$a.displayName } else { [string]$a.username }
+        $accounts += [pscustomobject]@{ accountId = $id; username = [string]$a.username; displayName = $label; trackerId = $tracker; userId = [string]$a.userId
+            autoRelaunch = [bool]($autoEnabled -and $a.autoRelaunch -eq $true); cookieAlive = ($cookieStatus -ceq 'alive'); cookieStatus = $cookieStatus
+            suspensionSafe = [bool]($cookieStatus -ceq 'dead' -and $live.Count -eq 0); lastLaunchAtMs = [long]$a.lastLaunchAtMs; uiStatus = $uiStatus
+            processId = $(if ($live.Count -eq 1) { $live[0].processId } else { $null }); controlReady = [bool]$ready; rowReady = [bool]$ready
+            launchRequestedAtMs = [long]$a.launchRequestedAtMs; closeRequestedAtMs = [long]$a.closeRequestedAtMs; voltConflict = [bool]$blocked }
+    }
+    $script:accountProviderNotice = if ($conflicts.Count -gt 0) { 'Volt is running with auto-relaunch on for ' + $conflicts.Count + ' of these accounts. Turn off Volt''s auto-relaunch (or close Volt): two launchers on one account kick each other.' } else { $null }
+    return [pscustomobject]@{ available = $true; globalMappingSafe = [bool]$mappingSafe; processMappingSafe = [bool]$mappingSafe; unmappedAccountIds = @()
+        managerId = $PID; managerStartTicks = $script:controllerStartTicks; relaunchDelayMs = ([int]$restorePolicy.relaunch_delay_sec * 1000)
+        accounts = $accounts; farmRunning = [bool]$farmRunning; provider = 'arkuzo'; reason = 'Arkuzo account vault' }
+}
+
+function Get-ArkuzoNativeOutcomePolicy {
+    # The engine relaunches by itself: wait the vault's relaunch delay, not Volt's restore window.
+    $policy = $restorePolicy.Clone()
+    $policy.restore_wait_sec = Get-ArkuzoVaultSetting $script:nativeVault 'relaunchDelaySec' 8 0 600
+    return $policy
+}
+function Test-ArkuzoNativeLaunchSlot([datetime]$NowUtc) {
+    $gap = [double](Get-ArkuzoVaultSetting $script:nativeVault 'launchDelaySec' 12 5 120)
+    if ($null -ne $script:nativeLastLaunchUtc -and ($NowUtc - $script:nativeLastLaunchUtc).TotalSeconds -lt $gap) { return $false }
+    if ($null -ne $script:lastClientStartUtc -and ($NowUtc - $script:lastClientStartUtc).TotalSeconds -lt $gap) { return $false }
+    return $true
+}
+
+function Invoke-ArkuzoRobloxPost([string]$Url, [string]$Cookie, [string]$Csrf = '') {
+    # Returns status, ticket, csrf and a rotated cookie. Status 0 = network failure.
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $req = [Net.HttpWebRequest]::Create($Url)
+    $req.Method = 'POST'; $req.UserAgent = $script:NativeUserAgent; $req.Referer = 'https://www.roblox.com/'; $req.Accept = 'application/json'
+    $req.ContentType = 'application/json'; $req.Timeout = 15000; $req.ReadWriteTimeout = 15000; $req.AllowAutoRedirect = $false
+    $req.Headers.Add('Cookie', '.ROBLOSECURITY=' + $Cookie)
+    if ($Csrf) { $req.Headers.Add('X-CSRF-TOKEN', $Csrf) }
+    $body = [Text.Encoding]::ASCII.GetBytes('{}')
+    $resp = $null
+    try {
+        $req.ContentLength = $body.Length
+        $stream = $req.GetRequestStream(); try { $stream.Write($body, 0, $body.Length) } finally { $stream.Dispose() }
+        try { $resp = $req.GetResponse() } catch [Net.WebException] { $resp = $_.Exception.Response }
+        if ($null -eq $resp) { return @{ status = 0 } }
+        $rotated = $null
+        $setCookie = [string]$resp.Headers['Set-Cookie']
+        $m = [regex]::Match($setCookie, '(?:^|[,\s])\.ROBLOSECURITY=([^;,\s]+)')
+        if ($m.Success) { $rotated = $m.Groups[1].Value }
+        return @{ status = [int]$resp.StatusCode; ticket = [string]$resp.Headers['rbx-authentication-ticket']; csrf = [string]$resp.Headers['x-csrf-token']; rotated = $rotated }
+    } catch { return @{ status = 0 } }
+    finally { if ($null -ne $resp) { $resp.Dispose() } }
+}
+function Get-ArkuzoAuthTicket([string]$Cookie) {
+    # Roblox's CSRF handshake: the first POST answers 403 with a token.
+    $url = 'https://auth.roblox.com/v1/authentication-ticket'
+    $first = Invoke-ArkuzoRobloxPost $url $Cookie
+    $cookieInUse = if ($first.rotated) { $first.rotated } else { $Cookie }
+    if ($first.status -eq 403 -and $first.csrf) {
+        $second = Invoke-ArkuzoRobloxPost $url $cookieInUse $first.csrf
+        if ($second.rotated) { $cookieInUse = $second.rotated }
+        return @{ status = $second.status; ticket = $second.ticket; cookie = $cookieInUse; rotated = ($cookieInUse -cne $Cookie) }
+    }
+    return @{ status = $first.status; ticket = $first.ticket; cookie = $cookieInUse; rotated = ($cookieInUse -cne $Cookie) }
+}
+
+function Get-ArkuzoNativeJoinUrl($Vault, $Account) {
+    # Public server of the account's place (or the default place), or a private server.
+    $mode = [string](Get-ArkuzoVaultSetting $Vault 'privateServerMode' 'none')
+    $serverId = $null
+    if ($mode -ceq 'assigned' -and $Account.privateServerId) { $serverId = [string]$Account.privateServerId }
+    elseif ($mode -ceq 'shared') { $serverId = [string](Get-ArkuzoVaultSetting $Vault 'sharedPrivateServerId' $null) }
+    $tracker = [string]$Account.browserTrackerId
+    $base = 'https://assetgame.roblox.com/game/PlaceLauncher.ashx?'
+    if ($serverId) {
+        $servers = @($Vault.privateServers | Where-Object { [string]$_.id -eq $serverId })
+        if ($servers.Count -ne 1 -or [string]$servers[0].placeId -notmatch '\A[1-9][0-9]{0,18}\z') { throw 'Private server not found' }
+        $code = ConvertFrom-ArkuzoSecret ([string]$servers[0].linkCode)
+        if ($code -notmatch '\A[0-9A-Za-z_-]{6,80}\z') { throw 'Private server link code is invalid' }
+        return $base + 'request=RequestPrivateGame&placeId=' + $servers[0].placeId + '&linkCode=' + $code + '&browserTrackerId=' + $tracker
+    }
+    $place = if ([string]$Account.placeId -match '\A[1-9][0-9]{0,18}\z') { [string]$Account.placeId } else { [string](Get-ArkuzoVaultSetting $Vault 'defaultPlaceId' '') }
+    if ($place -notmatch '\A[1-9][0-9]{0,18}\z') { throw 'No place to join: set a default place in the Control Center' }
+    return $base + 'request=RequestGame&browserTrackerId=' + $tracker + '&placeId=' + $place + '&isPlayTogetherGame=false'
+}
+
+function Get-ArkuzoRobloxPlayerPath($Clients) {
+    # Prefer the build that is already running; otherwise the newest installed one.
+    $running = @($Clients | Where-Object { $_.path -and (Test-Path -LiteralPath $_.path) } | ForEach-Object { $_.path } | Select-Object -Unique)
+    if ($running.Count -gt 0) { return @($running | Sort-Object { (Get-Item -LiteralPath $_).LastWriteTimeUtc } -Descending)[0] }
+    $roots = @()
+    if ($env:LOCALAPPDATA) { $roots += @('Roblox\Versions', 'Bloxstrap\Versions', 'Fishstrap\Versions') | ForEach-Object { Join-Path $env:LOCALAPPDATA $_ } }
+    if (${env:ProgramFiles(x86)}) { $roots += Join-Path ${env:ProgramFiles(x86)} 'Roblox\Versions' }
+    $found = @(foreach ($root in $roots) { if (Test-Path -LiteralPath $root) { Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue | ForEach-Object { Join-Path $_.FullName 'RobloxPlayerBeta.exe' } | Where-Object { Test-Path -LiteralPath $_ } } })
+    if ($found.Count -eq 0) { return $null }
+    return @($found | Sort-Object { (Get-Item -LiteralPath $_).LastWriteTimeUtc } -Descending)[0]
+}
+function Start-ArkuzoRobloxClient([string]$Ticket, [string]$JoinUrl, [string]$TrackerId, [string]$Method, $Clients) {
+    $launchMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    $exe = if ($Method -ceq 'protocol') { $null } else { Get-ArkuzoRobloxPlayerPath $Clients }
+    $info = New-Object Diagnostics.ProcessStartInfo
+    if ($exe) {
+        $info.FileName = $exe; $info.WorkingDirectory = Split-Path -Parent $exe; $info.UseShellExecute = $false
+        $info.Arguments = '--app -t ' + $Ticket + ' -j "' + $JoinUrl + '" -b ' + $TrackerId + ' --launchtime=' + $launchMs + ' --rloc en_us --gloc en_us'
+        $how = 'direct'
+    } else {
+        # The roblox-player: handler (Roblox's own launcher) updates Roblox first if needed.
+        $info.FileName = 'roblox-player:1+launchmode:play+gameinfo:' + $Ticket + '+launchtime:' + $launchMs + '+placelauncherurl:' + [Uri]::EscapeDataString($JoinUrl) +
+            '+browsertrackerid:' + $TrackerId + '+robloxLocale:en_us+gameLocale:en_us+channel:+LaunchExp:InApp'
+        $info.UseShellExecute = $true
+        $how = 'protocol'
+    }
+    $proc = [Diagnostics.Process]::Start($info)
+    $id = $null
+    if ($null -ne $proc) { try { if ($exe) { $id = $proc.Id } } catch { } finally { $proc.Dispose() } }
+    return @{ method = $how; pid = $id }
+}
+
+function Invoke-ArkuzoNativeLaunch([string]$AccountId, [string]$TrackerId, [switch]$Manual) {
+    $result = [pscustomobject]@{ available = $true; requestAccepted = $false; accountId = $AccountId; reason = '' }
+    try {
+        if ($MonitorOnly -or -not $ownsControllerMutex) { throw 'Read-only controller' }
+        $vault = Invoke-ArkuzoVaultLocked { Read-ArkuzoVaultFile }
+        $rows = @($vault.accounts | Where-Object { [string]$_.id -eq $AccountId -and [string]$_.browserTrackerId -eq $TrackerId })
+        if ($rows.Count -ne 1) { throw 'Account not found in the Arkuzo vault' }
+        $a = $rows[0]
+        if ([string]$a.cookieStatus -cne 'alive') { throw 'Account cookie is not alive' }
+        if (@(Get-ArkuzoVoltRelaunchConflict $vault) -contains [string]$a.userId) { throw 'Volt auto-relaunch is on for this account' }
+        if (-not $Manual -and (Get-ArkuzoVaultSetting $vault 'farmRunning' $false) -ne $true) { throw 'Farm is stopped' }
+        $clients = Get-ArkuzoNativeClients
+        if (@($clients | Where-Object { $_.trackerId -ceq $TrackerId }).Count -gt 0) { throw 'Account already has a client' }
+        if ($script:nativeLaunches.ContainsKey($AccountId)) { throw 'Launch already in flight' }
+        Enable-ArkuzoMultiInstance
+        $joinUrl = Get-ArkuzoNativeJoinUrl $vault $a
+        $secret = [string]$a.cookie
+        $ticket = Get-ArkuzoAuthTicket (ConvertFrom-ArkuzoSecret $secret)
+        if ($ticket.rotated) {
+            # Roblox re-issued the cookie; the old one stops working later.
+            try { [void](Update-ArkuzoVaultAccount $AccountId @{ cookie = (ConvertTo-ArkuzoSecret $ticket.cookie); updatedAtMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() } $secret) } catch { }
+        }
+        if ($ticket.status -eq 401) {
+            [void](Update-ArkuzoVaultAccount $AccountId @{ cookieStatus = 'dead'; lastError = 'Roblox rejected the cookie at launch (signed out or expired)'; lastCheckAtMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() })
+            Write-Diagnostic 'NATIVE_COOKIE_DEAD' @{ accountId = $AccountId; username = [string]$a.username; note = 'Roblox answered 401 to the launch ticket request; sign the account in again.' }
+            throw 'Cookie rejected by Roblox'
+        }
+        if ($ticket.status -ne 200 -or [string]::IsNullOrEmpty($ticket.ticket)) { throw $(if ($ticket.status -eq 0) { 'Roblox unreachable' } else { 'Roblox refused a launch ticket (' + $ticket.status + ')' }) }
+        $method = [string](Get-ArkuzoVaultSetting $vault 'launchMethod' 'direct')
+        $started = Start-ArkuzoRobloxClient $ticket.ticket $joinUrl $TrackerId $method $clients
+        $now = [datetime]::UtcNow
+        $script:nativeLaunches[$AccountId] = $now
+        $script:nativeLastLaunchUtc = $now
+        try { [void](Update-ArkuzoVaultAccount $AccountId @{ lastLaunchAtMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(); launchRequestedAtMs = 0 }) } catch { }
+        $result.requestAccepted = $true
+        $result.reason = 'Client started (' + $started.method + '); game readiness is verified separately'
+    } catch {
+        $result.reason = $_.Exception.Message
+        if ($result.reason -match 'ROBLOSECURITY|WARNING:-DO-NOT|dpapi:') { $result.reason = 'Launch failed' } # Never let a secret into a message.
+    }
+    return $result
+}
+
+function Invoke-ArkuzoNativeRequests {
+    # Launch / close buttons and Stop farm in the Control Center set request
+    # stamps on accounts; carry them out here and clear them.
+    if (-not (Test-ArkuzoNativeProvider) -or $MonitorOnly -or -not $ownsControllerMutex -or -not $voltControlStatus.available) { return }
+    $utc = [datetime]::UtcNow
+    foreach ($a in @($voltControlStatus.accounts)) {
+        if ([long]$a.closeRequestedAtMs -gt 0) {
+            $closed = 0
+            foreach ($state in @($tracked.Values)) {
+                if ([string]$state.TrackerId -cne [string]$a.trackerId -or $null -eq $state.Watcher) { continue }
+                if (-not (Test-ArkuzoClientIdentity $state.Watcher $state.Watcher.Id $state.StartTicks)) { continue }
+                $state.RecoveryRequested = $true # Not a recovery: keep the exit path from queuing a relaunch.
+                try { $state.Watcher.Kill(); if ($state.Watcher.WaitForExit(3000)) { $closed++ } } catch { }
+            }
+            if ($recoveryPending.ContainsKey([string]$a.accountId)) { $script:recoveryPending.Remove([string]$a.accountId); try { Save-ArkuzoRecoveryJournal } catch { $script:recoveryJournalHealthy = $false } }
+            $script:nativeLaunches.Remove([string]$a.accountId)
+            try { [void](Update-ArkuzoVaultAccount ([string]$a.accountId) @{ closeRequestedAtMs = 0 }) } catch { }
+            Write-Diagnostic 'NATIVE_CLIENT_CLOSED' @{ accountId = $a.accountId; username = $a.username; closed = $closed; note = 'Closed from the Control Center.' }
+            continue
+        }
+        if ([long]$a.launchRequestedAtMs -gt 0) {
+            if ($a.processId -or $a.uiStatus -ceq 'Launching') { try { [void](Update-ArkuzoVaultAccount ([string]$a.accountId) @{ launchRequestedAtMs = 0 }) } catch { }; continue }
+            if (-not (Test-ArkuzoNativeLaunchSlot $utc)) { continue } # Next pass.
+            Write-Diagnostic 'NATIVE_LAUNCH_REQUEST' @{ accountId = $a.accountId; username = $a.username; reason = 'Launch requested in the Control Center' }
+            $r = Invoke-ArkuzoNativeLaunch ([string]$a.accountId) ([string]$a.trackerId) -Manual
+            Write-Diagnostic 'NATIVE_LAUNCH_RESULT' @{ accountId = $a.accountId; username = $a.username; requestAccepted = [bool]$r.requestAccepted; reason = $r.reason }
+            if (-not $r.requestAccepted) {
+                $clear = @{ launchRequestedAtMs = 0 }
+                if ($r.reason -cne 'Cookie rejected by Roblox') { $clear.lastError = $r.reason } # Keep the sign-out explanation.
+                try { [void](Update-ArkuzoVaultAccount ([string]$a.accountId) $clear) } catch { }
+            }
+            return # One launch per pass.
+        }
+    }
+}
+
 function Invoke-ArkuzoVoltControl([ValidateSet('Status','Configure','LaunchMissing')][string]$Action='Status', [string]$AccountId='', [string]$TrackerId='') {
     $child=$null
     try {
         if ($Action -ne 'Status' -and ($MonitorOnly -or -not $ownsControllerMutex -or -not $restorePolicy.enabled)) { throw 'Read-only controller' }
+        if (Test-ArkuzoNativeProvider) {
+            if ($Action -ne 'LaunchMissing') { return (Get-ArkuzoNativeStatus) }
+            if ($null -ne $script:suspendedAccounts -and $script:suspendedAccounts.ContainsKey($AccountId)) { throw 'Account suspended' }
+            return (Invoke-ArkuzoNativeLaunch $AccountId $TrackerId)
+        }
         $file=Join-Path $PSScriptRoot 'Arkuzo-Volt-Control.ps1'
         if (-not (Test-Path -LiteralPath $file)) { throw 'Control adapter unavailable' }
         $info=New-Object Diagnostics.ProcessStartInfo
@@ -1345,6 +1767,10 @@ function Poll-ArkuzoVoltControlAsync {
 }
 
 function Start-ArkuzoVoltControlStatusAsync {
+    if (Test-ArkuzoNativeProvider) {
+        $script:voltControlStatus = Get-ArkuzoNativeStatus; $script:voltControlCheckedUtc = [datetime]::UtcNow
+        return
+    }
     if ($null -ne $script:voltStatusChild) { return }
     try {
         $file = Join-Path $PSScriptRoot 'Arkuzo-Volt-Control.ps1'
@@ -1703,6 +2129,10 @@ function Update-ArkuzoRecoveryOutcomes {
         foreach ($entry in $recoveryPending.Values) { $entry.readySinceUtc=$null;$entry.lastObservedUtc=$null }
         return
     }
+    $native = Test-ArkuzoNativeProvider
+    # Arkuzo: every opted-in account of a running farm should be in game, launched before or not.
+    $restoreMissing = if ($native) { [bool]$voltControlStatus.farmRunning } else { [bool]$restorePolicy.restore_missing }
+    $outcomePolicy = if ($native) { Get-ArkuzoNativeOutcomePolicy } else { $restorePolicy }
     try {
         Update-ArkuzoCookieSuspensions
         # Opted-in, previously launched accounts only. Never activate unlaunched accounts.
@@ -1712,13 +2142,13 @@ function Update-ArkuzoRecoveryOutcomes {
             if ($a.cookieStatus -ceq 'dead' -or $a.cookieStatus -cne 'alive' -or -not $a.cookieAlive -or
                 ($null -ne $script:suspendedAccounts -and $script:suspendedAccounts.ContainsKey([string]$a.accountId)) -or
                 -not $a.autoRelaunch -or $restorePolicy.excluded_account_ids -contains $a.accountId) { continue }
-            if ($a.processId -or ([long]$a.lastLaunchAtMs -ge $script:saverSessionStartEpochMs)) {
+            if ($a.processId -or ([long]$a.lastLaunchAtMs -ge $script:saverSessionStartEpochMs) -or ($native -and $restoreMissing)) {
                 $script:sessionObservedAccounts[[string]$a.accountId] = $true
             }
             if (-not $script:sessionObservedAccounts.ContainsKey([string]$a.accountId)) {
                 continue
             }
-            if ($restorePolicy.restore_missing -and -not $a.processId -and $a.uiStatus -eq 'Idle' -and [long]$a.lastLaunchAtMs -gt 0 -and
+            if ($restoreMissing -and -not $a.processId -and $a.uiStatus -eq 'Idle' -and ($native -or [long]$a.lastLaunchAtMs -gt 0) -and
                 $a.trackerId -match '\A[0-9]+\z' -and -not $recoveryPending.ContainsKey([string]$a.accountId) -and
                 -not (Test-ArkuzoAccountQuarantined ([string]$a.accountId) $utc)) {
                 $script:recoveryPending[[string]$a.accountId]=New-ArkuzoPendingEntry $a.accountId $a.trackerId
@@ -1727,6 +2157,11 @@ function Update-ArkuzoRecoveryOutcomes {
         }
         foreach ($key in @($recoveryPending.Keys)) {
             $entry=$recoveryPending[$key]
+            if ($native -and -not $voltControlStatus.farmRunning) {
+                Write-Diagnostic 'RECOVERY_CANCELLED_BY_POLICY' @{accountId=$key;note='Farm stopped in the Control Center'}
+                $script:recoveryPending.Remove($key)
+                continue
+            }
             if ($restorePolicy.excluded_account_ids -contains $key) {
                 Write-Diagnostic 'RECOVERY_CANCELLED_BY_POLICY' @{accountId=$key;note='Account explicitly excluded by policy'}
                 $script:recoveryPending.Remove($key)
@@ -1777,7 +2212,7 @@ function Update-ArkuzoRecoveryOutcomes {
                     $sample.launchError=$state.LastSnapshot.launchError;$sample.isDisconnected=[bool]$state.isDisconnected;$sample.gameReady=[bool]$state.GameReady
                 }
             }
-            $decision=Get-ArkuzoOutcomeDecision $entry $sample $utc $restorePolicy
+            $decision=Get-ArkuzoOutcomeDecision $entry $sample $utc $outcomePolicy
             if ($decision -ne $entry.status) {
                 Write-Diagnostic 'RECOVERY_OUTCOME_STATE' @{accountId=$key;previous=$entry.status;status=$decision;replacementPid=$sample.processId}
                 $entry.status=$decision
@@ -1794,26 +2229,30 @@ function Update-ArkuzoRecoveryOutcomes {
                     $script:recoveryPending.Remove($key)
                     continue
                 }
-                if (-not (Test-ArkuzoRecoveryBudget $launchAttempts $utc ([int]$restorePolicy.retry_base_sec) ([int]$restorePolicy.retry_max_per_hour))) {
+                $launchGap = if ($native) { [int](Get-ArkuzoVaultSetting $script:nativeVault 'launchDelaySec' 12 5 120) } else { [int]$restorePolicy.retry_base_sec }
+                $launchCap = if ($native) { [math]::Max([int]$restorePolicy.retry_max_per_hour, 120) } else { [int]$restorePolicy.retry_max_per_hour }
+                if (-not (Test-ArkuzoRecoveryBudget $launchAttempts $utc $launchGap $launchCap)) {
                     Warn-Throttled 'restore-budget' 'Missing-account launch budget/backoff active. Other clients remain protected; automatic retry will resume.';continue
                 }
                 if ($null -eq $systemMemory -or $systemMemory.commitPercent -ge $healthPolicy.pressure_percent) {
                     Warn-Throttled 'restore-pressure' 'New account launch delayed: OS commit headroom insufficient/unavailable.';continue
                 }
-                if (-not (Test-ArkuzoLaunchPacing $utc)) {
+                if (-not $(if ($native) { Test-ArkuzoNativeLaunchSlot $utc } else { Test-ArkuzoLaunchPacing $utc })) {
                     # Not charged: the request simply waits for a quiet launch slot.
                     Warn-Throttled 'restore-pacing' 'Missing-account launch waits for a free Volt launch slot (launches are kept apart to avoid its startup notice).';continue
                 }
                 # Persist and audit before invoking Volt. Never burn a duplicate fast retry after a restart.
                 $entry.retryCount=[int]$entry.retryCount+1
                 $entry.nextRetryUtc=$utc.AddSeconds((Get-ArkuzoRetryDelay $entry.retryCount $restorePolicy)).ToString('o')
+                # Arkuzo: retry only if this launch produced no client within launchTimeoutSec.
+                if ($native) { $entry.nextRetryUtc=$utc.AddSeconds((Get-ArkuzoVaultSetting $script:nativeVault 'launchTimeoutSec' 120 30 600)).ToString('o') }
                 $script:launchAttempts=@($launchAttempts)+@($utc)
                 Save-ArkuzoRecoveryJournal
-                Write-Diagnostic 'VOLT_MISSING_LAUNCH_REQUEST' @{accountId=$key;attempt=$entry.retryCount;nextRetryUtc=$entry.nextRetryUtc}
+                Write-Diagnostic $(if ($native) { 'NATIVE_LAUNCH_REQUEST' } else { 'VOLT_MISSING_LAUNCH_REQUEST' }) @{accountId=$key;username=$a.username;attempt=$entry.retryCount;nextRetryUtc=$entry.nextRetryUtc}
                 if ($logFailed) { throw 'Recovery requires audit logging' }
                 $result=Invoke-ArkuzoVoltControl 'LaunchMissing' $key ([string]$a.trackerId)
-                Write-Diagnostic 'VOLT_MISSING_LAUNCH_RESULT' @{accountId=$key;requestAccepted=($result.requestAccepted -is [bool] -and $result.requestAccepted);note='Request acceptance is not game readiness; continue outcome verification.'}
-                if (-not $result.requestAccepted) { Warn-Throttled ('restore-'+$key) 'Volt missing-account request refused/unavailable. Backoff retained, no collateral closures.' }
+                Write-Diagnostic $(if ($native) { 'NATIVE_LAUNCH_RESULT' } else { 'VOLT_MISSING_LAUNCH_RESULT' }) @{accountId=$key;username=$a.username;requestAccepted=($result.requestAccepted -is [bool] -and $result.requestAccepted);reason=$(if ($native) { [string]$result.reason } else { $null });note='Request acceptance is not game readiness; continue outcome verification.'}
+                if (-not $result.requestAccepted) { Warn-Throttled ('restore-'+$key) $(if ($native) { (Get-ArkuzoAccountDisplayLabel -AccountId $key)+' not launched: '+$result.reason } else { 'Volt missing-account request refused/unavailable. Backoff retained, no collateral closures.' }) }
                 # Only one launch request per observation; refreshed snapshot next cycle.
                 break
             }
@@ -1848,6 +2287,7 @@ function Update-ArkuzoLivePolicy {
         $newPagefile=Get-ArkuzoPagefilePolicy -Input $cfg.pagefile -PressurePercent $newHealth.pressure_percent
         if (-not $newPagefile.valid) { throw ('Invalid pagefile policy: '+($newPagefile.errors -join '; ')) }
         $script:healthPolicy=$newHealth;$script:restorePolicy=$newRestore;$script:pagefilePolicy=$newPagefile;$script:lastConfigText=$raw
+        $script:accountProviderSetting=Get-ArkuzoProviderSetting $cfg
         # Resource settings are validated and applied separately by the main loop.
         $script:pendingLiveSettings=$cfg
         Write-Diagnostic 'CONFIG_RELOADED' @{health=$newHealth;recovery=$newRestore;pagefile=$newPagefile;note='Validated health/recovery/pagefile hot reload; resource settings are applied live except hard_limit.'}
@@ -1878,7 +2318,8 @@ function Write-ArkuzoRuntimeStatus {
         # Expired quarantines are otherwise only dropped when that account is next evaluated.
         if ($null -ne $script:quarantinedAccounts) { foreach ($key in @($script:quarantinedAccounts.Keys)) { [void](Test-ArkuzoAccountQuarantined $key ([datetime]::UtcNow)) } }
         $accounts=@($voltControlStatus.accounts|ForEach-Object{@{accountId=$_.accountId;username=$_.username;processId=$_.processId;uiStatus=$_.uiStatus;controlReady=$_.controlReady;cookieStatus=$_.cookieStatus;suspensionSafe=$_.suspensionSafe;autoRelaunch=[bool]$_.autoRelaunch}})
-        $expected=@($voltControlStatus.accounts|Where-Object{$_.autoRelaunch -and $_.cookieAlive -and $_.cookieStatus -ceq 'alive' -and [long]$_.lastLaunchAtMs -gt 0 -and $restorePolicy.excluded_account_ids -notcontains $_.accountId -and ($null -eq $script:suspendedAccounts -or -not $script:suspendedAccounts.ContainsKey([string]$_.accountId))})
+        $nativeFarm=(Test-ArkuzoNativeProvider) -and [bool]$voltControlStatus.farmRunning
+        $expected=@($voltControlStatus.accounts|Where-Object{$_.autoRelaunch -and $_.cookieAlive -and $_.cookieStatus -ceq 'alive' -and ($nativeFarm -or [long]$_.lastLaunchAtMs -gt 0) -and $restorePolicy.excluded_account_ids -notcontains $_.accountId -and ($null -eq $script:suspendedAccounts -or -not $script:suspendedAccounts.ContainsKey([string]$_.accountId))})
         $missing=@($expected|Where-Object{-not $_.processId})
         $controlFresh=$voltControlStatus.available -and $null -ne $voltControlCheckedUtc -and ([datetime]::UtcNow-$voltControlCheckedUtc).TotalSeconds -ge 0 -and ([datetime]::UtcNow-$voltControlCheckedUtc).TotalSeconds -le 25
         Save-ArkuzoAtomicJson (Join-Path $DataDirectory 'runtime-status.json') @{
@@ -1888,6 +2329,7 @@ function Write-ArkuzoRuntimeStatus {
             voltControlAvailable=[bool]$voltControlStatus.available;recoveryJournalHealthy=[bool]$recoveryJournalHealthy;systemMemory=$systemMemory;health=$healthPolicy;recovery=$restorePolicy;logFailed=$logFailed
             pagefilePolicy=$pagefilePolicy;pagefile=$script:pagefileStatus;nativePrivileges=$script:nativePrivilegeInitialization;graphics=$script:graphicsStatus
             updateAvailable=$script:updateAvailableStatus
+            accountProvider=$script:accountProvider;accountProviderNotice=$script:accountProviderNotice;farmRunning=[bool]$voltControlStatus.farmRunning
             quarantined=@(if ($null -ne $script:quarantinedAccounts) { $script:quarantinedAccounts.Values })
             uptimeSec=$(if ($null -ne $script:clock) { [math]::Round($script:clock.Elapsed.TotalSeconds,1) } else { 0 })
             trims=[int]$script:trimCount;totals=$script:lastTotals;totalPhysicalMB=$script:totalPhysicalMB
@@ -2006,12 +2448,13 @@ function Invoke-ClientRecovery([int]$ClientId, $State) {
     if ($MonitorOnly -or -not $healthPolicy.enabled -or -not $ownsControllerMutex -or $State.RecoveryRequested -or -not $State.HealthDecision.Recycle) { return }
     if (-not $restorePolicy.enabled) { Warn-Throttled 'restore-disabled' 'Account outcome recovery disabled; destructive recovery blocked.'; return }
     if (-not $recoveryJournalHealthy) { Warn-Throttled 'recovery-journal' 'Recovery blocked: invalid recovery journal. Clients left untouched.'; return }
+    if ((Test-ArkuzoNativeProvider) -and -not $voltControlStatus.farmRunning) { Warn-Throttled 'farm-stopped' 'Farm is stopped: unhealthy clients are left alone. Start the farm to recover them.'; return }
     # Observation service can update the decision during IO. Bind this attempt
     # to its original reason; a changed condition needs a new authorized attempt.
     $reason = $State.HealthDecision.Reason
     # Re-read capability immediately before acting, not merely at startup.
     Update-VoltRecoveryCapability -SyncControl
-    if (-not $voltStatus.safeToRecycle -or -not (Test-ArkuzoVoltOwnership $State.ParentId $script:voltParents[$State.ParentId] $State.StartTicks $voltPath)) { return }
+    if (-not $voltStatus.safeToRecycle -or -not (Test-ArkuzoClientOwnership $State)) { return }
     $utc = [DateTime]::UtcNow
     $boundAccount = Get-ArkuzoControlledAccount $State.TrackerId $ClientId
     if ($null -eq $boundAccount) {
@@ -2027,11 +2470,13 @@ function Invoke-ClientRecovery([int]$ClientId, $State) {
         Warn-Throttled ('quarantine-'+$boundAccount.accountId) ((Get-ArkuzoAccountDisplayLabel -AccountId ([string]$boundAccount.accountId))+' is quarantined after repeated failed recoveries; it is left untouched until the quarantine expires.')
         return
     }
-    if ($State.ParentId -le 0 -and $script:voltParents.Count -eq 1) {
-        $singleId = [int](@($script:voltParents.Keys)[0])
-        $State.ParentId = $singleId
+    if (-not (Test-ArkuzoNativeProvider)) {
+        if ($State.ParentId -le 0 -and $script:voltParents.Count -eq 1) {
+            $singleId = [int](@($script:voltParents.Keys)[0])
+            $State.ParentId = $singleId
+        }
+        if ($voltControlStatus.managerId -ne $State.ParentId -or $voltControlStatus.managerStartTicks -ne $script:voltParents[$State.ParentId].StartTicks) { return }
     }
-    if ($voltControlStatus.managerId -ne $State.ParentId -or $voltControlStatus.managerStartTicks -ne $script:voltParents[$State.ParentId].StartTicks) { return }
     $handoffSample = $null
     if ($recoveryPending.Count -gt 0) {
         # Refreshing launcher authority temporarily clears retained parents.
@@ -2074,11 +2519,13 @@ function Invoke-ClientRecovery([int]$ClientId, $State) {
             $entry.retryCount = [int]$previousPending.retryCount + 1
         }
         $entry.nextRetryUtc = $utc.AddSeconds((Get-ArkuzoRetryDelay ([math]::Max(1,[int]$entry.retryCount)) $restorePolicy)).ToString('o')
+        # Arkuzo relaunches by itself after relaunchDelaySec: no backoff for a normal relaunch.
+        if (Test-ArkuzoNativeProvider) { $entry.nextRetryUtc = $null }
         if ($farmEpisode) { $entry.farmFreezeEpisode = $farmEpisode }
         $script:recoveryPending[$handoffKey] = $entry
         $reserved = $true
         Save-ArkuzoRecoveryJournal
-        Write-Diagnostic 'RECOVERY_REQUESTED' @{ accountId = $handoffKey; pid = $ClientId; startTicks = $State.StartTicks; reason = $reason; lastSample = $State.LastSnapshot; systemMemory = $systemMemory; relaunchOwner = 'Volt account manager'; farmFreezeEpisode = $farmEpisode }
+        Write-Diagnostic 'RECOVERY_REQUESTED' @{ accountId = $handoffKey; pid = $ClientId; startTicks = $State.StartTicks; reason = $reason; lastSample = $State.LastSnapshot; systemMemory = $systemMemory; relaunchOwner = $(if (Test-ArkuzoNativeProvider) { 'Arkuzo' } else { 'Volt account manager' }); farmFreezeEpisode = $farmEpisode }
         if ($logFailed) { throw 'Recovery requires functioning audit logging' }
         if (-not (Test-ArkuzoTargetRecovery $watcher $ClientId $State.StartTicks)) { return }
         # Open handoffs require a new fully safe farm mapping after audit/probe
@@ -2088,7 +2535,7 @@ function Invoke-ClientRecovery([int]$ClientId, $State) {
             Update-ArkuzoVoltControl
             $freshAccount = Get-ArkuzoControlledAccount $State.TrackerId $ClientId
             if ($null -eq $freshAccount -or $freshAccount.accountId -cne $handoffKey -or
-                $voltControlStatus.managerId -ne $State.ParentId -or $voltControlStatus.managerStartTicks -ne $script:voltParents[$State.ParentId].StartTicks -or
+                (-not (Test-ArkuzoNativeProvider) -and ($voltControlStatus.managerId -ne $State.ParentId -or $voltControlStatus.managerStartTicks -ne $script:voltParents[$State.ParentId].StartTicks)) -or
                 $freshAccount.autoRelaunch -isnot [bool] -or -not $freshAccount.autoRelaunch -or $freshAccount.cookieAlive -isnot [bool] -or -not $freshAccount.cookieAlive) { return }
         }
         # The triggering condition may have cleared while probing/persisting/logging.
@@ -2101,7 +2548,7 @@ function Invoke-ClientRecovery([int]$ClientId, $State) {
         if (-not (Test-ArkuzoClientIdentity $watcher $ClientId $State.StartTicks)) { Reset-ArkuzoHealthSample $State; return }
         # Check the retained exact owner after IO, immediately before termination.
         # This narrows the race; it cannot make two processes' lifetimes atomic.
-        if (-not (Test-ArkuzoLiveVoltParent $script:voltParents[$State.ParentId])) { return }
+        if (-not (Test-ArkuzoNativeProvider) -and -not (Test-ArkuzoLiveVoltParent $script:voltParents[$State.ParentId])) { return }
         $rebound = Get-ArkuzoControlledAccount $State.TrackerId $ClientId
         if ($null -eq $rebound -or $rebound.accountId -ne $handoffKey) { return }
         if ($logFailed -or -not $recoveryJournalHealthy) { return }
@@ -3094,6 +3541,7 @@ try {
 
 $healthPolicy = Get-ArkuzoHealthPolicy $loadedConfig.health
 $restorePolicy = Get-ArkuzoRestorePolicy $loadedConfig.recovery
+$script:accountProviderSetting = Get-ArkuzoProviderSetting $loadedConfig
 $isConfigLocked = ($null -ne $loadedConfig.config_lock -and [bool]$loadedConfig.config_lock)
 if ($isConfigLocked) {
     $ApplyGraphicsFlags = $true
@@ -3613,6 +4061,7 @@ $nextUpdateCheck = 15.0
 $updateCheckInterval = 1800.0
 $nextHealthSample = 0.0
 $nextVoltCheck = 0.0
+$nextNativeCheck = 0.0
 $voltStatus = [pscustomobject]@{ safeToRecycle = $false; reason = 'Not checked' }
 $voltParents = @{}
 $voltPath = Join-Path $env:LOCALAPPDATA 'Volt\tauri-app.exe'
@@ -4331,6 +4780,7 @@ try {
         Initialize-ArkuzoNativePrivileges | Out-Null
         Initialize-ArkuzoGraphicsSettings
         Initialize-ArkuzoRecoveryJournal
+        Resolve-ArkuzoAccountProvider
         Update-VoltRecoveryCapability -SyncControl
         Sync-ArkuzoAutoexecSignals
     }
@@ -4356,6 +4806,7 @@ try {
             $swPhase = [Diagnostics.Stopwatch]::StartNew()
             [Arkuzo.LoopWatchdogV1]::Mark('policy reload')
             Update-ArkuzoLivePolicy
+            if (-not $MonitorOnly) { Resolve-ArkuzoAccountProvider }
             if ($null -ne $pendingLiveSettings) { Update-ArkuzoLiveSettings $pendingLiveSettings; $pendingLiveSettings = $null }
             Sync-ArkuzoAutoexecSignals
             $swPhase.Stop()
@@ -4392,6 +4843,12 @@ try {
             Update-VoltRecoveryCapability
             Start-ArkuzoVoltControlStatusAsync
             $nextVoltCheck = $clock.Elapsed.TotalSeconds + 15
+        }
+        if ((Test-ArkuzoNativeProvider) -and -not $MonitorOnly -and $clock.Elapsed.TotalSeconds -ge $nextNativeCheck) {
+            [Arkuzo.LoopWatchdogV1]::Mark('Arkuzo accounts')
+            $script:voltControlStatus = Get-ArkuzoNativeStatus; $script:voltControlCheckedUtc = [datetime]::UtcNow
+            Invoke-ArkuzoNativeRequests
+            $nextNativeCheck = $clock.Elapsed.TotalSeconds + 3
         }
         Poll-ArkuzoVersionCheckAsync
         if ($clock.Elapsed.TotalSeconds -ge $nextUpdateCheck) {
@@ -4619,7 +5076,7 @@ try {
                 [Arkuzo.LoopWatchdogV1]::Mark('client ' + $id + ': health probe')
                 $healthSample = Get-ArkuzoRecoveryHealthSample $client $(if ($state.isDisconnected) { 'IN_GAME_DISCONNECT' } else { '' }) $state
                 $healthSample.systemCommitPercent = if ($null -ne $systemMemory) { $systemMemory.commitPercent } else { 0 }
-                $healthSample.eligible = (-not $MonitorOnly -and $healthPolicy.enabled -and $voltStatus.safeToRecycle -and (Test-ArkuzoVoltOwnership $state.ParentId $script:voltParents[$state.ParentId] $state.StartTicks $voltPath))
+                $healthSample.eligible = (-not $MonitorOnly -and $healthPolicy.enabled -and $voltStatus.safeToRecycle -and (Test-ArkuzoClientOwnership $state))
                 $sampleTime = $clock.Elapsed.TotalSeconds
                 $isResponding = $healthSample.responding; $launchError = $healthSample.launchError
                 $window = $client.MainWindowHandle

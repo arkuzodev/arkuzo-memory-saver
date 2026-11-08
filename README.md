@@ -11,7 +11,7 @@
 
 ### [**⬇&nbsp; Download ArkuzoMemorySaver.exe**](https://github.com/arkuzodev/arkuzo-memory-saver/releases/latest/download/ArkuzoMemorySaver.exe)
 
-[Releases](https://github.com/arkuzodev/arkuzo-memory-saver/releases/latest) &nbsp;·&nbsp; [Configuration](docs/configuration.md) &nbsp;·&nbsp; [Troubleshooting](docs/troubleshooting.md) &nbsp;·&nbsp; [Farm-freeze recovery](docs/farm-freeze-recovery.md) &nbsp;·&nbsp; [Roadmap](#roadmap) &nbsp;·&nbsp; [Changelog](CHANGELOG.md)
+[Releases](https://github.com/arkuzodev/arkuzo-memory-saver/releases/latest) &nbsp;·&nbsp; [Configuration](docs/configuration.md) &nbsp;·&nbsp; [Troubleshooting](docs/troubleshooting.md) &nbsp;·&nbsp; [Accounts without Volt](docs/accounts.md) &nbsp;·&nbsp; [Farm-freeze recovery](docs/farm-freeze-recovery.md) &nbsp;·&nbsp; [Roadmap](#roadmap) &nbsp;·&nbsp; [Changelog](CHANGELOG.md)
 
 </div>
 
@@ -44,8 +44,8 @@
 </td>
 <td valign="top">
 <img src="docs/images/readme/feature-relaunch.svg" width="44" align="left" hspace="10" alt="">
-<b>Verified Volt relaunch</b><br>
-<sub>Acts only when the account, process generation, launcher control and audit state check out. A relaunch counts once the new client is in game.</sub>
+<b>Own account manager</b><br>
+<sub>Add accounts by cookie or browser sign-in, check whether each is still signed in, start the farm and relaunch every client yourself, with no Volt needed. A relaunch counts once the new client is in game.</sub>
 </td>
 </tr>
 <tr>
@@ -64,7 +64,7 @@
 <td valign="top">
 <img src="docs/images/readme/feature-control.svg" width="44" align="left" hspace="10" alt="">
 <b>Arkuzo Control Center</b><br>
-<sub>A local dashboard on <code>127.0.0.1</code>: every client, farm memory and system pressure charts, Volt accounts, an activity feed and live settings.</sub>
+<sub>A local dashboard on <code>127.0.0.1</code>: every client, farm memory and system pressure charts, your accounts and farm start, an activity feed and live settings.</sub>
 </td>
 <td valign="top">
 <img src="docs/images/readme/feature-autopilot.svg" width="44" align="left" hspace="10" alt="">
@@ -106,7 +106,7 @@ The launcher opens it for you (it needs Python 3 on `PATH`); in a source checkou
 | :---: | :--- |
 | <kbd>1</kbd> | **Download** [`ArkuzoMemorySaver.exe`](https://github.com/arkuzodev/arkuzo-memory-saver/releases/latest/download/ArkuzoMemorySaver.exe) into its own writable folder, not a temporary download preview. |
 | <kbd>2</kbd> | **Run it.** The first start downloads the latest stable runtime, checks its SHA-256 and installs it. |
-| <kbd>3</kbd> | **Connect Volt** for recovery: Python 3 on `PATH`, Volt running with Account Manager reachable, and Volt's auto-relaunch on only for the accounts you want managed. |
+| <kbd>3</kbd> | **Add your accounts** on the Control Center's Accounts page (cookie or browser sign-in), set the place, and press **Start farm**. Using Volt's account manager instead works too. |
 | <kbd>4</kbd> | **Tune** `data/config.json` with the [configuration guide](docs/configuration.md), or use the Control Center's Settings page. |
 | <kbd>5</kbd> | **Give each new client its five-minute warm-up** before expecting regular trimming. |
 
@@ -133,7 +133,7 @@ flowchart LR
 
 ## Recovery is deliberately conservative
 
-Volt stays the account-aware launcher. The saver collects no credentials, replays no authentication tickets and never writes to Volt's database: it reads state and uses verified Account Manager controls. An accepted launch request is not treated as a restored session.
+The launcher is either Arkuzo's own account manager ([accounts without Volt](docs/accounts.md)) or Volt's. Arkuzo keeps the cookies you add encrypted for your Windows user and sends them only to Roblox. With Volt, the saver never writes Volt's database: it reads state and uses verified Account Manager controls. Either way, an accepted launch request is not treated as a restored session.
 
 ```mermaid
 flowchart LR
@@ -141,7 +141,7 @@ flowchart LR
     B -- no --> X[Blocked, nothing closed]
     B -- yes --> C[Journal entry written]
     C --> D[Close that client]
-    D --> E[Volt relaunches]
+    D --> E[Arkuzo or Volt relaunches]
     E --> F{New process,<br>socket, window,<br>server joined?}
     F -- yes --> G([Back in game])
     F -- not yet --> H[Retry with backoff<br>and hourly budget]
@@ -151,8 +151,9 @@ flowchart LR
     class G ok
 ```
 
-- **Only opted-in, previously launched, uniquely mapped accounts.** Unknown mappings, loading screens, unavailable logging or an unhealthy journal block every destructive step.
-- **Volt's relaunch delay stays at 30 s or more;** a larger delay you set is kept. Missing-account retries back off for 90–900 s, with cooldowns and hourly budgets that survive saver restarts.
+- **Only opted-in, uniquely mapped accounts.** Unknown mappings, loading screens, unavailable logging or an unhealthy journal block every destructive step. Arkuzo maps each client by the account's own tracker id on its command line; clients it didn't launch are left alone.
+- **Arkuzo relaunches by itself** after the relaunch delay (8 s), launches spaced 12 s apart, and retries only a launch that produced no client.
+- **With Volt, its relaunch delay stays at 30 s or more;** a larger delay you set is kept. Missing-account retries back off for 90–900 s, with cooldowns and hourly budgets that survive saver restarts.
 - **A restore must prove itself:** a new, exactly mapped process, a connected launcher socket, a responsive window without errors and matching server-join evidence, held for a continuous confirmation window.
 - **Farm-wide freezes** (in the logs, Chrome Remote Desktop disconnects and display events) are handled as one event, with closes paced so Volt doesn't show its "Roblox started before Volt could connect" notice. Switch it off with `health.farm_freeze_enabled`.
 
@@ -186,7 +187,7 @@ The readiness checks above are criteria for counting a restore, not an overnight
 | **System** | Windows x64 with Windows PowerShell 5.1. No separate .NET install; the launcher is self-contained. |
 | **Folder** | A writable folder for `ArkuzoMemorySaver.exe`, `app/` and `data/`. |
 | **Network** | Internet for the first runtime download and update checks. |
-| **Volt recovery** | Python 3 on `PATH` and a running Volt with Account Manager reachable. The probe uses only Python's standard library. |
+| **Accounts** | Arkuzo accounts need nothing extra (browser sign-in uses Edge or Chrome). With Volt instead: Python 3 on `PATH` and a running Volt with Account Manager reachable. |
 
 <details>
 <summary><b>Upgrading a legacy installation</b></summary>

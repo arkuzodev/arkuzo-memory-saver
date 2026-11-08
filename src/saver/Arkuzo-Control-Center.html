@@ -510,7 +510,7 @@ body.light .console li.warning .txt { color: #92400e; } body.light .console li.c
         <article class="card" id="vaultCard">
           <div class="card-h"><span class="cap">Accounts</span><span class="card-s" id="vaultSub"></span><div class="spacer"></div>
             <button class="btn ghost sm" id="btnCheckAll" title="Ask Roblox whether every cookie is still signed in"><span data-icon="check"></span>Check all</button>
-            <button class="btn sm" id="btnSignIn" title="Sign in to Roblox in a small window; the account is added when the sign-in succeeds"><span data-icon="enter"></span>Sign in with browser</button>
+            <button class="btn sm" id="btnSignIn" title="Sign in to Roblox in a normal Microsoft Edge window; the account is added when you are signed in"><span data-icon="enter"></span>Sign in with browser</button>
             <button class="btn accent sm" id="btnAddCookie"><span data-icon="plus"></span>Add cookie</button>
           </div>
           <form class="add-panel well" id="addPanel" hidden autocomplete="off">
@@ -1113,9 +1113,9 @@ function renderVault() {
   $('farmNotice').hidden = !notice; $('farmNotice').textContent = notice || '';
   // Sign-in line.
   const login = v.login || {};
-  $('btnSignIn').disabled = !v.browserLogin || login.state === 'starting' || login.state === 'waiting';
-  if (!v.browserLogin) $('btnSignIn').title = 'Microsoft Edge or Chrome is needed for browser sign-in';
-  const busy = login.state === 'starting' || login.state === 'waiting';
+  const busy = ['starting', 'waiting', 'reading'].includes(login.state);
+  $('btnSignIn').disabled = !v.browserLogin || busy;
+  if (!v.browserLogin) $('btnSignIn').title = 'Microsoft Edge is needed for browser sign-in';
   $('loginLine').hidden = !busy;
   if (busy) $('loginLine').replaceChildren(el('span', { class: 'spin' }), el('span', { text: login.message || 'Waiting for sign-in' }), el('div', { class: 'spacer' }),
     el('button', { class: 'btn ghost sm', onclick: () => vaultAct('/api/vault/login/cancel', {}, 'Sign-in cancelled', 'neutral') }, 'Cancel'));
@@ -1244,7 +1244,7 @@ $('addPanel').addEventListener('submit', async (e) => {
   const r = await vaultAct('/api/vault/add', { cookie }, null);
   if (r) { toast(r.updated ? `${r.displayName}: cookie refreshed` : `Added ${r.displayName} (@${r.username})`, 'good'); $('addPanel').hidden = true; }
 });
-$('btnSignIn').onclick = () => vaultAct('/api/vault/login', {}, 'Sign in to Roblox in the window that opened', 'info');
+$('btnSignIn').onclick = () => vaultAct('/api/vault/login', {}, 'Sign in to Roblox in the Edge window that opened', 'info');
 $('btnCheckAll').onclick = () => vaultAct('/api/vault/check', {}, 'Checking every cookie with Roblox…', 'info');
 $('btnFarmStart').onclick = () => vaultAct('/api/farm/start', {}, 'Farm started: launching accounts one by one', 'good');
 $('btnFarmStop').onclick = () => vaultAct('/api/farm/stop', {}, 'Farm stopped: clients keep running, nothing is relaunched', 'warning');
@@ -1301,7 +1301,7 @@ async function poll() {
     if (st.events.length) { S.events.push(...st.events); S.lastEvent = st.events[st.events.length - 1].id;
       if (S.events.length > 500) { const drop = S.events.length - 500; S.events.splice(0, drop); S.seenEvents = Math.max(0, S.seenEvents - drop); } }
     if (S.live) renderAll(); else renderSaver(st);
-    if (S.page === 'accounts' || !S.vaultAt || Date.now() - S.vaultAt > 15000 || ['starting', 'waiting'].includes(S.loginState)) loadVault();
+    if (S.page === 'accounts' || !S.vaultAt || Date.now() - S.vaultAt > 15000 || ['starting', 'waiting', 'reading'].includes(S.loginState)) loadVault();
     introProgress(st);
   } catch (e) { $('offline').hidden = false; }
   finally { setTimeout(poll, 2000); }

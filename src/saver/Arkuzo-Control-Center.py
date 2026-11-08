@@ -978,17 +978,65 @@ def login_cookie_from(cookies) -> str | None:
     return None
 
 
+def signed_in_title(title: str) -> bool:
+    """Roblox opens its home page after a successful sign-in ("Home - Roblox")."""
+    return 'home - roblox' in (title or '').lower()
+
+
+class _Windows:
+    """Top-level window titles of one process, and a polite close (like clicking X)."""
+
+    def __init__(self):
+        self.u = None
+        if os.name == 'nt':
+            u = ctypes.WinDLL('user32', use_last_error=True)
+            self.proc_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+            u.EnumWindows.argtypes = [self.proc_type, wintypes.LPARAM]
+            u.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+            u.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+            u.IsWindowVisible.argtypes = [wintypes.HWND]
+            u.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+            self.u = u
+
+    def windows(self, pid: int) -> list:
+        found = []
+        if not self.u:
+            return found
+
+        def visit(hwnd, _):
+            owner = wintypes.DWORD()
+            self.u.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+            if owner.value == pid and self.u.IsWindowVisible(hwnd):
+                buf = ctypes.create_unicode_buffer(512)
+                self.u.GetWindowTextW(hwnd, buf, 512)
+                found.append((hwnd, buf.value))
+            return True
+        self.u.EnumWindows(self.proc_type(visit), 0)
+        return found
+
+    def close(self, pid: int):
+        for hwnd, _ in self.windows(pid):
+            self.u.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE: Edge saves the profile (cookies included) as it exits.
+
+
+WINDOWS = _Windows()
+
+
 class BrowserLogin:
-    """A small app window on roblox.com/login in a throwaway browser profile.
+    """Sign in with a plain Microsoft Edge window, then read the login cookie.
 
-    The user signs in (captchas and 2-step included) themselves; once Roblox
-    accepts the login cookie the window closes, the profile is deleted and the
-    account is added. The cookie only ever lives in memory and in the vault.
+    While the person signs in, Edge runs exactly as normal: no remote debugging,
+    no automation switches, no app mode. It only gets its own throwaway profile.
+    When Roblox shows its home page (or the window is closed), Edge is opened
+    once more, invisibly, on that profile so Edge itself hands over the stored
+    cookie through DevTools; nothing here decrypts browser files. The profile is
+    deleted afterwards; the cookie only ever lives in memory and in the vault.
     """
-    TIMEOUT_SEC = 600
+    TIMEOUT_SEC = 900
 
-    def __init__(self, data: Path, browser: Path | None, on_cookie=None, extra_args=()):
-        self.data, self.browser, self.extra_args = data, browser, list(extra_args)
+    def __init__(self, data: Path, browser: Path | None, on_cookie=None, extra_args=(), reader_args=('--headless=new',)):
+        self.data, self.browser = data, browser
+        self.extra_args, self.reader_args = list(extra_args), list(reader_args)
         self.on_cookie = on_cookie or (lambda cookie: add_account(data, cookie))
         self.state, self.message, self.account = 'idle', '', None
         self.proc = None
@@ -1001,11 +1049,11 @@ class BrowserLogin:
 
     def start(self) -> dict:
         with self.lock:
-            if self.state in ('starting', 'waiting'):
+            if self.state in ('starting', 'waiting', 'reading'):
                 return self.snapshot()
             if not self.browser:
-                raise VaultError('Microsoft Edge or Chrome is needed for browser sign-in; paste the cookie instead')
-            self.state, self.message, self.account = 'starting', 'Opening the sign-in window', None
+                raise VaultError('Microsoft Edge is needed for browser sign-in; paste the cookie instead')
+            self.state, self.message, self.account = 'starting', 'Opening Microsoft Edge', None
             self.cancelled.clear()
             threading.Thread(target=self._run, daemon=True).start()
             return self.snapshot()
@@ -1018,46 +1066,30 @@ class BrowserLogin:
         if account is not None:
             self.account = account
 
-    def _run(self):
+    def _wait_exit(self, proc, seconds) -> bool:
+        try:
+            proc.wait(timeout=seconds)
+            return True
+        except subprocess.TimeoutExpired:
+            return False
+
+    def read_cookie(self, profile: Path) -> str | None:
+        """Open the profile invisibly with DevTools and ask Edge for its roblox.com login cookie."""
+        port_file = profile / 'DevToolsActivePort'
+        port_file.unlink(missing_ok=True)
+        reader = subprocess.Popen([str(self.browser), f'--user-data-dir={profile}', '--remote-debugging-port=0', '--no-first-run',
+                                   '--no-default-browser-check', *self.reader_args, 'about:blank'])
         socket = None
         try:
-            root = self.data / 'browser-login'
-            root.mkdir(exist_ok=True)
-            self.profile = root / secrets.token_hex(8)
-            self.profile.mkdir()
-            self.proc = subprocess.Popen([str(self.browser), f'--user-data-dir={self.profile}', '--remote-debugging-port=0',
-                                          '--no-first-run', '--no-default-browser-check',
-                                          '--disable-sync', '--window-size=500,760', *self.extra_args, '--app=https://www.roblox.com/login'])
-            port_file = self.profile / 'DevToolsActivePort'
             deadline = time.time() + 30
             while not port_file.exists():
-                if time.time() > deadline or self.proc.poll() is not None:
-                    raise VaultError('The sign-in window did not start')
+                if time.time() > deadline or reader.poll() is not None:
+                    raise VaultError('Edge could not reopen the sign-in profile')
                 time.sleep(0.2)
             port = int(port_file.read_text(encoding='ascii').split()[0])
             info = json.loads(urllib.request.urlopen(f'http://127.0.0.1:{port}/json/version', timeout=5).read())
             socket = _WebSocket(info['webSocketDebuggerUrl'])
-            self._set('waiting', 'Sign in to Roblox in the window that opened')
-            deadline = time.time() + self.TIMEOUT_SEC
-            tried = None
-            while time.time() < deadline:
-                if self.cancelled.is_set():
-                    return self._set('cancelled', 'Sign-in cancelled')
-                if self.proc.poll() is not None:
-                    return self._set('cancelled', 'The sign-in window was closed before signing in')
-                cookie = login_cookie_from((socket.call('Storage.getCookies').get('result') or {}).get('cookies'))
-                if cookie and cookie != tried:
-                    tried = cookie
-                    self._set('waiting', 'Checking the sign-in with Roblox')
-                    try:
-                        account = self.on_cookie(cookie)
-                        return self._set('success', f"Added {account.get('displayName') or account.get('username')}", account)
-                    except VaultError:
-                        self._set('waiting', 'Sign in to Roblox in the window that opened')
-                time.sleep(1.5)
-            self._set('failed', 'Sign-in timed out after 10 minutes')
-        except (OSError, ValueError, KeyError, VaultError) as exc:
-            self._set('failed', str(exc) if isinstance(exc, VaultError) else f'Sign-in window failed ({type(exc).__name__})')
+            return login_cookie_from((socket.call('Storage.getCookies').get('result') or {}).get('cookies'))
         finally:
             if socket is not None:
                 try:
@@ -1065,15 +1097,49 @@ class BrowserLogin:
                 except (OSError, ValueError):
                     pass
                 socket.close()
-            if self.proc is not None:
-                try:
-                    self.proc.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    self.proc.kill()
-                    try:
-                        self.proc.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        pass
+            if not self._wait_exit(reader, 15):
+                reader.kill()
+                self._wait_exit(reader, 5)
+
+    def _run(self):
+        try:
+            root = self.data / 'browser-login'
+            root.mkdir(exist_ok=True)
+            self.profile = root / secrets.token_hex(8)
+            self.profile.mkdir()
+            # A plain Edge window: only its own profile and the Roblox sign-in page.
+            self.proc = subprocess.Popen([str(self.browser), f'--user-data-dir={self.profile}', '--no-first-run', '--no-default-browser-check',
+                                          '--window-size=520,820', *self.extra_args, 'https://www.roblox.com/login'])
+            self._set('waiting', 'Sign in to Roblox in the Edge window. It closes by itself on your Roblox home page, or close it when you are signed in.')
+            deadline = time.time() + self.TIMEOUT_SEC
+            signed_in = False
+            while self.proc.poll() is None:
+                if self.cancelled.is_set() or time.time() > deadline:
+                    WINDOWS.close(self.proc.pid)
+                    if not self._wait_exit(self.proc, 15):
+                        self.proc.kill()
+                    return self._set('cancelled' if self.cancelled.is_set() else 'failed',
+                                     'Sign-in cancelled' if self.cancelled.is_set() else 'Sign-in timed out after 15 minutes')
+                if not signed_in and any(signed_in_title(t) for _, t in WINDOWS.windows(self.proc.pid)):
+                    signed_in = True
+                    time.sleep(2)  # Let Roblox finish setting its cookies.
+                    WINDOWS.close(self.proc.pid)
+                time.sleep(0.7)
+            self._set('reading', 'Reading the sign-in from Edge')
+            time.sleep(1)  # Edge releases the profile just after its window process exits.
+            cookie = self.read_cookie(self.profile)
+            if not cookie:
+                return self._set('failed', 'No Roblox sign-in found: sign in completely before closing the window')
+            self._set('reading', 'Checking the sign-in with Roblox')
+            account = self.on_cookie(cookie)
+            return self._set('success', f"Added {account.get('displayName') or account.get('username')}", account)
+        except VaultError as exc:
+            self._set('failed', str(exc))
+        except (OSError, ValueError, KeyError) as exc:
+            self._set('failed', f'Sign-in failed ({type(exc).__name__})')
+        finally:
+            if self.proc is not None and self.proc.poll() is None:
+                self.proc.kill()
             if self.profile is not None:
                 shutil.rmtree(self.profile, ignore_errors=True)  # The throwaway profile holds the session too.
 
@@ -1609,7 +1675,7 @@ class App:
         self.close_pending = False  # A window closed while other registrations remained.
         self.pages_lock = threading.Lock()
         self.cookies = CookieChecker(data)
-        self.login = BrowserLogin(data, find_app_browser())
+        self.login = BrowserLogin(data, find_edge())
         # A sign-in window cut off by a crash leaves a signed-in throwaway profile behind.
         shutil.rmtree(data / 'browser-login', ignore_errors=True)
 
@@ -2003,6 +2069,14 @@ def avatar_png(data: Path, user_id: str) -> bytes | None:
     except OSError:
         pass
     return png
+
+
+def find_edge():
+    """Microsoft Edge only: browser sign-in uses the real Edge, as Windows ships it."""
+    for base in (os.environ.get('ProgramFiles(x86)'), os.environ.get('ProgramFiles'), os.environ.get('LOCALAPPDATA')):
+        if base and (Path(base) / r'Microsoft\Edge\Application\msedge.exe').exists():
+            return Path(base) / r'Microsoft\Edge\Application\msedge.exe'
+    return None
 
 
 def find_app_browser():

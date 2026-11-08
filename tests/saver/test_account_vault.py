@@ -231,49 +231,84 @@ class VaultTests(unittest.TestCase):
 
 
 class BrowserLoginTests(unittest.TestCase):
-    """The real sign-in window (headless here): a planted fake login cookie is picked up only
-    once Roblox (faked) accepts it, then the window closes and its throwaway profile is deleted."""
+    """Sign-in uses a plain Edge window; the cookie is read afterwards from its throwaway profile."""
 
-    def test_sign_in_window_hands_over_the_cookie_and_cleans_up(self):
-        browser = cc.find_app_browser()
+    def test_sign_in_window_is_plain_edge(self):
+        started = []
+
+        class Proc:
+            pid = 4242
+
+            def poll(self):
+                return 0  # The window was closed right away.
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                pass
+        data = Path(tempfile.mkdtemp())
+        saved = cc.subprocess.Popen
+        cc.subprocess.Popen = lambda args, **kw: started.append(list(args)) or Proc()
+        login = cc.BrowserLogin(data, Path('msedge.exe'), lambda c: {'displayName': 'x'})
+        login.read_cookie = lambda profile: None
+        try:
+            login._run()
+        finally:
+            cc.subprocess.Popen = saved
+            shutil.rmtree(data, ignore_errors=True)
+        window = started[0]
+        self.assertTrue(window[-1] == 'https://www.roblox.com/login')
+        for flag in window:
+            self.assertFalse(any(x in flag for x in ('remote-debugging', 'automation', 'headless', '--app', 'webdriver', 'remote-allow')), flag)
+        self.assertEqual(login.state, 'failed')
+        self.assertIn('No Roblox sign-in found', login.message)
+        self.assertFalse(login.profile.exists(), 'throwaway profile deleted')
+
+    def test_home_page_title_means_signed_in(self):
+        self.assertTrue(cc.signed_in_title('Home - Roblox and 2 more pages - Personal - Microsoft​ Edge'))
+        for title in ('Log in to Roblox - Microsoft Edge', 'Roblox - Microsoft Edge', '', 'Homework - Roblox Studio'):
+            self.assertFalse(cc.signed_in_title(title), title)
+
+    def test_cookie_written_during_sign_in_is_read_after_the_window_closes(self):
+        browser = cc.find_edge()
         if browser is None:
-            self.skipTest('Edge or Chrome not installed')
+            self.skipTest('Microsoft Edge not installed')
+        import time as _t
+        import urllib.request as _u
         data = Path(tempfile.mkdtemp())
         accepted = fake_cookie('z')
         seen = []
 
         def on_cookie(cookie):
             seen.append(cookie)
-            if cookie != accepted:
-                raise cc.VaultError('not signed in yet')
             return {'displayName': 'Zulu', 'username': 'FarmZulu'}
-        login = cc.BrowserLogin(data, browser, on_cookie, extra_args=['--headless=new'])
+        # Test only: the "window" runs headless with DevTools so the test can sign in and close it.
+        login = cc.BrowserLogin(data, browser, on_cookie, extra_args=['--headless=new', '--remote-debugging-port=0'])
         try:
             login.start()
-            deadline = __import__('time').time() + 40
-            while login.state != 'waiting' and __import__('time').time() < deadline:
-                __import__('time').sleep(0.2)
-            self.assertEqual(login.state, 'waiting', login.message)
+            deadline = _t.time() + 40
+            while not (login.profile and (login.profile / 'DevToolsActivePort').exists()) and _t.time() < deadline:
+                _t.sleep(0.2)
             port = int((login.profile / 'DevToolsActivePort').read_text().split()[0])
-            info = json.loads(__import__('urllib.request').request.urlopen(f'http://127.0.0.1:{port}/json/version', timeout=5).read())
+            info = json.loads(_u.urlopen(f'http://127.0.0.1:{port}/json/version', timeout=5).read())
             ws = cc._WebSocket(info['webSocketDebuggerUrl'])
+            ws.call('Storage.setCookies', {'cookies': [{'name': '.ROBLOSECURITY', 'value': accepted, 'domain': '.roblox.com', 'path': '/',
+                                                       'secure': True, 'httpOnly': True, 'expires': _t.time() + 86400 * 30}]})
             try:
-                for value in (fake_cookie('w'), accepted):  # A rejected cookie first, then the real sign-in.
-                    ws.call('Storage.setCookies', {'cookies': [{'name': '.ROBLOSECURITY', 'value': value, 'domain': '.roblox.com', 'path': '/', 'secure': True, 'httpOnly': True}]})
-                    __import__('time').sleep(2.5)
-            finally:
-                ws.close()
-            deadline = __import__('time').time() + 30
-            while login.state == 'waiting' and __import__('time').time() < deadline:
-                __import__('time').sleep(0.2)
+                ws.call('Browser.close')  # The person closes the window after signing in.
+            except OSError:
+                pass
+            ws.close()
+            deadline = _t.time() + 60
+            while login.state in ('starting', 'waiting', 'reading') and _t.time() < deadline:
+                _t.sleep(0.2)
             self.assertEqual(login.state, 'success', login.message)
-            self.assertEqual(seen[-1], accepted)
-            self.assertIn(fake_cookie('w'), seen)
-            deadline = __import__('time').time() + 20
-            while login.profile.exists() and __import__('time').time() < deadline:
-                __import__('time').sleep(0.2)
+            self.assertEqual(seen, [accepted])
+            deadline = _t.time() + 20
+            while login.profile.exists() and _t.time() < deadline:
+                _t.sleep(0.2)
             self.assertFalse(login.profile.exists(), 'throwaway browser profile deleted')
-            self.assertIsNotNone(login.proc.poll(), 'sign-in window closed')
             self.assertNotIn('WARNING', json.dumps(login.snapshot()))
         finally:
             login.cancel()

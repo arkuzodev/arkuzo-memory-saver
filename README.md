@@ -11,7 +11,7 @@
 
 ### [**⬇&nbsp; Download ArkuzoMemorySaver.exe**](https://github.com/arkuzodev/arkuzo-memory-saver/releases/latest/download/ArkuzoMemorySaver.exe)
 
-[Releases](https://github.com/arkuzodev/arkuzo-memory-saver/releases/latest) &nbsp;·&nbsp; [Configuration](docs/configuration.md) &nbsp;·&nbsp; [Troubleshooting](docs/troubleshooting.md) &nbsp;·&nbsp; [Farm-freeze recovery](docs/farm-freeze-recovery.md) &nbsp;·&nbsp; [Changelog](CHANGELOG.md)
+[Releases](https://github.com/arkuzodev/arkuzo-memory-saver/releases/latest) &nbsp;·&nbsp; [Configuration](docs/configuration.md) &nbsp;·&nbsp; [Troubleshooting](docs/troubleshooting.md) &nbsp;·&nbsp; [Farm-freeze recovery](docs/farm-freeze-recovery.md) &nbsp;·&nbsp; [Roadmap](#roadmap) &nbsp;·&nbsp; [Changelog](CHANGELOG.md)
 
 </div>
 
@@ -195,6 +195,19 @@ The readiness checks above are criteria for counting a restore, not an overnight
 If `data/config.json` doesn't exist and a `config.json` sits beside `ArkuzoMemorySaver.exe`, the launcher copies it byte for byte into `data/` and keeps the original. An existing `data/config.json` always wins. Old recovery journals are not migrated. Stop the old saver before switching installations.
 
 </details>
+
+## Roadmap
+
+<img src="docs/images/readme/roadmap.png" alt="Roadmap: 1 Volt becomes optional, 2 AI control over MCP, 3 headless farming, 4 Arkuzo execution suite" width="100%">
+
+| Phase | Goal | What it means |
+| :---: | :--- | :--- |
+| <kbd>1</kbd> **Next** | **Volt becomes optional** | Volt moves to an add-on, and other executors get first-class integrations, with the same verified, account-aware recovery. |
+| <kbd>2</kbd> | **AI control over MCP** | An MCP server so AI agents can watch the farm and adjust settings in real time, inside the same safety gates. |
+| <kbd>3</kbd> | **Headless farming** | More performance work and fully windowless farming: clients run without windows on screen. |
+| <kbd>4</kbd> | **Arkuzo execution suite** | Arkuzo's own execution suite, built in and integrated with the saver from the start. |
+
+<sub>Plans, not promises: order and scope can change. Shipped work lands in the <a href="CHANGELOG.md">changelog</a>.</sub>
 
 ## Integrity and antivirus
 

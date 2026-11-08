@@ -1,11 +1,11 @@
 <div align="center">
 
 # Arkuzo Memory Saver
-### Volt Integration · v2.1.4 (Arkuzo Control Center)
+### Volt Integration · v2.1.5 (Arkuzo Control Center)
 
 A portable Windows memory monitor with guarded, account-aware recovery through Volt.
 
-[![Version](https://img.shields.io/badge/version-2.1.4-6366f1)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-2.1.5-6366f1)](CHANGELOG.md)
 ![Windows x64](https://img.shields.io/badge/platform-Windows_x64-0078D4)
 ![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-5391FE)
 ![Volt integration](https://img.shields.io/badge/Volt-integration-22c55e)
@@ -60,7 +60,7 @@ Policy     600 MB soft target · hard cap disabled
 
 ## Control Center and autopilot
 
-The launcher (`ArkuzoMemorySaver.exe` v2.1.4, with Python 3 on `PATH`) opens the Control Center automatically; in a source checkout, `Arkuzo-Control-Center.cmd` does the same. It is a local dashboard (served only on `127.0.0.1`) that runs the saver for you:
+The launcher (`ArkuzoMemorySaver.exe` v2.1.5, with Python 3 on `PATH`) opens the Control Center automatically; in a source checkout, `Arkuzo-Control-Center.cmd` does the same. It is a local dashboard (served only on `127.0.0.1`) that runs the saver for you:
 
 - **Live view** of every client: account, status, resident memory against the target, private memory, CPU, next trim and uptime; farm-memory and system-pressure charts; Volt accounts; an activity feed.
 - **Autopilot** keeps the saver alive: restarts with backoff after a crash, exit or hang, and pauses instead of looping if it keeps crashing.
@@ -104,14 +104,14 @@ Windows may show SmartScreen warnings for an **unsigned binary**. Check that the
 
 ## Antivirus & Integrity Verification
 
-v2.1.4 ships a rebuilt executable and new archives; all 1.x releases are deprecated. Their VirusTotal results are not yet recorded; compare the checksums below with the release before running anything.
+v2.1.5 ships a rebuilt executable and new archives; all 1.x releases are deprecated. Their VirusTotal results are not yet recorded; compare the checksums below with the release before running anything.
 
 | File | SHA-256 Checksum | VirusTotal Result |
 | :--- | :--- | :--- |
-| **`ArkuzoMemorySaver.exe`** | `eaaee3d73279de5ffef7d6870586f7374bd28d814805a6f51996f41866b921d2` | Not yet scanned |
-| **`ArkuzoMemorySaver-runtime.zip`** | `c4346d91458f3d4adc3564d2380c9f847dad03f37c56c7e82a984ca4e339ea3c` | Not yet scanned |
-| **`ArkuzoMemorySaver-controlcenter.zip`** | `f16dd1e0a23318dd806d3b515e7e58b34ffa90e34955f6f85518135f1c166f9e` | Not yet scanned |
-| **`ArkuzoMemorySaver-v2.1.4-win-x64.zip`** | `ae3126ef536569d30015fdcf9095942aa0f6ef31e3c63a7fa06271cfff2ddc35` | Not yet scanned |
+| **`ArkuzoMemorySaver.exe`** | `daa38b0e83788c9519fac2de6fd440737c3f3fdead07f5f504640b58c0b7f4a1` | Not yet scanned |
+| **`ArkuzoMemorySaver-runtime.zip`** | `5ae228a1bbd7b38943b6745f29c11f73dd2b2ec1c0cfce204a81b98501c10f30` | Not yet scanned |
+| **`ArkuzoMemorySaver-controlcenter.zip`** | `f3bb2f3874a3220492ab2766835071d600005da8ba3f95b28a1eae1c587d9d47` | Not yet scanned |
+| **`ArkuzoMemorySaver-v2.1.5-win-x64.zip`** | `7f32df4793312cb886bbe4bb421bf4f33a0265efaad4114acc58defe199b5fa3` | Not yet scanned |
 
 The exact release publishes **`SHA256SUMS.txt`** for its executable and archives, plus **`ArkuzoMemorySaver-runtime.sha256`** and **`ArkuzoMemorySaver-controlcenter.sha256`** for updater validation. The launcher verifies downloaded bytes and available GitHub asset digests. See [security and privacy](SECURITY.md).
 

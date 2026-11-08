@@ -14,11 +14,11 @@ Arkuzo Memory Saver runs locally. The public launcher reads release metadata and
 
 SHA-256 values for each release are published in that release's **`SHA256SUMS.txt`**, **`ArkuzoMemorySaver-runtime.sha256`** and **`ArkuzoMemorySaver-controlcenter.sha256`** assets. The launcher validates runtime bytes and available GitHub asset digests before installation or repair. Use checksums from the exact release you downloaded, not a previous version.
 
-The **v2.1.4** release rebuilds the launcher and ships the Control Center add-on in the Arkuzo Client style. All 1.x releases are deprecated. Its VirusTotal results are not yet recorded; earlier scans do not apply to these bytes:
-- **`ArkuzoMemorySaver.exe`:** SHA-256 `eaaee3d73279de5ffef7d6870586f7374bd28d814805a6f51996f41866b921d2`
-- **`ArkuzoMemorySaver-runtime.zip`:** SHA-256 `c4346d91458f3d4adc3564d2380c9f847dad03f37c56c7e82a984ca4e339ea3c`
-- **`ArkuzoMemorySaver-controlcenter.zip`:** SHA-256 `f16dd1e0a23318dd806d3b515e7e58b34ffa90e34955f6f85518135f1c166f9e`
-- **`ArkuzoMemorySaver-v2.1.4-win-x64.zip`:** SHA-256 `ae3126ef536569d30015fdcf9095942aa0f6ef31e3c63a7fa06271cfff2ddc35`
+The **v2.1.5** release rebuilds the launcher and ships the Control Center add-on in the Arkuzo Client style. All 1.x releases are deprecated. Its VirusTotal results are not yet recorded; earlier scans do not apply to these bytes:
+- **`ArkuzoMemorySaver.exe`:** SHA-256 `daa38b0e83788c9519fac2de6fd440737c3f3fdead07f5f504640b58c0b7f4a1`
+- **`ArkuzoMemorySaver-runtime.zip`:** SHA-256 `5ae228a1bbd7b38943b6745f29c11f73dd2b2ec1c0cfce204a81b98501c10f30`
+- **`ArkuzoMemorySaver-controlcenter.zip`:** SHA-256 `f3bb2f3874a3220492ab2766835071d600005da8ba3f95b28a1eae1c587d9d47`
+- **`ArkuzoMemorySaver-v2.1.5-win-x64.zip`:** SHA-256 `7f32df4793312cb886bbe4bb421bf4f33a0265efaad4114acc58defe199b5fa3`
 
 The Control Center listens only on `127.0.0.1`, rejects requests whose `Host` is not a loopback name, and requires a per-run token for every change. It never reads cookies, tickets or command lines and does not control Roblox or Volt directly.
 

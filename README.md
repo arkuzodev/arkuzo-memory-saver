@@ -1,160 +1,241 @@
 <div align="center">
 
-# Arkuzo Memory Saver
-### Volt Integration · v2.1.5 (Arkuzo Control Center)
+<img src="docs/images/readme/hero.png" alt="Arkuzo Memory Saver: your Roblox farm, kept in game" width="100%">
 
-A portable Windows memory monitor with guarded, account-aware recovery through Volt.
+<br>
 
-[![Version](https://img.shields.io/badge/version-2.1.5-6366f1)](CHANGELOG.md)
-![Windows x64](https://img.shields.io/badge/platform-Windows_x64-0078D4)
-![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-5391FE)
-![Volt integration](https://img.shields.io/badge/Volt-integration-22c55e)
+[![Version](https://img.shields.io/badge/version-2.1.5-38bdf8?style=for-the-badge&labelColor=12141b)](CHANGELOG.md)
+[![Windows x64](https://img.shields.io/badge/Windows-x64-818cf8?style=for-the-badge&labelColor=12141b)](#requirements)
+[![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-a78bfa?style=for-the-badge&labelColor=12141b)](#requirements)
+[![Volt integration](https://img.shields.io/badge/Volt-integration-34d399?style=for-the-badge&labelColor=12141b)](#recovery-is-deliberately-conservative)
 
-**[Download ArkuzoMemorySaver.exe](https://github.com/arkuzodev/arkuzo-memory-saver/releases/latest/download/ArkuzoMemorySaver.exe)** · **[Releases](https://github.com/arkuzodev/arkuzo-memory-saver/releases/latest)** · **[Configuration](docs/configuration.md)** · **[Troubleshooting](docs/troubleshooting.md)**
+### [**⬇&nbsp; Download ArkuzoMemorySaver.exe**](https://github.com/arkuzodev/arkuzo-memory-saver/releases/latest/download/ArkuzoMemorySaver.exe)
+
+[Releases](https://github.com/arkuzodev/arkuzo-memory-saver/releases/latest) &nbsp;·&nbsp; [Configuration](docs/configuration.md) &nbsp;·&nbsp; [Troubleshooting](docs/troubleshooting.md) &nbsp;·&nbsp; [Farm-freeze recovery](docs/farm-freeze-recovery.md) &nbsp;·&nbsp; [Changelog](CHANGELOG.md)
 
 </div>
 
----
+<br>
 
-## One download. Separate runtime and data.
+<img src="docs/images/readme/stats.png" alt="Farm-wide freezes back in game in about 2.5 min on average (replay), 600 MB soft target per client, one verified Volt relaunch at a time, a four-file checksummed runtime" width="100%">
 
-Download **only `ArkuzoMemorySaver.exe`**, put it in a writable folder, and launch it. On first start, the launcher retrieves the **latest stable official release's runtime ZIP and checksum**, verifies its SHA-256 hash, installs the version, and starts the saver. Prereleases are not selected automatically.
-
-Subsequent starts check for stable runtime updates. Versioned files live in `app/versions/`; your configuration, logs, and recovery journal live separately in `data/`. **An update never overwrites an existing user configuration.** If the JSON is malformed, the saver refuses to start instead of silently replacing it with defaults. The runtime update itself can still complete; your configuration is preserved.
-
-```mermaid
-flowchart LR
-    A[Check stable update] --> B[Verify SHA-256]
-    B --> C[Install version]
-    C --> D[Preserve user data]
-    D --> E[Launch saver]
-```
-
-> First start requires internet access. Offline starts require an already installed, validated cached runtime. A checksum detects a mismatch; it is not a code signature or a substitute for trusting the download source.
+<sub>The 2.5 min is the average per account when the four logged farm-wide freezes (23–27 Oct) are replayed against v2.1.5; the logs showed 5.8 min. See [farm-freeze recovery](docs/farm-freeze-recovery.md).</sub>
 
 ## What it does
 
-| Feature | Behavior and boundary |
-| --- | --- |
-| Memory visibility | Tracks resident working set, private memory, and OS commit pressure separately. |
-| Eligible working-set trimming | Uses a 600 MB soft target, a five-minute per-client warmup, and a 45-second trim interval. Skips loading, unresponsive, and startup-error clients. |
-| Sustained-memory guard | A 6,000 MB private-memory threshold sustained for 60 seconds can make a client a recovery candidate. Current system pressure has separate checks. |
-| Volt account recovery | Acts only when account identity, process generation, launcher control, relaunch eligibility, and audit state can be verified. |
-| Bounded restoration | Serializes recovery, preserves unresolved handoffs, and persists retry backoff and budgets across saver restarts. |
-| Cookie-dead isolation | Shows invalid sessions in a separate red `COOKIE DEAD` section; pauses only that account when safe idle/no-process evidence is verified. |
-| Portable updates | Keeps versioned runtime files separate from persistent user data; validated cached versions support offline startup. |
+<table>
+<tr>
+<td width="50%" valign="top">
+<img src="docs/images/readme/feature-memory.svg" width="44" align="left" hspace="10" alt="">
+<b>Memory you can read</b><br>
+<sub>Resident working set, private memory and OS commit pressure, tracked separately per client and for the whole farm.</sub>
+</td>
+<td width="50%" valign="top">
+<img src="docs/images/readme/feature-trim.svg" width="44" align="left" hspace="10" alt="">
+<b>Careful working-set trimming</b><br>
+<sub>600 MB soft target, a 5-minute warm-up per client and a 45 s trim interval. Loading, frozen and startup-error clients are skipped.</sub>
+</td>
+</tr>
+<tr>
+<td valign="top">
+<img src="docs/images/readme/feature-freeze.svg" width="44" align="left" hspace="10" alt="">
+<b>Freeze, hang and kick recovery</b><br>
+<sub>A farm-wide freeze is confirmed after 35 s and the frozen clients are closed one every 20 s, so Volt relaunches them cleanly. Kicked and frozen clients that quit on their own are queued too.</sub>
+</td>
+<td valign="top">
+<img src="docs/images/readme/feature-relaunch.svg" width="44" align="left" hspace="10" alt="">
+<b>Verified Volt relaunch</b><br>
+<sub>Acts only when the account, process generation, launcher control and audit state check out. A relaunch counts once the new client is in game.</sub>
+</td>
+</tr>
+<tr>
+<td valign="top">
+<img src="docs/images/readme/feature-cookie.svg" width="44" align="left" hspace="10" alt="">
+<b>Cookie-dead isolation</b><br>
+<sub>Dead sessions show in a red <code>COOKIE DEAD</code> section. Only that account pauses, and only when it is verified idle.</sub>
+</td>
+<td valign="top">
+<img src="docs/images/readme/feature-updates.svg" width="44" align="left" hspace="10" alt="">
+<b>Portable, verified updates</b><br>
+<sub>Versioned runtime in <code>app/</code>, your config, logs and journal in <code>data/</code>. Every download is SHA-256 checked; cached versions start offline.</sub>
+</td>
+</tr>
+<tr>
+<td valign="top">
+<img src="docs/images/readme/feature-control.svg" width="44" align="left" hspace="10" alt="">
+<b>Arkuzo Control Center</b><br>
+<sub>A local dashboard on <code>127.0.0.1</code>: every client, farm memory and system pressure charts, Volt accounts, an activity feed and live settings.</sub>
+</td>
+<td valign="top">
+<img src="docs/images/readme/feature-autopilot.svg" width="44" align="left" hspace="10" alt="">
+<b>Autopilot</b><br>
+<sub>Keeps the saver alive: restarts it with backoff after a crash, exit or hang, and pauses instead of looping if it keeps crashing.</sub>
+</td>
+</tr>
+</table>
 
-**The 600 MB value is not an enforced hard cap.** Trimming may reduce resident RAM temporarily, but it does not free private allocations or fix a memory leak. The 82% OS commit threshold is a policy for selecting recovery candidates—not a promise of crash prevention.
+> [!NOTE]
+> **600 MB is a soft target, not a hard cap.** Trimming lowers resident RAM for a while; it doesn't free private allocations or fix a leak. The 82% OS commit threshold picks recovery candidates; it is not a promise against crashes.
 
-### Illustrative status — not a live screenshot
+## The Control Center
 
-This hand-written example shows the kinds of states you may encounter. It is **not actual application output, a benchmark, or account data**.
+The launcher opens it for you (it needs Python 3 on `PATH`); in a source checkout, `Arkuzo-Control-Center.cmd` does the same. It follows the Arkuzo Client's look: eight themes, ten accents, card surfaces, keycaps and the boot intro.
 
-```text
-Arkuzo Memory Saver · Volt Integration
-Client A   WARMUP          waiting for this client's startup grace
-Client B   MONITORING      eligible trimming depends on current health
-Recovery   WAITING         exact account restoration still unconfirmed
-Policy     600 MB soft target · hard cap disabled
-```
+<img src="docs/images/control-center-overview.png" alt="Control Center overview: KPI cards, farm memory and system pressure charts, clients and activity" width="100%">
 
-## Control Center and autopilot
-
-The launcher (`ArkuzoMemorySaver.exe` v2.1.5, with Python 3 on `PATH`) opens the Control Center automatically; in a source checkout, `Arkuzo-Control-Center.cmd` does the same. It is a local dashboard (served only on `127.0.0.1`) that runs the saver for you:
-
-- **Live view** of every client: account, status, resident memory against the target, private memory, CPU, next trim and uptime; farm-memory and system-pressure charts; Volt accounts; an activity feed.
-- **Autopilot** keeps the saver alive: restarts with backoff after a crash, exit or hang, and pauses instead of looping if it keeps crashing.
-- **Settings** for presets, memory, CPU, health and recovery, validated and backed up before saving; most apply live. Per-account auto-recover toggles, **Trim now**, and optional **Start with Windows**.
-
-Closing the window exits cleanly: the saver stops and the Control Center quits, like **Settings → Stop farm & quit** (your Roblox clients keep running). With **Start with Windows**, a launcher install opens the window at sign-in; a source checkout starts in the background and keeps running until you open its window and close it. Starting the launcher again always runs the newest installed version: a newer Control Center takes over from an older running one by itself, restarting the saver on the new version if it was running. It needs Python 3 on `PATH`, like the Volt probe.
-
-The look follows the Arkuzo Client: its eight themes and ten accents, card surfaces, keycaps and boot intro.
-
-![Control Center overview](docs/images/control-center-overview.png)
-
-| Clients | Settings |
-| --- | --- |
-| ![Clients page](docs/images/control-center-clients.png) | ![Settings page](docs/images/control-center-settings.png) |
-| **Midnight · Violet** | **Frost · Indigo** |
-| ![Midnight theme with Violet accent](docs/images/control-center-midnight.png) | ![Frost theme with Indigo accent](docs/images/control-center-frost.png) |
+<table>
+<tr>
+<td width="50%"><img src="docs/images/control-center-clients.png" alt="Clients page"><p align="center"><sub><b>Clients</b></sub></p></td>
+<td width="50%"><img src="docs/images/control-center-settings.png" alt="Settings page"><p align="center"><sub><b>Settings</b></sub></p></td>
+</tr>
+<tr>
+<td><img src="docs/images/control-center-midnight.png" alt="Midnight theme with the Violet accent"><p align="center"><sub><b>Midnight · Violet</b></sub></p></td>
+<td><img src="docs/images/control-center-frost.png" alt="Frost light theme with the Indigo accent"><p align="center"><sub><b>Frost · Indigo</b></sub></p></td>
+</tr>
+</table>
 
 <sub>Pictures use a synthetic demo farm, not real accounts or measurements.</sub>
 
-## Requirements
-
-- **Windows x64** with **Windows PowerShell 5.1**.
-- A writable folder for `ArkuzoMemorySaver.exe`, `app/`, and `data/`.
-- Internet access for the first runtime download and online update checks.
-- **No separate .NET installation** for the self-contained launcher.
-- For Volt integration: **Python 3 available on `PATH`** and a running Volt installation with its **Account Manager accessible**. The probe uses Python's standard library.
-
-**Basic monitoring and eligible trimming work without Python or Volt.** Missing dependencies or unavailable account control block destructive recovery; they do not justify terminating clients without a verified return path.
+- **Close the window and it exits cleanly:** the saver stops and the Control Center quits, like **Settings → Stop farm & quit**. Your Roblox clients keep running.
+- **Updates take over by themselves:** starting the launcher always runs the newest installed version. A newer Control Center replaces an older running one and restarts the saver on the new version if it was running.
+- **Start with Windows** is optional. A launcher install opens the window at sign-in; a source checkout starts in the background until you open its window and close it.
 
 ## Get started
 
-1. Download `ArkuzoMemorySaver.exe` from the [official latest stable release](https://github.com/arkuzodev/arkuzo-memory-saver/releases/latest). Keep it in a dedicated writable folder rather than opening it from a temporary download preview.
-2. Run it and allow the first runtime download and checksum validation to complete.
-3. For recovery, install Python 3 on `PATH`, start Volt, and keep Account Manager accessible. Enable Volt's auto-relaunch only for accounts you intend to manage, with valid sessions and a previous launch.
-4. Review `data/config.json` and the [configuration guide](docs/configuration.md). Restart the saver after intentional configuration changes.
-5. Allow each newly launched client its own five-minute warmup before expecting ordinary trimming.
+| | |
+| :---: | :--- |
+| <kbd>1</kbd> | **Download** [`ArkuzoMemorySaver.exe`](https://github.com/arkuzodev/arkuzo-memory-saver/releases/latest/download/ArkuzoMemorySaver.exe) into its own writable folder, not a temporary download preview. |
+| <kbd>2</kbd> | **Run it.** The first start downloads the latest stable runtime, checks its SHA-256 and installs it. |
+| <kbd>3</kbd> | **Connect Volt** for recovery: Python 3 on `PATH`, Volt running with Account Manager reachable, and Volt's auto-relaunch on only for the accounts you want managed. |
+| <kbd>4</kbd> | **Tune** `data/config.json` with the [configuration guide](docs/configuration.md), or use the Control Center's Settings page. |
+| <kbd>5</kbd> | **Give each new client its five-minute warm-up** before expecting regular trimming. |
 
-**Upgrading a legacy installation:** if `data/config.json` does not exist and `config.json` is beside `ArkuzoMemorySaver.exe`, the launcher copies that legacy configuration byte-for-byte into `data/` and retains the original. An existing `data/config.json` always wins. Old recovery journals are not automatically migrated. Stop the old saver before switching installations.
+Monitoring and trimming work without Python or Volt. Without them, recovery stays off: the saver never closes a client it can't bring back.
 
-Windows may show SmartScreen warnings for an **unsigned binary**. Check that the file came from the official repository and review the warning and your organization's policy before proceeding. **Do not disable SmartScreen, antivirus, or other protections globally.**
+```mermaid
+flowchart LR
+    A([Launcher start]) --> B{Newer stable<br>release?}
+    B -- yes --> C[Download runtime]
+    C --> D[Verify SHA-256]
+    D --> E[Install to app/versions]
+    B -- no --> F[Use cached version]
+    E --> G[(data/ kept as is)]
+    F --> G
+    G --> H([Saver + Control Center])
+    classDef accent fill:#0c2a3a,stroke:#38bdf8,color:#e0f2fe
+    classDef ok fill:#0b2a20,stroke:#34d399,color:#d1fae5
+    class A,H accent
+    class G ok
+```
 
-## Antivirus & Integrity Verification
+> [!IMPORTANT]
+> The first start needs internet access. Later starts work offline from a validated cached runtime. **An update never overwrites your configuration;** if `data/config.json` is malformed, the saver refuses to start instead of replacing it with defaults.
 
-v2.1.5 ships a rebuilt executable and new archives; all 1.x releases are deprecated. Their VirusTotal results are not yet recorded; compare the checksums below with the release before running anything.
+## Recovery is deliberately conservative
 
-| File | SHA-256 Checksum | VirusTotal Result |
+Volt stays the account-aware launcher. The saver collects no credentials, replays no authentication tickets and never writes to Volt's database: it reads state and uses verified Account Manager controls. An accepted launch request is not treated as a restored session.
+
+```mermaid
+flowchart LR
+    A[Client frozen,<br>kicked or over budget] --> B{Account mapped<br>exactly?}
+    B -- no --> X[Blocked, nothing closed]
+    B -- yes --> C[Journal entry written]
+    C --> D[Close that client]
+    D --> E[Volt relaunches]
+    E --> F{New process,<br>socket, window,<br>server joined?}
+    F -- yes --> G([Back in game])
+    F -- not yet --> H[Retry with backoff<br>and hourly budget]
+    classDef bad fill:#3a1418,stroke:#f87171,color:#fee2e2
+    classDef ok fill:#0b2a20,stroke:#34d399,color:#d1fae5
+    class X bad
+    class G ok
+```
+
+- **Only opted-in, previously launched, uniquely mapped accounts.** Unknown mappings, loading screens, unavailable logging or an unhealthy journal block every destructive step.
+- **Volt's relaunch delay stays at 30 s or more;** a larger delay you set is kept. Missing-account retries back off for 90–900 s, with cooldowns and hourly budgets that survive saver restarts.
+- **A restore must prove itself:** a new, exactly mapped process, a connected launcher socket, a responsive window without errors and matching server-join evidence, held for a continuous confirmation window.
+- **Farm-wide freezes** (in the logs, Chrome Remote Desktop disconnects and display events) are handled as one event, with closes paced so Volt doesn't show its "Roblox started before Volt could connect" notice. Switch it off with `health.farm_freeze_enabled`.
+
+<details>
+<summary><b>Cookie-dead accounts</b></summary>
+<br>
+
+Volt's red cross means a dead account session. The saver shows these accounts in red as **`COOKIE DEAD`**. A dead session can come from expiry, revocation, a challenge or another sign-in problem; it is not proof of a ban.
+
+A verified idle dead account is paused and left out of launch requests. Its recovery history is kept separately so it doesn't hold the handoff gate for healthy accounts. If a process, launch or identity is uncertain, the gate stays closed. Restore the session in Volt yourself; the saver resumes once the account checks out again. Newly imported accounts with no launch history are shown but never activated automatically.
+
+</details>
+
+<details>
+<summary><b>What it does not promise</b></summary>
+<br>
+
+- No guaranteed RAM ceiling, leak repair, crash-free operation or uninterrupted game session.
+- No guaranteed fix for Volt launch guards, seat limits, seat-lease expiry or sign-in failures.
+- No assumption that zero CPU, a live process or Volt's "Connected" label alone proves a client is healthy.
+- No bypass of account opt-in, singleton protection, identity checks or retry budgets.
+
+The readiness checks above are criteria for counting a restore, not an overnight endurance guarantee.
+
+</details>
+
+## Requirements
+
+| | |
+| :--- | :--- |
+| **System** | Windows x64 with Windows PowerShell 5.1. No separate .NET install; the launcher is self-contained. |
+| **Folder** | A writable folder for `ArkuzoMemorySaver.exe`, `app/` and `data/`. |
+| **Network** | Internet for the first runtime download and update checks. |
+| **Volt recovery** | Python 3 on `PATH` and a running Volt with Account Manager reachable. The probe uses only Python's standard library. |
+
+<details>
+<summary><b>Upgrading a legacy installation</b></summary>
+<br>
+
+If `data/config.json` doesn't exist and a `config.json` sits beside `ArkuzoMemorySaver.exe`, the launcher copies it byte for byte into `data/` and keeps the original. An existing `data/config.json` always wins. Old recovery journals are not migrated. Stop the old saver before switching installations.
+
+</details>
+
+## Integrity and antivirus
+
+v2.1.5 ships a rebuilt executable and new archives; all 1.x releases are deprecated. VirusTotal results for these files are not recorded yet, so compare the checksums with the release before running anything.
+
+| File | SHA-256 | VirusTotal |
 | :--- | :--- | :--- |
 | **`ArkuzoMemorySaver.exe`** | `daa38b0e83788c9519fac2de6fd440737c3f3fdead07f5f504640b58c0b7f4a1` | Not yet scanned |
 | **`ArkuzoMemorySaver-runtime.zip`** | `5ae228a1bbd7b38943b6745f29c11f73dd2b2ec1c0cfce204a81b98501c10f30` | Not yet scanned |
 | **`ArkuzoMemorySaver-controlcenter.zip`** | `f3bb2f3874a3220492ab2766835071d600005da8ba3f95b28a1eae1c587d9d47` | Not yet scanned |
 | **`ArkuzoMemorySaver-v2.1.5-win-x64.zip`** | `7f32df4793312cb886bbe4bb421bf4f33a0265efaad4114acc58defe199b5fa3` | Not yet scanned |
 
-The exact release publishes **`SHA256SUMS.txt`** for its executable and archives, plus **`ArkuzoMemorySaver-runtime.sha256`** and **`ArkuzoMemorySaver-controlcenter.sha256`** for updater validation. The launcher verifies downloaded bytes and available GitHub asset digests. See [security and privacy](SECURITY.md).
+Each release also publishes **`SHA256SUMS.txt`**, plus **`ArkuzoMemorySaver-runtime.sha256`** and **`ArkuzoMemorySaver-controlcenter.sha256`** for the updater. The launcher checks downloaded bytes and GitHub's asset digests. A checksum detects a mismatch; it is not a code signature. See [security and privacy](SECURITY.md).
 
-You can independently verify checksums locally using PowerShell:
 ```powershell
 Get-FileHash -Algorithm SHA256 .\ArkuzoMemorySaver.exe
 ```
 
-## Recovery is deliberately conservative
+> [!WARNING]
+> Windows may show a SmartScreen warning for this **unsigned** executable. Check that it came from this repository and follow your organization's policy. **Don't turn off SmartScreen, antivirus or other protections globally.**
 
-Volt remains the account-aware launcher. Arkuzo Memory Saver does not collect credentials, replay authentication tickets, or write directly to Volt's database. It uses read-only state inspection and verified Account Manager controls; an accepted launch request is not treated as a restored session.
+<details>
+<summary><b>For maintainers</b></summary>
+<br>
 
-Recovery covers opted-in, previously launched, uniquely mapped accounts. Missing accounts must be demonstrably idle before a launch request. Unknown mappings, loading/transient UI states, unavailable logging, or invalid recovery state block destructive actions. A temporary “Volt account control unavailable” state is not proof that Volt has stopped.
+End users need only the root `ArkuzoMemorySaver.exe`, not a source checkout or a hand-assembled runtime.
 
-The native relaunch delay is kept at **at least 30 seconds**; an already larger user delay is preserved. Missing-account retries use persistent **90–900 second backoff**, with cooldowns and hourly budgets. An unresolved account handoff protects other accounts from collateral closures.
+| Source | Purpose |
+| :--- | :--- |
+| `src/launcher/` | Self-contained launcher, update and cache handling. |
+| `src/saver/` | Saver engine, Volt control adapter, read-only Python probe and the Control Center. |
+| `config/defaults.json` | Packaged defaults for a new user configuration. |
+| `tests/` | Regression, safety, updater and portability tests (`build/test.ps1`). |
+| `build/` | Launcher build, packaging and release verification. |
 
-A restored account must have a new, exactly mapped process generation, connected launcher socket, responsive non-error window, and correctly bound server-acceptance evidence over a continuous confirmation interval. **Those observations are readiness criteria, not an overnight endurance guarantee.**
+The release runtime has **exactly four files**: engine, control adapter, Python probe and `defaults.json`. Mutable user files stay outside it. Never ship live account stores, logs, recovery journals, authenticated command lines or machine-specific paths. See [releasing](docs/releasing.md).
 
-### Cookie-dead accounts
+</details>
 
-Volt's red cross corresponds to a dead account session. The saver displays these accounts separately in red as **`COOKIE DEAD`**. A dead session can result from expiration, revocation, a challenge, or another authentication problem; it is not proof of a permanent ban.
+<br>
 
-A verified idle dead account is paused and excluded from automated launch requests. Its recovery history is retained separately so it does not indefinitely hold the handoff gate for healthy accounts. If a process, launch, or identity remains uncertain, the safety gate stays closed. Restore the account session in Volt manually; the saver only resumes after verifying it is eligible again. Newly imported accounts without a launch history are displayed but never automatically activated.
-
-### What it does not promise
-
-- No guaranteed RAM ceiling, leak repair, crash-free operation, or uninterrupted game session.
-- No guaranteed fix for Volt launch guards, seat limits, seat-lease expiry, or authentication failures.
-- No assumption that zero CPU, a live process, or Volt's “Connected” label alone proves health.
-- No bypass of account opt-in, singleton protection, identity checks, or retry budgets.
-
-## For maintainers
-
-End users need the root `ArkuzoMemorySaver.exe`, not a source checkout or manually assembled runtime.
-
-| Source location | Purpose |
-| --- | --- |
-| `src/launcher/` | Self-contained launcher and update/cache handling. |
-| `src/saver/` | Saver engine, Volt control adapter, and read-only Python probe. |
-| `config/defaults.json` | Packaged defaults used to initialize a new user configuration. |
-| `tests/` | Regression, safety, updater, and portability tests. |
-| Build scripts | Build the launcher and package the runtime ZIP and checksum. |
-
-The release runtime has **four files**: engine, control adapter, Python probe, and `defaults.json`. Mutable user files belong outside the runtime. Do not ship live account stores, logs, recovery journals, authenticated command lines, or machine-specific paths.
-
-Consult [configuration](docs/configuration.md), [troubleshooting](docs/troubleshooting.md), and the [changelog](CHANGELOG.md). Report issues through the [repository](https://github.com/arkuzodev/arkuzo-memory-saver/issues), with sanitized diagnostics and the installed version—not credentials or account data.
+<div align="center">
+<sub>Report issues through the <a href="https://github.com/arkuzodev/arkuzo-memory-saver/issues">repository</a> with sanitized diagnostics and your installed version, never credentials or account data.</sub>
+</div>

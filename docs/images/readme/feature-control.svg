@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1f2330"/><stop offset="1" stop-color="#12141b"/></linearGradient>
+    <linearGradient id="tint" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2dd4bf" stop-opacity=".30"/><stop offset="1" stop-color="#2dd4bf" stop-opacity=".06"/></linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".16"/><stop offset=".5" stop-color="#fff" stop-opacity="0"/></linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="2.2"/></filter>
+  </defs>
+  <rect x="4" y="4" width="56" height="56" rx="16" fill="url(#bg)"/>
+  <rect x="4" y="4" width="56" height="56" rx="16" fill="url(#tint)"/>
+  <rect x="4.5" y="4.5" width="55" height="55" rx="15.5" fill="none" stroke="url(#sheen)"/>
+  <rect x="4.5" y="4.5" width="55" height="55" rx="15.5" fill="none" stroke="#2dd4bf" stroke-opacity=".38"/>
+  <g transform="translate(18 18) scale(1.1667)" fill="none" stroke="#2dd4bf" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" color="#2dd4bf" opacity=".55" filter="url(#glow)"><rect x="2" y="3" width="20" height="14" rx="2.5"/><path d="M8 21 H16"/><path d="M12 17 V21"/><path d="M6 7 H10"/><path d="M6 10 H8.5"/></g>
+  <g transform="translate(18 18) scale(1.1667)" fill="none" stroke="#2dd4bf" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" color="#2dd4bf"><rect x="2" y="3" width="20" height="14" rx="2.5"/><path d="M8 21 H16"/><path d="M12 17 V21"/><path d="M6 7 H10"/><path d="M6 10 H8.5"/></g>
+</svg>

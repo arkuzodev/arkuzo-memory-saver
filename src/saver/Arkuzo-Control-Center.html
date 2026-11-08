@@ -369,6 +369,34 @@ body.light .console li.warning .txt { color: #92400e; } body.light .console li.c
 .srv-row + .srv-row { box-shadow: 0 -1px 0 rgba(0,0,0,0.25), 0 -2px 0 rgba(var(--ov), 0.025); }
 .srv-add { display: grid; grid-template-columns: 140px minmax(0, 1fr) auto; gap: 8px; margin-top: 10px; }
 
+.farm-join { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 0 18px 16px 76px; }
+.farm-join .lbl { font-size: 10px; font-weight: 700; letter-spacing: 0.14em; color: var(--dim); text-transform: uppercase; }
+.farm-join .inp { width: 190px; font-variant-numeric: tabular-nums; }
+.farm-join .hint { color: var(--muted); font-size: 12px; }
+.farm-join .pill { margin-left: 2px; }
+details.fold > summary { list-style: none; cursor: pointer; user-select: none; }
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary .pane-h { padding-right: 16px; }
+details.fold > summary .sum { margin-left: auto; color: var(--muted); font-size: 12px; text-align: right; }
+details.fold > summary .chev { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 8px; color: var(--muted); transition: transform 0.18s; flex: none; }
+details.fold > summary .chev svg { width: 15px; height: 15px; }
+details.fold[open] > summary .chev { transform: rotate(90deg); color: var(--accent); }
+details.fold > summary:hover .chev { background: rgba(var(--ov), 0.06); }
+details.fold:not([open]) > summary + .divider { display: none; }
+.folds { display: grid; grid-template-columns: 1fr; gap: 14px; align-items: start; }
+@media (min-width: 1240px) { .folds { grid-template-columns: 1fr 1fr; } .folds .wide { grid-column: 1 / -1; } }
+.layout-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 0.9fr); gap: 18px; align-items: start; }
+@media (max-width: 1100px) { .layout-grid { grid-template-columns: 1fr; } }
+.preview-box { position: sticky; top: 0; display: grid; gap: 10px; }
+.screen { position: relative; width: 100%; border-radius: 10px; overflow: hidden;
+  background: linear-gradient(180deg, rgba(var(--ov), 0.05), rgba(var(--ov), 0.02)); box-shadow: inset 0 0 0 1px rgba(var(--ov), 0.09), 0 0 0 1px rgba(0,0,0,0.35); }
+.screen .win { position: absolute; border-radius: 3px; display: grid; place-items: center; font-size: 9px; font-weight: 800; color: var(--text); overflow: hidden;
+  background: linear-gradient(180deg, rgba(var(--a), 0.42), rgba(var(--a), 0.18)); box-shadow: inset 0 0 0 1px rgba(var(--a), 0.75), 0 2px 6px rgba(0,0,0,0.35); }
+.screen .win.off { background: rgba(var(--ov), 0.06); box-shadow: inset 0 0 0 1px rgba(var(--ov), 0.18); color: var(--dim); }
+.screen .win.bg { opacity: 0.55; }
+.preview-cap { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 11.5px; flex-wrap: wrap; }
+.preview-cap .spacer { flex: 1; }
+
 /* ---------- small screens ---------- */
 @media (max-width: 900px) {
   body { overflow: auto; }
@@ -388,6 +416,7 @@ body.light .console li.warning .txt { color: #92400e; } body.light .console li.c
   .vrow > .hide-sm { display: none; }
   .editor { margin-left: 10px; }
   .farm-stats { margin-left: 0; }
+  .farm-join { padding-left: 18px; }
   .srv-add { grid-template-columns: 1fr; }
   .toasts { right: 14px; bottom: 14px; }
 }
@@ -505,6 +534,12 @@ body.light .console li.warning .txt { color: #92400e; } body.light .console li.c
             <button class="btn danger" id="btnFarmStop" hidden><span data-icon="power"></span>Stop farm</button>
             <button class="btn accent" id="btnFarmStart"><span data-icon="play"></span>Start farm</button>
           </div>
+          <div class="farm-join">
+            <span class="lbl">Place</span>
+            <input class="inp" id="placeInput" inputmode="numeric" autocomplete="off" placeholder="Place ID, e.g. 920587237" aria-label="Place to farm">
+            <span class="hint" id="placeHint">The number in the game's link: roblox.com/games/<b>ID</b>/…</span>
+            <span id="serverPill"></span>
+          </div>
           <div class="notice" id="farmNotice" hidden></div>
         </article>
         <article class="card" id="vaultCard">
@@ -524,17 +559,24 @@ body.light .console li.warning .txt { color: #92400e; } body.light .console li.c
           <div class="rows" id="vaultRows"></div>
           <div class="empty-state" id="vaultEmpty" hidden><strong>No accounts yet</strong>Add a Roblox account by pasting its cookie or signing in with the browser. Arkuzo then launches, watches and relaunches it without Volt.</div>
         </article>
-        <div class="set-grid">
-          <article class="card">
-            <div class="pane-h"><span class="tile lg" style="--c:#34d399"><span data-icon="play"></span></span><div><div class="ttl">Farm</div><div class="st">Where accounts join and how launches are paced</div></div></div>
+        <div class="folds">
+          <details class="card fold wide" id="foldLayout">
+            <summary><div class="pane-h"><span class="tile lg" style="--c:#38bdf8"><span data-icon="hud"></span></span><div><div class="ttl">Window layout</div><div class="st">Small client windows in an orderly grid, like Volt</div></div><span class="sum" id="sumLayout"></span><span class="chev"><span data-icon="chevron-right"></span></span></div></summary>
+            <div class="divider"></div>
+            <div class="card-b layout-grid"><div id="layoutSettings"></div>
+              <div class="preview-box"><div class="screen" id="layoutPreview"></div>
+                <div class="preview-cap"><span id="previewCap"></span><span class="spacer"></span><button class="btn sm" id="btnArrange" title="Put every client window in its place now"><span data-icon="hud"></span>Arrange now</button></div></div></div>
+          </details>
+          <details class="card fold" id="foldFarm">
+            <summary><div class="pane-h"><span class="tile lg" style="--c:#34d399"><span data-icon="play"></span></span><div><div class="ttl">Farm settings</div><div class="st">Launch pacing, relaunch and cookie checks</div></div><span class="sum" id="sumFarm"></span><span class="chev"><span data-icon="chevron-right"></span></span></div></summary>
             <div class="divider"></div>
             <div class="card-b" id="farmSettings"></div>
-          </article>
-          <article class="card">
-            <div class="pane-h"><span class="tile lg" style="--c:#f472b6"><span data-icon="containers"></span></span><div><div class="ttl">Private servers</div><div class="st">Join a private server instead of a public one</div></div></div>
+          </details>
+          <details class="card fold" id="foldServers">
+            <summary><div class="pane-h"><span class="tile lg" style="--c:#f472b6"><span data-icon="containers"></span></span><div><div class="ttl">Private servers</div><div class="st">Join a private server instead of a public one</div></div><span class="sum" id="sumServers"></span><span class="chev"><span data-icon="chevron-right"></span></span></div></summary>
             <div class="divider"></div>
             <div class="card-b" id="serverBox"></div>
-          </article>
+          </details>
         </div>
         <article class="card" id="accountsCard" hidden>
           <div class="card-h"><span class="cap">Volt accounts</span><span class="card-s" id="acctSub"></span></div>
@@ -1179,7 +1221,6 @@ function accountEditor(a, servers, settings) {
 }
 const FARM_FIELDS = [
   ['provider', 'Who launches clients', 'Arkuzo uses the accounts above; Volt uses its own account manager. Auto picks Arkuzo once you add an account and Volt is closed.', ['enum', ['auto', 'arkuzo', 'volt']]],
-  ['defaultPlaceId', 'Place to farm', 'Place ID from the game link (roblox.com/games/<b>ID</b>/...).', ['text']],
   ['launchDelaySec', 'Launch spacing', 'Seconds between two launches. Roblox and executors cope better with some space.', ['int', 5, 120, 's']],
   ['relaunchDelaySec', 'Relaunch delay', 'Wait after a client closed before launching it again.', ['int', 0, 600, 's']],
   ['launchTimeoutSec', 'Launch timeout', 'If no client appears in this time, the launch is retried.', ['int', 30, 600, 's']],
@@ -1188,10 +1229,22 @@ const FARM_FIELDS = [
   ['launchMethod', 'Launch method', 'Direct starts RobloxPlayerBeta; Protocol goes through Roblox\'s launcher (updates Roblox first).', ['enum', ['direct', 'protocol']]],
   ['cookieCheckMinutes', 'Cookie check', 'Ask Roblox whether every cookie is still signed in this often (0 = only by hand).', ['int', 0, 1440, 'min']],
 ];
-function renderFarmSettings(v) {
-  const box = $('farmSettings');
+const LAYOUT_FIELDS = [
+  ['arrangeWindows', 'Arrange windows', 'Keep every client in its own small window in an orderly grid.', ['bool']],
+  ['arrangeLayout', 'Layout', 'Grid: side by side in rows. Cascade: stacked diagonally, each title bar visible.', ['enum', ['grid', 'cascade'], { grid: 'Grid', cascade: 'Cascade' }]],
+  ['arrangePerRow', 'Windows per row', 'When a column of rows fills the screen, the next one starts beside it.', ['int', 1, 12, '']],
+  ['arrangeWidth', 'Window width', '', ['int', 160, 1920, 'px']],
+  ['arrangeHeight', 'Window height', '', ['int', 120, 1440, 'px']],
+  ['arrangeGap', 'Gap', 'Space between windows.', ['int', 0, 40, 'px']],
+  ['arrangeCorner', 'Start corner', 'Where the first window goes.', ['enum', ['top-left', 'top-right', 'bottom-left', 'bottom-right'], { 'top-left': 'Top left', 'top-right': 'Top right', 'bottom-left': 'Bottom left', 'bottom-right': 'Bottom right' }]],
+  ['arrangeMonitor', 'Screen', 'Which monitor the clients go to.', ['monitor']],
+  ['arrangeOrder', 'Order', 'Fixed: every account keeps its own spot, even while another is relaunching. By name or by launch: no gaps.', ['enum', ['fixed', 'name', 'launch'], { fixed: 'Fixed per account', name: 'By name', launch: 'By launch time' }]],
+  ['arrangeMode', 'Hold position', 'Keep: windows moved away snap back. Place once: new windows are placed, then you can move them freely.', ['enum', ['keep', 'once'], { keep: 'Keep in place', once: 'Place once' }]],
+  ['arrangeVisibility', 'Windows', 'Normal: they stay where Windows puts them. Behind: kept under your other windows, never stealing focus. Minimized: in the taskbar (renders least).', ['enum', ['normal', 'background', 'minimized'], { normal: 'Normal', background: 'Behind other windows', minimized: 'Minimized' }]],
+];
+function renderFields(box, fields, v) {
   if (box.contains(document.activeElement)) return; // Do not redraw under the cursor.
-  box.replaceChildren(...FARM_FIELDS.map(([key, name, hint, rule]) => {
+  box.replaceChildren(...fields.map(([key, name, hint, rule]) => {
     const value = key === 'provider' ? v.provider : v.settings[key];
     let ctl;
     const save = (val) => key === 'provider'
@@ -1202,8 +1255,12 @@ function renderFarmSettings(v) {
       input.addEventListener('change', () => save(input.checked));
       ctl = el('label', { class: 'sw' }, input, el('span', { class: 'track' }));
     } else if (rule[0] === 'enum') {
-      ctl = el('select', {}, ...rule[1].map((o) => el('option', { value: o, text: o.charAt(0).toUpperCase() + o.slice(1) })));
+      ctl = el('select', {}, ...rule[1].map((o) => el('option', { value: o, text: (rule[2] || {})[o] || o.charAt(0).toUpperCase() + o.slice(1) })));
       ctl.value = value; ctl.addEventListener('change', () => save(ctl.value));
+    } else if (rule[0] === 'monitor') {
+      const n = Math.max(1, v.monitors || 1);
+      ctl = el('select', {}, el('option', { value: '0', text: 'Main screen' }), ...Array.from({ length: n }, (_, i) => el('option', { value: String(i + 1), text: `Screen ${i + 1}` })));
+      ctl.value = String(value || 0); ctl.addEventListener('change', () => save(Number(ctl.value)));
     } else if (rule[0] === 'text') {
       ctl = el('input', { class: 'inp', value: value || '', inputmode: 'numeric', placeholder: 'e.g. 920587237' });
       ctl.addEventListener('change', () => save(ctl.value.trim()));
@@ -1215,6 +1272,57 @@ function renderFarmSettings(v) {
     return el('div', { class: 'field' }, el('span', { class: 'name', text: name }), hintEl, el('div', { class: 'ctl' }, ctl, rule[3] ? el('span', { class: 'unit', text: rule[3] }) : null));
   }));
 }
+function renderFarmSettings(v) {
+  renderFields($('farmSettings'), FARM_FIELDS, v);
+  renderFields($('layoutSettings'), LAYOUT_FIELDS, v);
+  const st = v.settings;
+  $('sumFarm').textContent = `${st.launchDelaySec}s apart · relaunch after ${st.relaunchDelaySec}s`;
+  $('sumLayout').textContent = !st.arrangeWindows ? 'Off' : st.arrangeLayout === 'cascade' ? `Cascade · ${st.arrangeWidth}×${st.arrangeHeight}` : `${st.arrangePerRow} per row · ${st.arrangeWidth}×${st.arrangeHeight}`;
+  const servers = v.privateServers || [];
+  $('sumServers').textContent = st.privateServerMode === 'none' ? (servers.length ? `Off · ${servers.length} saved` : 'Off') : st.privateServerMode === 'shared' ? 'One for all' : 'Per account';
+  const place = $('placeInput');
+  if (document.activeElement !== place) place.value = st.defaultPlaceId || '';
+  $('serverPill').replaceChildren(st.privateServerMode === 'none' ? '' : pill('info', st.privateServerMode === 'shared' ? 'Private server for all' : 'Private server per account', true));
+  renderLayoutPreview(v);
+}
+// Mirrors Get-ArkuzoWindowSlots in the engine, on the screen this window is on.
+function layoutSlots(count, st, W, H) {
+  const w = st.arrangeWidth, h = st.arrangeHeight, gap = st.arrangeGap, right = st.arrangeCorner.endsWith('right'), bottom = st.arrangeCorner.startsWith('bottom'), out = [];
+  for (let i = 0; i < count; i++) {
+    let dx, dy;
+    if (st.arrangeLayout === 'cascade') { const step = 32, fit = Math.max(1, Math.floor(Math.min(W - w, H - h) / step) + 1); dx = dy = (i % fit) * step; }
+    else { const rows = Math.max(1, Math.floor((H + gap) / (h + gap))), per = st.arrangePerRow * rows, block = Math.floor(i / per), within = i % per;
+      dx = (block * st.arrangePerRow + within % st.arrangePerRow) * (w + gap); dy = Math.floor(within / st.arrangePerRow) * (h + gap); }
+    out.push([right ? W - dx - w : dx, bottom ? H - dy - h : dy, w, h]);
+  }
+  return out;
+}
+function renderLayoutPreview(v) {
+  const st = v.settings, box = $('layoutPreview');
+  const [SW, SH, W, H] = v.screen || [1920, 1080, 1920, 1040];
+  box.style.aspectRatio = `${W} / ${H}`;
+  const accounts = (v.accounts || []).slice().sort((a, b) => acctName(a).toLowerCase().localeCompare(acctName(b).toLowerCase()));
+  const shown = st.arrangeOrder === 'fixed' ? accounts : accounts.filter((a) => (a.live || {}).processId || (a.autoRelaunch && a.cookieStatus !== 'dead'));
+  const list = shown.length ? shown : [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }];
+  const slots = layoutSlots(list.length, st, W, H);
+  const off = slots.filter(([x, y, w, h]) => x + w > W + 1 || y + h > H + 1 || x < -1 || y < -1).length;
+  box.replaceChildren(...list.map((a, i) => {
+    const [x, y, w, h] = slots[i], live = !!(a.live || {}).processId;
+    return el('div', { class: 'win' + (shown.length && !live ? ' off' : '') + (st.arrangeVisibility === 'background' ? ' bg' : ''), title: a.username ? acctName(a) : '',
+      style: `left:${x / W * 100}%;top:${y / H * 100}%;width:${w / W * 100}%;height:${h / H * 100}%`, text: a.username ? initials(acctName(a)) : '' });
+  }));
+  box.style.opacity = st.arrangeWindows ? '1' : '0.45';
+  $('previewCap').textContent = !st.arrangeWindows ? 'Arranging is off'
+    : `${list.length} window${list.length === 1 ? '' : 's'}${shown.length ? '' : ' (example)'}` + (off ? ` · ${off} off-screen: make them smaller or use more per row` : '') + (st.arrangeVisibility === 'minimized' ? ' · minimized' : '');
+}
+for (const id of ['foldLayout', 'foldFarm', 'foldServers']) {
+  const d = $(id), saved = store.get('arkuzo-' + id);
+  d.open = saved == null ? id === 'foldLayout' : saved === '1';
+  d.addEventListener('toggle', () => store.set('arkuzo-' + id, d.open ? '1' : '0'));
+}
+$('placeInput').addEventListener('change', () => vaultAct('/api/vault/settings', { changes: { defaultPlaceId: $('placeInput').value.trim() } }, 'Place saved'));
+$('placeInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('placeInput').blur(); });
+$('btnArrange').onclick = () => vaultAct('/api/vault/arrange', {}, 'Arranging client windows', 'good');
 function renderServers(v) {
   const box = $('serverBox');
   if (box.contains(document.activeElement)) return;

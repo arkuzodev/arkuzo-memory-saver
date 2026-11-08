@@ -154,6 +154,11 @@ class VaultTests(unittest.TestCase):
                 cc.update_account(self.data, aid, bad)
         with self.assertRaises(cc.VaultError):
             cc.update_vault_settings(self.data, {'launchDelaySec': 1})
+        layout = cc.update_vault_settings(self.data, {'arrangePerRow': 3, 'arrangeVisibility': 'background', 'arrangeCorner': 'bottom-right'})
+        self.assertEqual((layout['arrangePerRow'], layout['arrangeVisibility'], layout['arrangeWidth']), (3, 'background', 320))
+        for bad in ({'arrangePerRow': 0}, {'arrangeVisibility': 'hidden'}, {'arrangeWidth': 100}):
+            with self.assertRaises(cc.VaultError):
+                cc.update_vault_settings(self.data, bad)
         settings = cc.update_vault_settings(self.data, {'defaultPlaceId': '920587237', 'launchDelaySec': 15})
         self.assertEqual(settings['launchDelaySec'], 15)
         self.assertTrue(cc.set_farm_running(self.data, True)['farmRunning'])

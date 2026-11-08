@@ -1695,6 +1695,226 @@ function Invoke-ArkuzoNativeRequests {
     }
 }
 
+# ---------------------------------------------------------------------------
+# Window arrangement for Arkuzo-launched clients (what Volt's window
+# arrangement did): every client gets its own small window in an orderly grid
+# on the chosen monitor. Settings live in the vault (Accounts page, Window
+# layout). Windows are moved without ever being activated, so arranging never
+# steals focus. Only clients that map to a vault account are touched.
+# ---------------------------------------------------------------------------
+$script:arrangeHandledRequestMs = 0
+$script:arrangeLastSignature = ''
+
+function Initialize-ArkuzoWindowNative {
+    if ($null -ne ('Arkuzo.WindowArrangeV1' -as [type])) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+namespace Arkuzo {
+ public static class WindowArrangeV1 {
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] struct MONITORINFO { public int cbSize; public RECT rcMonitor; public RECT rcWork; public uint dwFlags; }
+  delegate bool MonitorProc(IntPtr monitor, IntPtr dc, IntPtr rect, IntPtr data);
+  delegate bool WindowProc(IntPtr hwnd, IntPtr data);
+  [DllImport("user32.dll")] static extern bool EnumDisplayMonitors(IntPtr dc, IntPtr clip, MonitorProc proc, IntPtr data);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern bool GetMonitorInfo(IntPtr monitor, ref MONITORINFO info);
+  [DllImport("shcore.dll")] static extern int GetDpiForMonitor(IntPtr monitor, int type, out uint x, out uint y);
+  [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+  [DllImport("user32.dll")] static extern bool EnumWindows(WindowProc proc, IntPtr data);
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+  [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr hwnd, StringBuilder name, int count);
+  [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
+  [DllImport("user32.dll")] static extern bool IsIconic(IntPtr hwnd);
+  [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hwnd, int command);
+  [DllImport("user32.dll", SetLastError=true)] static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int w, int h, uint flags);
+  [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr hwnd, int attribute, out RECT value, int size);
+
+  // Windows 10/11 frames carry invisible resize borders: work with the visible edges.
+  static RECT Visible(IntPtr h, RECT outer) {
+   RECT v; if (DwmGetWindowAttribute(h, 9, out v, Marshal.SizeOf(typeof(RECT))) == 0 && v.Right > v.Left) return v; // DWMWA_EXTENDED_FRAME_BOUNDS
+   return outer;
+  }
+
+  // Coordinates in physical pixels: the calls run per-monitor DPI aware.
+  static IntPtr Aware() { try { return SetThreadDpiAwarenessContext(new IntPtr(-4)); } catch { return IntPtr.Zero; } }
+  static void Restore(IntPtr previous) { if (previous != IntPtr.Zero) { try { SetThreadDpiAwarenessContext(previous); } catch { } } }
+
+  // Left, Top, Right, Bottom, Dpi, Primary(1/0) of every monitor's work area (without the taskbar).
+  public static int[][] Monitors() {
+   var previous = Aware();
+   try {
+    var list = new List<int[]>();
+    MonitorProc proc = (m, dc, r, d) => {
+     var info = new MONITORINFO(); info.cbSize = Marshal.SizeOf(typeof(MONITORINFO));
+     if (GetMonitorInfo(m, ref info)) {
+      uint dx = 96, dy = 96;
+      try { if (GetDpiForMonitor(m, 0, out dx, out dy) != 0) dx = 96; } catch { dx = 96; }
+      list.Add(new[] { info.rcWork.Left, info.rcWork.Top, info.rcWork.Right, info.rcWork.Bottom, (int)dx, (info.dwFlags & 1) != 0 ? 1 : 0 });
+     }
+     return true;
+    };
+    EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, proc, IntPtr.Zero);
+    GC.KeepAlive(proc);
+    return list.ToArray();
+   } finally { Restore(previous); }
+  }
+
+  // The visible Roblox game window (class WINDOWSCLIENT) of each process.
+  public static Dictionary<int, long> ClientWindows(int[] pids) {
+   var wanted = new HashSet<int>(pids); var found = new Dictionary<int, long>();
+   WindowProc proc = (h, d) => {
+    uint pid; GetWindowThreadProcessId(h, out pid);
+    if (wanted.Contains((int)pid) && IsWindowVisible(h)) {
+     var name = new StringBuilder(64); GetClassName(h, name, 64);
+     if (name.ToString() == "WINDOWSCLIENT" && !found.ContainsKey((int)pid)) found[(int)pid] = h.ToInt64();
+    }
+    return true;
+   };
+   EnumWindows(proc, IntPtr.Zero);
+   GC.KeepAlive(proc);
+   return found;
+  }
+
+  public static int[] Rect(long hwnd) {
+   var previous = Aware();
+   try { RECT o; var h = new IntPtr(hwnd); if (!GetWindowRect(h, out o)) return null; var r = Visible(h, o); return new[] { r.Left, r.Top, r.Right - r.Left, r.Bottom - r.Top, IsIconic(h) ? 1 : 0 }; }
+   finally { Restore(previous); }
+  }
+
+  // visibility: normal (z-order untouched), background (kept behind other windows), minimized.
+  public static bool Place(long hwnd, int x, int y, int w, int h, string visibility) {
+   var previous = Aware();
+   try {
+    var handle = new IntPtr(hwnd);
+    if (IsIconic(handle)) ShowWindow(handle, 4); // SW_SHOWNOACTIVATE: restore without taking focus.
+    const uint NOACTIVATE = 0x0010, NOZORDER = 0x0004, NOOWNERZORDER = 0x0200, ASYNC = 0x4000;
+    bool background = visibility == "background";
+    RECT o; int l = 0, t = 0, r = 0, b = 0;
+    if (GetWindowRect(handle, out o)) { var v = Visible(handle, o); l = v.Left - o.Left; t = v.Top - o.Top; r = o.Right - v.Right; b = o.Bottom - v.Bottom; }
+    bool ok = SetWindowPos(handle, background ? new IntPtr(1) : IntPtr.Zero, x - l, y - t, w + l + r, h + t + b, NOACTIVATE | NOOWNERZORDER | ASYNC | (background ? 0 : NOZORDER));
+    if (visibility == "minimized") ShowWindow(handle, 7); // SW_SHOWMINNOACTIVE
+    return ok;
+   } finally { Restore(previous); }
+  }
+ }
+}
+'@ -ErrorAction Stop
+}
+
+function Get-ArkuzoArrangeSettings($Vault) {
+    $enum = { param($name, $default, $allowed) $v = [string](Get-ArkuzoVaultSetting $Vault $name $default); if ($allowed -ccontains $v) { $v } else { $default } }
+    return @{
+        enabled    = ((Get-ArkuzoVaultSetting $Vault 'arrangeWindows' $true) -eq $true)
+        layout     = (& $enum 'arrangeLayout' 'grid' @('grid', 'cascade'))
+        perRow     = [int](Get-ArkuzoVaultSetting $Vault 'arrangePerRow' 2 1 12)
+        width      = [int](Get-ArkuzoVaultSetting $Vault 'arrangeWidth' 320 160 1920)
+        height     = [int](Get-ArkuzoVaultSetting $Vault 'arrangeHeight' 240 120 1440)
+        gap        = [int](Get-ArkuzoVaultSetting $Vault 'arrangeGap' 4 0 40)
+        corner     = (& $enum 'arrangeCorner' 'top-left' @('top-left', 'top-right', 'bottom-left', 'bottom-right'))
+        monitor    = [int](Get-ArkuzoVaultSetting $Vault 'arrangeMonitor' 0 0 8)
+        order      = (& $enum 'arrangeOrder' 'fixed' @('fixed', 'name', 'launch'))
+        mode       = (& $enum 'arrangeMode' 'keep' @('keep', 'once'))
+        visibility = (& $enum 'arrangeVisibility' 'normal' @('normal', 'background', 'minimized'))
+        requestMs  = [long](Get-ArkuzoVaultSetting $Vault 'arrangeRequestedAtMs' 0 0 9007199254740991)
+    }
+}
+
+function Get-ArkuzoWindowSlots([int]$Count, [int[]]$Area, $Settings) {
+    # Area: Left, Top, Right, Bottom, Dpi (physical pixels). Sizes are logical
+    # pixels, scaled to the monitor. Grid rows fill the work area; when a column
+    # block is full the next block starts beside it.
+    $scale = [math]::Max(1.0, [double]$Area[4] / 96.0)
+    $w = [int][math]::Round($Settings.width * $scale); $h = [int][math]::Round($Settings.height * $scale)
+    $gap = [int][math]::Round($Settings.gap * $scale)
+    $areaW = $Area[2] - $Area[0]; $areaH = $Area[3] - $Area[1]
+    $right = $Settings.corner -like '*right'; $bottom = $Settings.corner -like 'bottom*'
+    $slots = @()
+    for ($i = 0; $i -lt $Count; $i++) {
+        if ($Settings.layout -ceq 'cascade') {
+            $step = [int][math]::Round(32 * $scale)
+            $fit = [math]::Max(1, [int][math]::Floor([math]::Min($areaW - $w, $areaH - $h) / $step) + 1)
+            $dx = ($i % $fit) * $step; $dy = ($i % $fit) * $step
+        } else {
+            $rows = [math]::Max(1, [int][math]::Floor(($areaH + $gap) / ($h + $gap)))
+            $perBlock = $Settings.perRow * $rows
+            $block = [int][math]::Floor($i / $perBlock); $within = $i % $perBlock
+            $dx = ($block * $Settings.perRow + ($within % $Settings.perRow)) * ($w + $gap)
+            $dy = [int][math]::Floor($within / $Settings.perRow) * ($h + $gap)
+        }
+        $x = if ($right) { $Area[2] - $dx - $w } else { $Area[0] + $dx }
+        $y = if ($bottom) { $Area[3] - $dy - $h } else { $Area[1] + $dy }
+        $slots += ,@([int]$x, [int]$y, $w, $h)
+    }
+    return ,$slots
+}
+
+function Get-ArkuzoArrangeTargets($Clients, $Accounts, $Settings) {
+    # Clients: accountId, processId, startTicks. Returns accountId -> slot index.
+    $ids = @{}
+    if ($Settings.order -ceq 'fixed') {
+        # Every account keeps its own slot, so windows don't move when another account closes.
+        $i = 0
+        foreach ($a in @($Accounts | Sort-Object { ([string]$_.displayName).ToLowerInvariant() }, { [string]$_.accountId })) { $ids[[string]$a.accountId] = $i; $i++ }
+        return $ids
+    }
+    $sorted = if ($Settings.order -ceq 'launch') { @($Clients | Sort-Object { [long]$_.startTicks }) }
+              else { @($Clients | Sort-Object { ([string]$_.name).ToLowerInvariant() }, { [string]$_.accountId }) }
+    $i = 0
+    foreach ($c in $sorted) { $ids[[string]$c.accountId] = $i; $i++ }
+    return $ids
+}
+
+function Update-ArkuzoWindowArrangement {
+    if (-not (Test-ArkuzoNativeProvider) -or $MonitorOnly -or -not $ownsControllerMutex -or -not $voltControlStatus.available) { return }
+    $settings = Get-ArkuzoArrangeSettings $script:nativeVault
+    $forced = $settings.requestMs -gt $script:arrangeHandledRequestMs
+    if ($forced) { $script:arrangeHandledRequestMs = $settings.requestMs }
+    if (-not $settings.enabled -and -not $forced) { return }
+    try {
+        Initialize-ArkuzoWindowNative
+        $clients = @()
+        foreach ($state in @($tracked.Values)) {
+            if ($null -eq $state.Watcher -or [string]::IsNullOrWhiteSpace([string]$state.TrackerId)) { continue }
+            $acct = @($voltControlStatus.accounts | Where-Object { $_.trackerId -ceq [string]$state.TrackerId })
+            if ($acct.Count -ne 1) { continue } # Only Arkuzo's own accounts.
+            $clients += [pscustomobject]@{ accountId = [string]$acct[0].accountId; name = [string]$acct[0].displayName; processId = [int]$state.Watcher.Id; startTicks = [long]$state.StartTicks; state = $state }
+        }
+        if ($clients.Count -eq 0) { return }
+        $monitors = @([Arkuzo.WindowArrangeV1]::Monitors())
+        if ($monitors.Count -eq 0) { return }
+        $area = if ($settings.monitor -ge 1 -and $settings.monitor -le $monitors.Count) { $monitors[$settings.monitor - 1] } else { @($monitors | Where-Object { $_[5] -eq 1 })[0] }
+        if ($null -eq $area) { $area = $monitors[0] }
+        $targets = Get-ArkuzoArrangeTargets $clients @($voltControlStatus.accounts) $settings
+        $count = 1 + [int](@($targets.Values) | Measure-Object -Maximum).Maximum
+        $slots = Get-ArkuzoWindowSlots $count ([int[]]$area) $settings
+        $windows = [Arkuzo.WindowArrangeV1]::ClientWindows([int[]]@($clients | ForEach-Object { $_.processId }))
+        # A changed layout re-places every window once, even in "place once" mode.
+        $signature = ($settings.layout, $settings.perRow, $settings.width, $settings.height, $settings.gap, $settings.corner, $settings.monitor, $settings.order, $settings.visibility) -join '|'
+        $changed = $signature -cne $script:arrangeLastSignature
+        $script:arrangeLastSignature = $signature
+        $visibility = if ($Minimize) { 'minimized' } else { $settings.visibility } # "Minimize clients" in Settings wins.
+        foreach ($c in $clients) {
+            if (-not $windows.ContainsKey($c.processId) -or -not $targets.ContainsKey($c.accountId)) { continue }
+            $hwnd = [long]$windows[$c.processId]
+            $slot = $slots[$targets[$c.accountId]]
+            $placedFor = [long]$c.state.ArrangedStartTicks
+            if ($settings.mode -ceq 'once' -and -not $forced -and -not $changed -and $placedFor -eq $c.startTicks) { continue }
+            $now = [Arkuzo.WindowArrangeV1]::Rect($hwnd)
+            if ($null -eq $now) { continue }
+            $iconic = $now[4] -eq 1
+            $inPlace = [math]::Abs($now[0] - $slot[0]) -le 2 -and [math]::Abs($now[1] - $slot[1]) -le 2 -and [math]::Abs($now[2] - $slot[2]) -le 2 -and [math]::Abs($now[3] - $slot[3]) -le 2
+            if ($visibility -ceq 'minimized' -and $iconic -and $placedFor -eq $c.startTicks -and -not $forced -and -not $changed) { continue }
+            if ($inPlace -and -not $iconic -and $visibility -cne 'background' -and -not $forced) { $c.state.ArrangedStartTicks = $c.startTicks; continue }
+            if ($inPlace -and $visibility -ceq 'background' -and $placedFor -eq $c.startTicks -and -not $forced -and -not $changed) { continue }
+            [void][Arkuzo.WindowArrangeV1]::Place($hwnd, $slot[0], $slot[1], $slot[2], $slot[3], $visibility)
+            $c.state.ArrangedStartTicks = $c.startTicks
+        }
+    } catch { Warn-Throttled 'arrange-windows' ('Window arrangement skipped: ' + $_.Exception.Message) }
+}
+
 function Invoke-ArkuzoVoltControl([ValidateSet('Status','Configure','LaunchMissing')][string]$Action='Status', [string]$AccountId='', [string]$TrackerId='') {
     $child=$null
     try {
@@ -4871,6 +5091,8 @@ try {
             [Arkuzo.LoopWatchdogV1]::Mark('Arkuzo accounts')
             $script:voltControlStatus = Get-ArkuzoNativeStatus; $script:voltControlCheckedUtc = [datetime]::UtcNow
             Invoke-ArkuzoNativeRequests
+            [Arkuzo.LoopWatchdogV1]::Mark('arrange windows')
+            Update-ArkuzoWindowArrangement
             $nextNativeCheck = $clock.Elapsed.TotalSeconds + 3
         }
         Poll-ArkuzoVersionCheckAsync

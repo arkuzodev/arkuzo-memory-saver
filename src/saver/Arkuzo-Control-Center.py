@@ -367,6 +367,19 @@ VAULT_SETTINGS = {
     'multiInstance': (('bool',), True),
     'launchMethod': (('enum', ('direct', 'protocol')), 'direct'),
     'cookieCheckMinutes': (('int', 0, 1440), 60),
+    # Window layout of Arkuzo-launched clients (the engine arranges them).
+    'arrangeWindows': (('bool',), True),
+    'arrangeLayout': (('enum', ('grid', 'cascade')), 'grid'),
+    'arrangePerRow': (('int', 1, 12), 2),
+    'arrangeWidth': (('int', 160, 1920), 320),
+    'arrangeHeight': (('int', 120, 1440), 240),
+    'arrangeGap': (('int', 0, 40), 4),
+    'arrangeCorner': (('enum', ('top-left', 'top-right', 'bottom-left', 'bottom-right')), 'top-left'),
+    'arrangeMonitor': (('int', 0, 8), 0),
+    'arrangeOrder': (('enum', ('fixed', 'name', 'launch')), 'fixed'),
+    'arrangeMode': (('enum', ('keep', 'once')), 'keep'),
+    'arrangeVisibility': (('enum', ('normal', 'background', 'minimized')), 'normal'),
+    'arrangeRequestedAtMs': (('int', 0, 2 ** 53), 0),
 }
 ACCOUNT_FIELDS = {
     'alias': 40, 'group': 40, 'notes': 500,
@@ -1846,7 +1859,7 @@ class App:
             a['live'] = {'uiStatus': seen.get('uiStatus'), 'processId': seen.get('processId')}
             a['checking'] = a['id'] in self.cookies.busy
         config = read_json(self.data / 'config.json') or {}
-        view.update(error=error, provider=((config.get('accounts') or {}).get('provider') or 'auto'),
+        view.update(monitors=monitor_count(), screen=work_area(), error=error, provider=((config.get('accounts') or {}).get('provider') or 'auto'),
                     activeProvider=hb.get('accountProvider'), providerNotice=hb.get('accountProviderNotice'),
                     login=self.login.snapshot(), browserLogin=self.login.browser is not None)
         return view
@@ -2081,6 +2094,8 @@ def vault_action(app: App, path: str, body: dict):
         return request_account_action(data, str(body.get('id') or ''), path.rsplit('/', 1)[1])
     if path == '/api/vault/settings':
         return update_vault_settings(data, body.get('changes'))
+    if path == '/api/vault/arrange':
+        return update_vault_settings(data, {'arrangeRequestedAtMs': now_ms()})
     if path == '/api/vault/servers/add':
         return add_private_server(data, str(body.get('name') or ''), str(body.get('link') or ''))
     if path == '/api/vault/servers/remove':
@@ -2094,6 +2109,28 @@ def vault_action(app: App, path: str, body: dict):
     if path == '/api/farm/stop':
         return set_farm_running(data, False, close_clients=bool(body.get('closeClients')))
     raise VaultError('Unknown account action')
+
+
+def work_area() -> list:
+    """Main screen size and work area (without the taskbar) in logical pixels, like the layout settings."""
+    if os.name != 'nt':
+        return [1920, 1080, 1920, 1040]
+    try:
+        u = ctypes.windll.user32
+        rect = wintypes.RECT()
+        u.SystemParametersInfoW(0x30, 0, ctypes.byref(rect), 0)  # SPI_GETWORKAREA
+        return [u.GetSystemMetrics(0), u.GetSystemMetrics(1), rect.right - rect.left, rect.bottom - rect.top]
+    except OSError:
+        return [1920, 1080, 1920, 1040]
+
+
+def monitor_count() -> int:
+    if os.name != 'nt':
+        return 1
+    try:
+        return max(1, ctypes.windll.user32.GetSystemMetrics(80))  # SM_CMONITORS
+    except OSError:
+        return 1
 
 
 def avatar_png(data: Path, user_id: str) -> bytes | None:

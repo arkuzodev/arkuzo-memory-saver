@@ -215,6 +215,32 @@ try {
     Assert ($script:accountProvider -eq 'volt') 'auto without accounts stays on Volt'
     Assert ((Get-ArkuzoProviderSetting ([pscustomobject]@{ accounts = [pscustomobject]@{ provider = 'nonsense' } })) -eq 'auto') 'unknown provider setting falls back to auto'
 
+    # --- Window layout: grid slots, corners, wrapping into the next column block, DPI, order.
+    $set = @{ layout = 'grid'; perRow = 2; width = 320; height = 240; gap = 4; corner = 'top-left'; order = 'fixed' }
+    $s = Get-ArkuzoWindowSlots 5 @(0, 0, 1920, 1040, 96) $set
+    Assert (($s[0] -join ',') -eq '0,0,320,240' -and ($s[1] -join ',') -eq '324,0,320,240' -and ($s[2] -join ',') -eq '0,244,320,240' -and ($s[4] -join ',') -eq '0,488,320,240') 'grid fills rows of perRow from the top left'
+    $s = Get-ArkuzoWindowSlots 9 @(0, 0, 1920, 1040, 96) $set
+    Assert (($s[8] -join ',') -eq '648,0,320,240') 'a full column block (4 rows) continues in the next block to the right'
+    $set.corner = 'bottom-right'
+    $s = Get-ArkuzoWindowSlots 2 @(0, 0, 1920, 1040, 96) $set
+    Assert (($s[0] -join ',') -eq '1600,800,320,240' -and ($s[1] -join ',') -eq '1276,800,320,240') 'bottom-right corner mirrors the grid'
+    $set.corner = 'top-left'
+    $s = Get-ArkuzoWindowSlots 1 @(1920, 0, 4480, 1400, 144) $set
+    Assert (($s[0] -join ',') -eq '1920,0,480,360') 'second monitor and 150% scaling: logical sizes scaled to physical pixels'
+    $set.layout = 'cascade'
+    $s = Get-ArkuzoWindowSlots 3 @(0, 0, 1920, 1040, 96) $set
+    Assert (($s[2] -join ',') -eq '64,64,320,240') 'cascade steps diagonally'
+    $accts = @([pscustomobject]@{ accountId = 'b'; displayName = 'Bravo' }, [pscustomobject]@{ accountId = 'a'; displayName = 'alpha' }, [pscustomobject]@{ accountId = 'c'; displayName = 'Charlie' })
+    $live = @([pscustomobject]@{ accountId = 'c'; name = 'Charlie'; startTicks = 1 }, [pscustomobject]@{ accountId = 'b'; name = 'Bravo'; startTicks = 2 })
+    $t = Get-ArkuzoArrangeTargets $live $accts @{ order = 'fixed' }
+    Assert ($t['a'] -eq 0 -and $t['b'] -eq 1 -and $t['c'] -eq 2) 'fixed order: every account keeps its own spot, offline ones included'
+    $t = Get-ArkuzoArrangeTargets $live $accts @{ order = 'name' }
+    Assert ($t['b'] -eq 0 -and $t['c'] -eq 1 -and -not $t.ContainsKey('a')) 'by name: running clients only, no gaps'
+    $t = Get-ArkuzoArrangeTargets $live $accts @{ order = 'launch' }
+    Assert ($t['c'] -eq 0 -and $t['b'] -eq 1) 'by launch: oldest client first'
+    $cfg = Get-ArkuzoArrangeSettings ([pscustomobject]@{ settings = [pscustomobject]@{ arrangePerRow = 99; arrangeLayout = 'spiral'; arrangeVisibility = 'background'; arrangeWidth = 400 } })
+    Assert ($cfg.perRow -eq 2 -and $cfg.layout -eq 'grid' -and $cfg.visibility -eq 'background' -and $cfg.width -eq 400 -and $cfg.enabled) 'invalid layout settings fall back to defaults; valid ones are kept'
+
     Write-Host "PASS: Arkuzo accounts: DPAPI interop, exact mapping, CSRF ticket, cookie rotation, paced launches without backoff, safety refusals, no secrets ($script:checks checks)"
 } finally {
     Remove-Item -LiteralPath $DataDirectory -Recurse -Force -ErrorAction SilentlyContinue

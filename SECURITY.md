@@ -14,11 +14,11 @@ Arkuzo Memory Saver runs locally. The public launcher reads release metadata and
 
 SHA-256 values for each release are published in that release's **`SHA256SUMS.txt`**, **`ArkuzoMemorySaver-runtime.sha256`** and **`ArkuzoMemorySaver-controlcenter.sha256`** assets. The launcher validates runtime bytes and available GitHub asset digests before installation or repair. Use checksums from the exact release you downloaded, not a previous version.
 
-The **v2.1.5** release rebuilds the launcher and ships the Control Center add-on in the Arkuzo Client style. All 1.x releases are deprecated. Its VirusTotal results are not yet recorded; earlier scans do not apply to these bytes:
-- **`ArkuzoMemorySaver.exe`:** SHA-256 `daa38b0e83788c9519fac2de6fd440737c3f3fdead07f5f504640b58c0b7f4a1`
-- **`ArkuzoMemorySaver-runtime.zip`:** SHA-256 `5ae228a1bbd7b38943b6745f29c11f73dd2b2ec1c0cfce204a81b98501c10f30`
-- **`ArkuzoMemorySaver-controlcenter.zip`:** SHA-256 `f3bb2f3874a3220492ab2766835071d600005da8ba3f95b28a1eae1c587d9d47`
-- **`ArkuzoMemorySaver-v2.1.5-win-x64.zip`:** SHA-256 `7f32df4793312cb886bbe4bb421bf4f33a0265efaad4114acc58defe199b5fa3`
+The **v2.2.0** release rebuilds the launcher and ships the Control Center add-on with the account manager. All 1.x releases are deprecated. Its VirusTotal results are not yet recorded; earlier scans do not apply to these bytes:
+- **`ArkuzoMemorySaver.exe`:** SHA-256 `3c500e3103acb14c0ade83c497ed2e61d7ebe766321314531221fe9e64c409c8`
+- **`ArkuzoMemorySaver-runtime.zip`:** SHA-256 `df375e6b1d45c20074261d56493627bae32b261be511ca15dd08083fedec9d9d`
+- **`ArkuzoMemorySaver-controlcenter.zip`:** SHA-256 `304c62d8251cc3e393b05ea12b14a31c87bce19871602f18a834f10f8f9a214f`
+- **`ArkuzoMemorySaver-v2.2.0-win-x64.zip`:** SHA-256 `5f3b0f86429e828b31d577f246957b4348d1e7917e8b8fc54d2b81359b3682b2`
 
 The Control Center listens only on `127.0.0.1`, rejects requests whose `Host` is not a loopback name, and requires a per-run token for every change.
 

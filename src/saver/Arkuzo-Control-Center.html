@@ -1220,7 +1220,7 @@ function accountEditor(a, servers, settings) {
       el('button', { class: 'btn accent sm', type: 'submit' }, icon('check'), 'Save')));
 }
 const FARM_FIELDS = [
-  ['provider', 'Who launches clients', 'Arkuzo uses the accounts above; Volt uses its own account manager. Auto picks Arkuzo once you add an account, unless Volt's auto-relaunch is on.', ['enum', ['auto', 'arkuzo', 'volt']]],
+  ['provider', 'Who launches clients', 'Arkuzo uses the accounts above; Volt uses its own account manager. Auto picks Arkuzo once you add an account, unless Volt’s auto-relaunch is on.', ['enum', ['auto', 'arkuzo', 'volt']]],
   ['launchDelaySec', 'Launch spacing', 'Seconds between two launches. Roblox and executors cope better with some space.', ['int', 5, 120, 's']],
   ['relaunchDelaySec', 'Relaunch delay', 'Wait after a client closed before launching it again.', ['int', 0, 600, 's']],
   ['launchTimeoutSec', 'Launch timeout', 'If no client appears in this time, the launch is retried.', ['int', 30, 600, 's']],

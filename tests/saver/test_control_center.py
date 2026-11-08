@@ -101,6 +101,23 @@ class ConfigTests(unittest.TestCase):
                     self.assertEqual(ranges.get(key), (rule[1], rule[2]), f'{section}.{key}')
 
 
+class PageScriptTests(unittest.TestCase):
+    def test_page_script_parses(self):
+        """One stray quote in the page script blanks the whole Control Center."""
+        node = shutil.which('node')
+        if not node:
+            self.skipTest('Node.js not installed')
+        html = (ROOT / 'src' / 'saver' / 'Arkuzo-Control-Center.html').read_text(encoding='utf-8')
+        script = html[html.rindex('<script>') + 8:html.rindex('</script>')]
+        folder = Path(tempfile.mkdtemp())
+        try:
+            (folder / 'page.js').write_text(script, encoding='utf-8')
+            result = subprocess.run([node, '--check', str(folder / 'page.js')], capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stderr[:500])
+        finally:
+            shutil.rmtree(folder)
+
+
 class StartupCommandTests(unittest.TestCase):
     def test_launcher_install_autostarts_the_launcher(self):
         root = Path(tempfile.mkdtemp())

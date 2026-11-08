@@ -687,7 +687,7 @@ $('btnLive').onclick = () => {
 const matches = (...fields) => !S.query || fields.some((f) => String(f ?? '').toLowerCase().includes(S.query));
 
 // ---------- status ----------
-const CRIT = new Set(['NOT RESPONDING', 'STUCK CLIENT', 'LEAK GUARD', 'COMMIT PRESSURE', 'CRITICAL COMMIT', 'VOLT STARTUP ERROR', 'DISCONNECTED']);
+const CRIT = new Set(['NOT RESPONDING', 'STUCK CLIENT', 'LEAK GUARD', 'COMMIT PRESSURE', 'CRITICAL COMMIT', 'VOLT STARTUP ERROR', 'DISCONNECTED', 'FARM FREEZE']);
 const WARN = new Set(['MEMORY GRACE', 'HANG GRACE', 'NO CPU >10s', 'CHECK NOTICE']);
 function clientStatus(c, stale) {
   if (stale) return { level: 'neutral', label: 'No live data' };
@@ -1080,6 +1080,9 @@ const FIELDS = [
     ['health', 'private_limit_mb', 'Leak limit', 'MB', 'Private memory that marks a client as leaking.'],
     ['health', 'private_limit_sustain_sec', 'Leak confirmation', 's', 'How long the limit must hold before recycling.'],
     ['health', 'hang_timeout_sec', 'Hang timeout', 's', 'Unresponsive window time before recycling.'],
+    ['health', 'farm_freeze_enabled', 'Farm freeze fast path', '', 'When most clients freeze together, recycle them early, one at a time.'],
+    ['health', 'farm_freeze_confirm_sec', 'Farm freeze confirmation', 's', 'How long a farm-wide freeze must last before recycling.'],
+    ['health', 'farm_freeze_spacing_sec', 'Farm freeze spacing', 's', 'Gap between recycles, so Volt relaunches one at a time.'],
     ['health', 'disconnect_timeout_sec', 'Disconnect grace', 's', 'Wait after a kick or disconnect.'],
     ['health', 'warmup_sec', 'Warmup', 's', 'Startup grace for each new client.'],
     ['health', 'pressure_percent', 'Commit pressure', '%', 'OS commit level that recycles the largest clients.'],

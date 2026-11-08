@@ -84,24 +84,29 @@ function New-VoltControlContext($Inventory, $Managers, $Nodes, $Processes, [stri
     $ui=Get-VoltUiBinding -Accounts $Inventory.accounts -Nodes @($Nodes) -ManagerId $manager.processId -UiProcessIds $UiProcessIds
     $context.Manager=$manager; $context.Ui=$ui
     if (-not $ui.valid) { $status.reason=$ui.reason; return $context }
-    $globallyMapped=@($ui.rows | Where-Object { $_.uiStatus -ceq 'Unknown' }).Count -eq 0
+    # Process ownership and row consistency are reported separately: a row that
+    # Volt is counting down to relaunch is 'Unknown' and breaks global mapping,
+    # and the caller may need to know exactly which accounts are not mapped.
+    $processMapped=$true
     $seenLiveTrackers=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     $seenLivePids=New-Object 'Collections.Generic.HashSet[int]'
     foreach($p in @($Processes)) {
-        if ($p.trackerId -isnot [string] -or $p.trackerId -notmatch '\A[0-9]+\z' -or -not $seenLiveTrackers.Add($p.trackerId) -or -not $seenLivePids.Add([int]$p.processId) -or $p.processId -le 0 -or -not $p.identityStable -or -not $p.ownerStable -or $p.startTicks -le 0 -or [int]$p.parentProcessId -ne [int]$manager.processId -or $p.parentStartTicks -ne $manager.startTicks -or @($sourceAccounts | Where-Object { $_.trackerId -ceq $p.trackerId }).Count -ne 1) { $globallyMapped=$false }
+        if ($p.trackerId -isnot [string] -or $p.trackerId -notmatch '\A[0-9]+\z' -or -not $seenLiveTrackers.Add($p.trackerId) -or -not $seenLivePids.Add([int]$p.processId) -or $p.processId -le 0 -or -not $p.identityStable -or -not $p.ownerStable -or $p.startTicks -le 0 -or [int]$p.parentProcessId -ne [int]$manager.processId -or $p.parentStartTicks -ne $manager.startTicks -or @($sourceAccounts | Where-Object { $_.trackerId -ceq $p.trackerId }).Count -ne 1) { $processMapped=$false }
     }
     # Validate both directions: every live client owns exactly one UI row,
     # and every connected row has that exact verified live socket process.
+    $unmapped=@()
     foreach($a in $sourceAccounts) {
         $row=@($ui.rows | Where-Object { $_.accountId -ceq $a.accountId })
         $live=@($Processes | Where-Object { $null -ne $a.trackerId -and $_.trackerId -ceq $a.trackerId })
-        if ($row.Count -ne 1) { $globallyMapped=$false; continue }
-        if ($row[0].uiStatus -ceq 'Connected') {
-            if ($live.Count -ne 1 -or $row[0].socketId -ne $live[0].processId) { $globallyMapped=$false }
-        } elseif ($row[0].uiStatus -ceq 'Idle') {
-            if ($live.Count -ne 0) { $globallyMapped=$false }
-        } else { $globallyMapped=$false }
+        $rowMapped=$false
+        if ($row.Count -eq 1) {
+            if ($row[0].uiStatus -ceq 'Connected') { $rowMapped=($live.Count -eq 1 -and $row[0].socketId -eq $live[0].processId) }
+            elseif ($row[0].uiStatus -ceq 'Idle') { $rowMapped=($live.Count -eq 0) }
+        }
+        if (-not $rowMapped) { $unmapped += [string]$a.accountId }
     }
+    $globallyMapped=$processMapped -and $unmapped.Count -eq 0
     $accounts=@()
     foreach($a in @($Inventory.accounts)) {
         $row=@($ui.rows | Where-Object { $_.accountId -ceq $a.accountId })[0]
@@ -110,20 +115,23 @@ function New-VoltControlContext($Inventory, $Managers, $Nodes, $Processes, [stri
         if ($a.cookieStatus -ceq 'alive' -or $a.cookieStatus -ceq 'dead') { $cookieStatus=$a.cookieStatus }
         $lastLaunch=$a.lastLaunchAtMs
         if ($null -eq $lastLaunch) { $lastLaunch=0 }
-        $ready=$globallyMapped -and $Inventory.autoEnabled -and $a.autoRelaunch -and $cookieStatus -ceq 'alive' -and $null -ne $a.trackerId -and $lastLaunch -gt 0 -and $row.button.enabled -and $row.button.invokable
+        # rowReady is this row's own exact readiness; controlReady additionally
+        # requires the whole farm to be mapped and remains the default contract.
+        $rowReady=$processMapped -and $Inventory.autoEnabled -and $a.autoRelaunch -and $cookieStatus -ceq 'alive' -and $null -ne $a.trackerId -and $lastLaunch -gt 0 -and $row.button.enabled -and $row.button.invokable
         $processId=$null
         if ($row.uiStatus -eq 'Connected') {
-            $ready=$ready -and $live.Count -eq 1
+            $rowReady=$rowReady -and $live.Count -eq 1
             if ($live.Count -eq 1) {
                 $p=$live[0]; $processId=$p.processId
-                $ready=$ready -and $row.socketId -eq $p.processId -and $p.identityStable -and $p.startTicks -gt 0 -and $p.ownerStable -and [int]$p.parentProcessId -eq [int]$manager.processId -and $p.parentStartTicks -eq $manager.startTicks
+                $rowReady=$rowReady -and $row.socketId -eq $p.processId -and $p.identityStable -and $p.startTicks -gt 0 -and $p.ownerStable -and [int]$p.parentProcessId -eq [int]$manager.processId -and $p.parentStartTicks -eq $manager.startTicks
             }
-        } elseif($row.uiStatus -eq 'Idle') { $ready=$ready -and $live.Count -eq 0 }
-        else { $ready=$false }
+        } elseif($row.uiStatus -eq 'Idle') { $rowReady=$rowReady -and $live.Count -eq 0 }
+        else { $rowReady=$false }
+        $ready=$globallyMapped -and $rowReady
         $suspensionSafe=$cookieStatus -ceq 'dead' -and $row.uiStatus -ceq 'Idle' -and $live.Count -eq 0 -and $globallyMapped
-        $accounts += [pscustomobject]@{accountId=$a.accountId;username=$a.username;displayName=$a.displayName;trackerId=$a.trackerId;autoRelaunch=[bool]$a.autoRelaunch;cookieAlive=($cookieStatus -ceq 'alive');cookieStatus=$cookieStatus;suspensionSafe=[bool]$suspensionSafe;lastLaunchAtMs=$lastLaunch;uiStatus=$row.uiStatus;processId=$processId;controlReady=[bool]$ready}
+        $accounts += [pscustomobject]@{accountId=$a.accountId;username=$a.username;displayName=$a.displayName;trackerId=$a.trackerId;autoRelaunch=[bool]$a.autoRelaunch;cookieAlive=($cookieStatus -ceq 'alive');cookieStatus=$cookieStatus;suspensionSafe=[bool]$suspensionSafe;lastLaunchAtMs=$lastLaunch;uiStatus=$row.uiStatus;processId=$processId;controlReady=[bool]$ready;rowReady=[bool]$rowReady}
     }
-    $context.Status=[pscustomobject]@{available=$true;globalMappingSafe=[bool]$globallyMapped;managerId=[int]$manager.processId;managerStartTicks=[long]$manager.startTicks;relaunchDelayMs=$Inventory.relaunchDelayMs;accounts=$accounts;reason='Exact Volt manager and account controls observed'}
+    $context.Status=[pscustomobject]@{available=$true;globalMappingSafe=[bool]$globallyMapped;processMappingSafe=[bool]$processMapped;unmappedAccountIds=@($unmapped);managerId=[int]$manager.processId;managerStartTicks=[long]$manager.startTicks;relaunchDelayMs=$Inventory.relaunchDelayMs;accounts=$accounts;reason='Exact Volt manager and account controls observed'}
     return $context
 }
 

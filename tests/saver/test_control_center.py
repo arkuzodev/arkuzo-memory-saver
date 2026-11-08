@@ -141,6 +141,25 @@ class FeedTests(unittest.TestCase):
         kicked = cc.summarize_event({'time': '2026-10-26T13:44:14Z', 'event': 'EXITED_CLIENT_RECOVERY_QUEUED', 'data': {'accountId': 'a', 'reason': 'IN_GAME_DISCONNECT'}}, names)
         self.assertIn('Farmer01 closed while disconnected', kicked['text'])
 
+    def test_farm_freeze_is_explained_in_the_feed(self):
+        detected = cc.summarize_event({'time': '2026-11-08T10:00:00Z', 'event': 'FARM_FREEZE_DETECTED',
+                                       'data': {'population': 8, 'frozen': 8, 'planned': [{'pid': 1}] * 7, 'spacingSec': 20}}, {})
+        self.assertEqual((detected['level'], detected['category']), ('warning', 'recovery'))
+        self.assertIn('8 of 8 clients', detected['text'])
+        self.assertIn('recycling 7, 20 s apart', detected['text'])
+        ended = cc.summarize_event({'time': '2026-11-08T10:03:00Z', 'event': 'FARM_FREEZE_EPISODE_END',
+                                    'data': {'outcome': 'Completed', 'members': {'Closed': 7, 'Exited': 1}}}, {})
+        self.assertIn('completed: 7 closed', ended['text'])
+        state = cc.summarize_event({'event': 'CLIENT_STATE_CHANGED', 'data': {'sample': {'state': 'FARM FREEZE', 'pid': 4}}}, {})
+        self.assertIsNotNone(state)
+
+    def test_farm_freeze_settings_validate(self):
+        merged, _ = cc.apply_config_changes(ConfigTests.base, {'health': {'farm_freeze_enabled': False, 'farm_freeze_spacing_sec': 25}})
+        self.assertEqual((merged['health']['farm_freeze_enabled'], merged['health']['farm_freeze_spacing_sec']), (False, 25))
+        for bad in ({'farm_freeze_spacing_sec': 5}, {'farm_freeze_confirm_sec': 10}, {'farm_freeze_enabled': 1}, {'farm_freeze_min_clients': 2}):
+            with self.assertRaises(cc.ConfigError, msg=str(bad)):
+                cc.apply_config_changes(ConfigTests.base, {'health': bad})
+
     def test_log_tail_follows_new_lines_and_sessions(self):
         folder = Path(tempfile.mkdtemp())
         try:

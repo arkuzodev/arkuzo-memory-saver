@@ -955,16 +955,21 @@ function Get-ArkuzoVoltRecoveryStatus([string]$Root, [string]$TrackerId) {
     finally { if ($null -ne $child) { $child.Dispose() } }
 }
 function Get-ArkuzoHealthPolicy($Config) {
-    $defaults = @{ enabled = $false; private_limit_mb = 4096; hang_timeout_sec = 120; warmup_sec = 90; pressure_percent = 85; pressure_min_private_mb = 2048; cooldown_sec = 60; max_recycles_per_hour = 20; trim_spacing_sec = 2; startup_error_timeout_sec = 40; disconnect_timeout_sec = 5; private_limit_sustain_sec = 60 }
+    $defaults = @{ enabled = $false; private_limit_mb = 4096; hang_timeout_sec = 120; warmup_sec = 90; pressure_percent = 85; pressure_min_private_mb = 2048; cooldown_sec = 60; max_recycles_per_hour = 20; trim_spacing_sec = 2; startup_error_timeout_sec = 40; disconnect_timeout_sec = 5; private_limit_sustain_sec = 60
+        # Farm-wide freeze fast path (see Get-ArkuzoFarmFreezeCandidate).
+        farm_freeze_enabled = $true; farm_freeze_confirm_sec = 35; farm_freeze_min_clients = 3; farm_freeze_onset_window_sec = 15
+        farm_freeze_max_cpu_percent = 5; farm_freeze_spacing_sec = 20; farm_freeze_refreeze_sec = 900 }
     if ($null -ne $Config) {
         foreach ($key in @($defaults.Keys)) { if ($null -ne $Config.$key) { $defaults[$key] = $Config.$key } }
     }
-    $ranges = @{ private_limit_mb = @(1024,16384); hang_timeout_sec = @(60,900); warmup_sec = @(60,900); pressure_percent = @(60,98); pressure_min_private_mb = @(1024,16384); cooldown_sec = @(30,300); max_recycles_per_hour = @(1,60); trim_spacing_sec = @(1,30); startup_error_timeout_sec = @(0,300); disconnect_timeout_sec = @(0,300); private_limit_sustain_sec = @(0,300) }
+    $ranges = @{ private_limit_mb = @(1024,16384); hang_timeout_sec = @(60,900); warmup_sec = @(60,900); pressure_percent = @(60,98); pressure_min_private_mb = @(1024,16384); cooldown_sec = @(30,300); max_recycles_per_hour = @(1,60); trim_spacing_sec = @(1,30); startup_error_timeout_sec = @(0,300); disconnect_timeout_sec = @(0,300); private_limit_sustain_sec = @(0,300)
+        farm_freeze_confirm_sec = @(20,120); farm_freeze_min_clients = @(3,50); farm_freeze_onset_window_sec = @(5,60); farm_freeze_max_cpu_percent = @(1,10); farm_freeze_spacing_sec = @(10,60); farm_freeze_refreeze_sec = @(0,86400) }
     foreach ($key in $ranges.Keys) {
         $value = [double]$defaults[$key]
         if ($value -lt $ranges[$key][0] -or $value -gt $ranges[$key][1] -or [double]::IsNaN($value) -or [double]::IsInfinity($value)) { throw "Invalid health setting: $key" }
     }
     if ($defaults.enabled -isnot [bool]) { throw 'health.enabled must be a JSON boolean' }
+    if ($defaults.farm_freeze_enabled -isnot [bool]) { throw 'health.farm_freeze_enabled must be a JSON boolean' }
     return $defaults
 }
 function Clear-VoltRecoveryCapability {
@@ -1298,6 +1303,12 @@ function Invoke-ArkuzoVoltControl([ValidateSet('Status','Configure','LaunchMissi
 $script:voltStatusChild = $null
 $script:voltStatusOut = $null
 $script:voltStatusStartSec = 0
+# Farm-freeze episode state lives only in memory: after a saver restart, any
+# remaining frozen client falls back to the normal hang timeout.
+$script:farmFreeze = $null
+$script:farmFreezeSequence = 0
+$script:lastFarmFreezeStartSec = $null
+$script:lastClientStartUtc = $null
 
 function Poll-ArkuzoVoltControlAsync {
     if ($null -ne $script:voltStatusChild) {
@@ -1369,17 +1380,15 @@ function Update-ArkuzoVoltControl {
 }
 function Get-ArkuzoControlledAccount([string]$TrackerId, [int]$ClientId) {
     if (-not $restorePolicy.enabled -or -not $voltControlStatus.available -or
-            $voltControlStatus.globalMappingSafe -isnot [bool] -or -not $voltControlStatus.globalMappingSafe -or
             $null -eq $voltControlCheckedUtc -or ([datetime]::UtcNow-$voltControlCheckedUtc).TotalSeconds -lt 0 -or
             (([datetime]::UtcNow-$voltControlCheckedUtc).TotalSeconds -gt 25) -or
         [int]$voltControlStatus.relaunchDelayMs -lt ([int]$restorePolicy.relaunch_delay_sec*1000)) { return $null }
-    foreach($key in @($script:suspendedAccounts.Keys)) {
-        if ($restorePolicy.excluded_account_ids -contains $key) { continue }
-        $rows=@($voltControlStatus.accounts | Where-Object { $_.accountId -ceq $key })
-        if ($rows.Count -ne 1) { return $null }
-        $a=$rows[0]
-        if ($a.cookieStatus -cne 'dead' -or $a.suspensionSafe -isnot [bool] -or -not $a.suspensionSafe -or $a.uiStatus -cne 'Idle' -or $a.processId) { return $null }
+    if ($voltControlStatus.globalMappingSafe -isnot [bool] -or -not $voltControlStatus.globalMappingSafe) {
+        # Only a latched farm-freeze episode may map a client while the farm is
+        # not globally mapped, and only its own planned members (see below).
+        return (Get-ArkuzoFarmFreezeAccount $TrackerId $ClientId)
     }
+    if (-not (Test-ArkuzoSuspendedRowsSafe)) { return $null }
     $matchedAccounts = @($voltControlStatus.accounts | Where-Object {
         ( [string]::IsNullOrWhiteSpace($TrackerId) -or $_.trackerId -eq $TrackerId ) -and
         $_.processId -eq $ClientId -and
@@ -1387,6 +1396,249 @@ function Get-ArkuzoControlledAccount([string]$TrackerId, [int]$ClientId) {
     })
     if ($matchedAccounts.Count -ne 1 -or $matchedAccounts[0].cookieStatus -ceq 'dead' -or ($null -ne $script:suspendedAccounts -and $script:suspendedAccounts.ContainsKey([string]$matchedAccounts[0].accountId)) -or $restorePolicy.excluded_account_ids -contains $matchedAccounts[0].accountId) { return $null }
     return $matchedAccounts[0]
+}
+function Test-ArkuzoSuspendedRowsSafe {
+    # A suspended (dead-cookie) account must still be an exact idle row.
+    foreach($key in @($script:suspendedAccounts.Keys)) {
+        if ($restorePolicy.excluded_account_ids -contains $key) { continue }
+        $rows=@($voltControlStatus.accounts | Where-Object { $_.accountId -ceq $key })
+        if ($rows.Count -ne 1) { return $false }
+        $a=$rows[0]
+        if ($a.cookieStatus -cne 'dead' -or $a.suspensionSafe -isnot [bool] -or -not $a.suspensionSafe -or $a.uiStatus -cne 'Idle' -or $a.processId) { return $false }
+    }
+    return $true
+}
+# ---------------------------------------------------------------------------
+# Farm-wide freeze fast path.
+# A display or remote-desktop event freezes every client at the same moment at
+# 0% CPU. None of the 44 logged correlated freezes (3+ clients, majority, still
+# frozen 30 s after the last onset) came back; every client quit by itself after
+# 187-217 s and Volt then relaunched them all at once, which raises its
+# "Roblox started before Volt could connect" notice for launches < 10 s apart.
+# Clients that freeze together while still starting (warm-up) behave the same:
+# none of the 15 logged groups came back. CPU does not tell them apart: the 13
+# long single hangs that did come back also averaged 3% or less.
+# An episode is latched once confirmed. Its members are closed one at a time,
+# farm_freeze_spacing_sec apart, so Volt's relaunches arrive paced too. Every
+# closure still goes through Invoke-ClientRecovery with all its gates; only three
+# are scoped to the episode: cooldown (= spacing), handoff (other members'
+# pending entries do not block) and global mapping (only rows of members whose
+# old generation has verifiably exited may be unmapped; see Get-ArkuzoFarmFreezeAccount).
+# ---------------------------------------------------------------------------
+function Update-ArkuzoHangCpu($State, [double]$CpuSeconds, [double]$Now, [int]$Threads) {
+    # Average CPU (dashboard scale: percent of all logical CPUs) since freeze onset.
+    if ($null -eq $State) { return }
+    if ($null -eq $State.FreezeSince -or [double]$State.FreezeSince -lt 0) {
+        $State.HangCpuBase = $null; $State.HangCpuBaseAt = $null; $State.HangCpuPercent = $null; return
+    }
+    if ($null -eq $State.HangCpuBase -or $null -eq $State.HangCpuBaseAt -or $Now -lt [double]$State.HangCpuBaseAt -or $CpuSeconds -lt [double]$State.HangCpuBase) {
+        $State.HangCpuBase = $CpuSeconds; $State.HangCpuBaseAt = $Now; $State.HangCpuPercent = $null; return
+    }
+    $elapsed = $Now - [double]$State.HangCpuBaseAt
+    if ($elapsed -lt 1) { return }
+    $State.HangCpuPercent = [math]::Round(100 * ($CpuSeconds - [double]$State.HangCpuBase) / ($elapsed * [math]::Max(1, $Threads)), 3)
+}
+function Test-ArkuzoFrozenSample($State, $Policy) {
+    # Unresponsive visible window that answered before (FreezeSince; see
+    # Get-ArkuzoHealthDecision), no startup notice or disconnect, and measured
+    # low CPU since onset.
+    $snap = $State.LastSnapshot
+    return ($null -ne $snap -and $null -ne $State.FreezeSince -and [double]$State.FreezeSince -ge 0 -and
+        $snap.windowPresent -is [bool] -and $snap.windowPresent -and $snap.responding -is [bool] -and -not $snap.responding -and
+        -not $snap.launchError -and -not $State.isDisconnected -and -not $State.RecoveryRequested -and
+        $null -ne $State.HangCpuPercent -and [double]$State.HangCpuPercent -le [double]$Policy.farm_freeze_max_cpu_percent)
+}
+function Get-ArkuzoFarmFreezeCandidate($States, $Policy, [double]$Now) {
+    # Pure. Finds the largest group of frozen clients whose onsets lie within
+    # farm_freeze_onset_window_sec. It qualifies with at least
+    # farm_freeze_min_clients members that are a strict majority of the clients
+    # already running when its last member froze (clients Volt launched afterwards,
+    # e.g. while it is still starting the farm, say nothing about that freeze),
+    # and is confirmed once its LAST member has been frozen for farm_freeze_confirm_sec.
+    if ($null -eq $Policy -or -not $Policy.farm_freeze_enabled) { return $null }
+    $population = @($States | Where-Object { $null -ne $_ -and $null -ne $_.LastSnapshot -and -not $_.RecoveryRequested })
+    $frozen = @($population | Where-Object { Test-ArkuzoFrozenSample $_ $Policy } | Sort-Object { [double]$_.FreezeSince })
+    if ($frozen.Count -lt [int]$Policy.farm_freeze_min_clients) { return $null }
+    $best = @()
+    for ($i = 0; $i -lt $frozen.Count; $i++) {
+        $group = @($frozen | Where-Object { [double]$_.FreezeSince -ge [double]$frozen[$i].FreezeSince -and ([double]$_.FreezeSince - [double]$frozen[$i].FreezeSince) -le [double]$Policy.farm_freeze_onset_window_sec })
+        if ($group.Count -gt $best.Count) { $best = $group }
+    }
+    if ($best.Count -lt [int]$Policy.farm_freeze_min_clients) { return $null }
+    $onsets = @($best | ForEach-Object { [double]$_.FreezeSince })
+    $first = ($onsets | Measure-Object -Minimum).Minimum; $last = ($onsets | Measure-Object -Maximum).Maximum
+    $present = @($population | Where-Object { $null -eq $_.StartedSec -or [double]$_.StartedSec -le [double]$last })
+    if ((2 * $best.Count) -le $present.Count) { return $null }
+    return [pscustomobject]@{ Members = $best; Population = $present.Count; FirstOnset = [double]$first; LastOnset = [double]$last
+        Confirmed = (($Now - [double]$last) -ge [double]$Policy.farm_freeze_confirm_sec) }
+}
+function Test-ArkuzoFarmFreezeActive {
+    return ($null -ne $script:farmFreeze -and $script:farmFreeze.State -ceq 'Active')
+}
+function Get-ArkuzoFarmFreezeMemberRecord($State) {
+    if (-not (Test-ArkuzoFarmFreezeActive) -or $null -eq $State -or $null -eq $State.FarmFreezePid -or
+        $State.FarmFreezeEpisode -cne $script:farmFreeze.Id) { return $null }
+    $member = $script:farmFreeze.Members[[string]$State.FarmFreezePid]
+    if ($null -eq $member -or [long]$member.startTicks -ne [long]$State.StartTicks) { return $null }
+    return $member
+}
+function Test-ArkuzoFarmFreezeMember($State) {
+    # Latched per-state membership: decisions computed by the observation service
+    # or inside Invoke-ClientRecovery reach the same reason without a farm view.
+    $member = Get-ArkuzoFarmFreezeMemberRecord $State
+    return ($null -ne $member -and $member.status -ceq 'Planned')
+}
+function Set-ArkuzoFarmFreezeMemberStatus($State, [string]$Status) {
+    $member = Get-ArkuzoFarmFreezeMemberRecord $State
+    # Planned members move on once; a member that answered again can still quit later.
+    if ($null -eq $member -or -not ($member.status -ceq 'Planned' -or ($member.status -ceq 'Recovered' -and $Status -ceq 'Exited'))) { return }
+    $member.status = $Status; $member.changedUtc = [datetime]::UtcNow.ToString('o')
+    if ($null -ne $clock) { $member.changedSec = [double]$clock.Elapsed.TotalSeconds }
+}
+function Test-ArkuzoFarmFreezeSlot {
+    # Volt counts its relaunch delay from each exit, so pace members from the last
+    # verified exit of any member (closed by the saver or quit by itself), not
+    # from when the previous attempt started.
+    if (-not (Test-ArkuzoFarmFreezeActive) -or $null -eq $clock) { return $true }
+    $now = [double]$clock.Elapsed.TotalSeconds
+    foreach ($m in @($script:farmFreeze.Members.Values)) {
+        if ($m.status -cin @('Closed','Exited') -and $null -ne $m.changedSec -and ($now - [double]$m.changedSec) -lt [double]$healthPolicy.farm_freeze_spacing_sec) { return $false }
+    }
+    return $true
+}
+function Get-ArkuzoRecoveryCooldown([string]$Reason, $Policy) {
+    # Reason-specific spacing for Test-ArkuzoRecoveryBudget. A confirmed farm
+    # freeze is paced at Volt's launch spacing instead of the generic cooldown.
+    if ($Reason -ceq 'VOLT_STARTUP_ERROR') { return [math]::Min(5, [int]$Policy.cooldown_sec) }
+    if ($Reason -ceq 'FARM_FREEZE' -and $null -ne $Policy.farm_freeze_spacing_sec) { return [int]$Policy.farm_freeze_spacing_sec }
+    return [int]$Policy.cooldown_sec
+}
+function Get-ArkuzoFarmFreezeAccount([string]$TrackerId, [int]$ClientId) {
+    # Episode-scoped exact mapping while Volt counts down the relaunch of members
+    # this episode already closed. Everything else must still map exactly:
+    # process ownership, every other row, the target's own row and socket.
+    if (-not (Test-ArkuzoFarmFreezeActive) -or -not $script:tracked.ContainsKey($ClientId)) { return $null }
+    $member = Get-ArkuzoFarmFreezeMemberRecord $script:tracked[$ClientId]
+    if ($null -eq $member -or $member.status -cne 'Planned' -or [int]$member.pid -ne $ClientId -or $member.trackerId -cne $TrackerId) { return $null }
+    $s = $voltControlStatus
+    if (-not $s.available -or $s.processMappingSafe -isnot [bool] -or -not $s.processMappingSafe -or
+        [int]$s.managerId -ne [int]$script:farmFreeze.managerId -or [long]$s.managerStartTicks -ne [long]$script:farmFreeze.managerStartTicks) { return $null }
+    foreach ($id in @($s.unmappedAccountIds)) {
+        if ($null -eq $id) { continue }
+        $gone = @($script:farmFreeze.Members.Values | Where-Object { $_.accountId -ceq [string]$id -and $_.status -cin @('Closed','Exited') })
+        if ($gone.Count -ne 1) { return $null }
+    }
+    if (-not (Test-ArkuzoSuspendedRowsSafe)) { return $null }
+    $rows = @($s.accounts | Where-Object { $_.accountId -ceq $member.accountId })
+    $sameTracker = @($s.accounts | Where-Object { $_.trackerId -ceq $TrackerId })
+    $samePid = @($s.accounts | Where-Object { $_.processId -and [int]$_.processId -eq $ClientId })
+    if ($rows.Count -ne 1 -or $sameTracker.Count -ne 1 -or $samePid.Count -ne 1) { return $null }
+    $a = $rows[0]
+    if ($a.trackerId -cne $TrackerId -or [int]$a.processId -ne $ClientId -or $a.uiStatus -cne 'Connected' -or
+        $a.rowReady -isnot [bool] -or -not $a.rowReady -or $a.autoRelaunch -isnot [bool] -or -not $a.autoRelaunch -or
+        $a.cookieStatus -cne 'alive' -or -not $a.cookieAlive -or
+        ($null -ne $script:suspendedAccounts -and $script:suspendedAccounts.ContainsKey([string]$a.accountId)) -or
+        $restorePolicy.excluded_account_ids -contains $a.accountId) { return $null }
+    return $a
+}
+function Start-ArkuzoFarmFreezeEpisode($Candidate, [double]$Now) {
+    # Latch members from ONE globally mapped, fresh Volt snapshot. Accounts that
+    # are already pending, quarantined, excluded or unmapped stay on the normal path.
+    $utc = [datetime]::UtcNow
+    $room = [int]$healthPolicy.max_recycles_per_hour - @($recoveryAttempts | Where-Object { ($utc - ([datetime]$_).ToUniversalTime()).TotalSeconds -lt 3600 }).Count
+    $members = @{}; $order = @(); $skipped = @()
+    foreach ($state in @($Candidate.Members | Sort-Object { [double]$_.FreezeSince })) {
+        $id = [int]$state.Watcher.Id
+        $account = $null
+        if (Test-ArkuzoClientIdentity $state.Watcher $id $state.StartTicks) { $account = Get-ArkuzoControlledAccount $state.TrackerId $id }
+        $why = $null
+        if ($null -eq $account) { $why = 'UNMAPPED' }
+        elseif ($recoveryPending.ContainsKey([string]$account.accountId)) { $why = 'ALREADY_PENDING' }
+        elseif (Test-ArkuzoAccountQuarantined ([string]$account.accountId) $utc) { $why = 'QUARANTINED' }
+        elseif (-not ($account.autoRelaunch -is [bool] -and $account.autoRelaunch -and $account.cookieAlive -is [bool] -and $account.cookieAlive)) { $why = 'NOT_RELAUNCHABLE' }
+        elseif ($order.Count -ge $room) { $why = 'HOURLY_BUDGET' }
+        if ($why) { $skipped += @{ pid = $id; reason = $why }; continue }
+        $members[[string]$id] = @{ pid = $id; startTicks = [long]$state.StartTicks; accountId = [string]$account.accountId; trackerId = [string]$account.trackerId
+            onsetOffsetSec = [math]::Round([double]$state.FreezeSince - $Candidate.FirstOnset, 1); cpuPercent = $state.HangCpuPercent; status = 'Planned'; changedUtc = $null }
+        $order += $id
+    }
+    if ($order.Count -eq 0) {
+        Warn-Throttled 'farm-freeze' 'Farm-wide freeze confirmed, but no member can be mapped exactly now. Normal hang recovery continues.'
+        return $false
+    }
+    $script:farmFreezeSequence = [int]$script:farmFreezeSequence + 1
+    $script:farmFreeze = @{ Id = ('freeze-' + $utc.ToString('yyyyMMddHHmmss') + '-' + $script:farmFreezeSequence); State = 'Active'
+        StartedSec = $Now; StartedUtc = $utc.ToString('o'); FirstOnset = $Candidate.FirstOnset
+        managerId = [int]$voltControlStatus.managerId; managerStartTicks = [long]$voltControlStatus.managerStartTicks
+        Members = $members; Order = $order
+        DeadlineSec = $Now + ($order.Count * [double]$healthPolicy.farm_freeze_spacing_sec) + 120 }
+    foreach ($id in $order) { $tracked[$id].FarmFreezeEpisode = $script:farmFreeze.Id; $tracked[$id].FarmFreezePid = $id }
+    $script:lastFarmFreezeStartSec = $Now
+    Write-Diagnostic 'FARM_FREEZE_DETECTED' @{ episode = $script:farmFreeze.Id; population = $Candidate.Population; frozen = @($Candidate.Members).Count
+        planned = @($order | ForEach-Object { $m = $members[[string]$_]; @{ pid = $m.pid; accountId = $m.accountId; onsetOffsetSec = $m.onsetOffsetSec; cpuPercent = $m.cpuPercent } })
+        skipped = $skipped; confirmSec = [math]::Round($Now - $Candidate.LastOnset, 1); spacingSec = $healthPolicy.farm_freeze_spacing_sec
+        note = 'Correlated freeze: members are closed one at a time at Volt launch spacing through the normal guarded recovery.' }
+    return $true
+}
+function Stop-ArkuzoFarmFreezeEpisode([string]$Outcome) {
+    if (-not (Test-ArkuzoFarmFreezeActive)) { return }
+    $episode = $script:farmFreeze
+    foreach ($m in @($episode.Members.Values)) { if ($m.status -ceq 'Planned') { $m.status = 'Released' } }
+    $episode.State = $Outcome
+    foreach ($state in @($tracked.Values)) { if ($state.FarmFreezeEpisode -ceq $episode.Id) { $state.FarmFreezeEpisode = $null; $state.FarmFreezePid = $null } }
+    $counts = @{}; foreach ($m in @($episode.Members.Values)) { $counts[$m.status] = 1 + [int]$counts[$m.status] }
+    Write-Diagnostic 'FARM_FREEZE_EPISODE_END' @{ episode = $episode.Id; outcome = $Outcome; members = $counts
+        durationSec = $(if ($null -ne $clock) { [math]::Round($clock.Elapsed.TotalSeconds - [double]$episode.StartedSec, 1) } else { $null }) }
+}
+function Update-ArkuzoFarmFreeze {
+    # Once per main-loop pass, after every client was sampled.
+    if ($null -eq $clock) { return }
+    $now = $clock.Elapsed.TotalSeconds
+    if (Test-ArkuzoFarmFreezeActive) {
+        if (-not $healthPolicy.farm_freeze_enabled -or -not $healthPolicy.enabled -or $MonitorOnly) { Stop-ArkuzoFarmFreezeEpisode 'Disabled'; return }
+        foreach ($m in @($script:farmFreeze.Members.Values)) {
+            if ($m.status -cne 'Planned') { continue }
+            $state = $tracked[[int]$m.pid]
+            # A member that answers again is never closed by this episode.
+            if ($null -ne $state -and [long]$state.StartTicks -eq [long]$m.startTicks -and ($null -eq $state.FreezeSince -or [double]$state.FreezeSince -lt 0)) {
+                Set-ArkuzoFarmFreezeMemberStatus $state 'Recovered'
+            }
+        }
+        if (@($script:farmFreeze.Members.Values | Where-Object { $_.status -ceq 'Planned' }).Count -eq 0) { Stop-ArkuzoFarmFreezeEpisode 'Completed' }
+        elseif ($now -ge [double]$script:farmFreeze.DeadlineSec) { Stop-ArkuzoFarmFreezeEpisode 'Expired' }
+        return
+    }
+    if ($MonitorOnly -or -not $healthPolicy.enabled -or -not $healthPolicy.farm_freeze_enabled -or -not $restorePolicy.enabled -or
+        -not $ownsControllerMutex -or -not $recoveryJournalHealthy -or $logFailed) { return }
+    $candidate = Get-ArkuzoFarmFreezeCandidate @($tracked.Values) $healthPolicy $now
+    if ($null -eq $candidate -or -not $candidate.Confirmed) { return }
+    # A farm that freezes again soon after an episode is not helped by fast
+    # recycling (the display is likely still gone): use hang_timeout_sec instead.
+    if ($null -ne $script:lastFarmFreezeStartSec -and ($now - [double]$script:lastFarmFreezeStartSec) -lt [double]$healthPolicy.farm_freeze_refreeze_sec) {
+        Warn-Throttled 'farm-freeze' 'Farm froze again soon after the last fast recovery. Using the normal hang timeout this time.'
+        return
+    }
+    # Volt starts a farm one client every 9-15 s. While that run may still be
+    # going, paced closes could relaunch into it and raise its startup notice:
+    # wait until no client has started for 30 s.
+    if ($null -ne $script:lastClientStartUtc -and ([datetime]::UtcNow - $script:lastClientStartUtc).TotalSeconds -lt 30) { return }
+    if (-not $voltControlStatus.available -or $voltControlStatus.globalMappingSafe -isnot [bool] -or -not $voltControlStatus.globalMappingSafe) { return }
+    [void](Start-ArkuzoFarmFreezeEpisode $candidate $now)
+}
+function Test-ArkuzoLaunchPacing([datetime]$NowUtc) {
+    # A Volt launch request must not land within farm_freeze_spacing_sec of
+    # another launch: closer launches raise Volt's startup notice.
+    $spacing = if ($null -ne $healthPolicy.farm_freeze_spacing_sec) { [double]$healthPolicy.farm_freeze_spacing_sec } else { 20.0 }
+    if (Test-ArkuzoFarmFreezeActive) { return $false }
+    if ($null -ne $script:lastClientStartUtc -and ($NowUtc - $script:lastClientStartUtc).TotalSeconds -lt $spacing) { return $false }
+    # Volt itself relaunches a closed client relaunch_delay_sec after its exit.
+    $due = [double]$restorePolicy.relaunch_delay_sec + $spacing
+    foreach ($entry in @($recoveryPending.Values)) {
+        if (-not $entry.closedUtc -or [int]$entry.replacementPid -gt 0) { continue }
+        try { $age = ($NowUtc - ([datetime]$entry.closedUtc).ToUniversalTime()).TotalSeconds } catch { continue }
+        if ($age -ge 0 -and $age -lt $due) { return $false }
+    }
+    return $true
 }
 function New-ArkuzoPendingEntry([string]$AccountId,[string]$TrackerId,[int]$OldId=0,[long]$OldTicks=0) {
     return @{accountId=$AccountId;oldTrackerId=$TrackerId;oldPid=$OldId;oldStartTicks=$OldTicks;createdUtc=[datetime]::UtcNow.ToString('o');closedUtc=$null;status='AwaitingReplacement';retryCount=0;nextRetryUtc=$null;readySinceUtc=$null;lastObservedUtc=$null;replacementPid=0;replacementStartTicks=0}
@@ -1548,6 +1800,10 @@ function Update-ArkuzoRecoveryOutcomes {
                 if ($null -eq $systemMemory -or $systemMemory.commitPercent -ge $healthPolicy.pressure_percent) {
                     Warn-Throttled 'restore-pressure' 'New account launch delayed: OS commit headroom insufficient/unavailable.';continue
                 }
+                if (-not (Test-ArkuzoLaunchPacing $utc)) {
+                    # Not charged: the request simply waits for a quiet launch slot.
+                    Warn-Throttled 'restore-pacing' 'Missing-account launch waits for a free Volt launch slot (launches are kept apart to avoid its startup notice).';continue
+                }
                 # Persist and audit before invoking Volt. Never burn a duplicate fast retry after a restart.
                 $entry.retryCount=[int]$entry.retryCount+1
                 $entry.nextRetryUtc=$utc.AddSeconds((Get-ArkuzoRetryDelay $entry.retryCount $restorePolicy)).ToString('o')
@@ -1583,6 +1839,11 @@ function Update-ArkuzoLivePolicy {
             $newHealth.disconnect_timeout_sec = [math]::Min($newHealth.disconnect_timeout_sec, 5)
             $newHealth.cooldown_sec = [math]::Min($newHealth.cooldown_sec, 90)
             $newHealth.max_recycles_per_hour = [math]::Max($newHealth.max_recycles_per_hour, 20)
+            # Production floors for the farm-freeze fast path: no earlier than 30 s
+            # (some correlated stalls clear by themselves within ~30 s) and Volt
+            # launches at least 15 s apart (closer launches raise its startup notice).
+            $newHealth.farm_freeze_confirm_sec = [math]::Max($newHealth.farm_freeze_confirm_sec, 30)
+            $newHealth.farm_freeze_spacing_sec = [math]::Max($newHealth.farm_freeze_spacing_sec, 15)
         }
         $newPagefile=Get-ArkuzoPagefilePolicy -Input $cfg.pagefile -PressurePercent $newHealth.pressure_percent
         if (-not $newPagefile.valid) { throw ('Invalid pagefile policy: '+($newPagefile.errors -join '; ')) }
@@ -1700,17 +1961,25 @@ function Test-ArkuzoRecoveryHandoff([string]$AccountId, $State = $null, [string]
     # No collateral closures while an account is missing. A confirmed unhealthy
     # replacement of that same account can retry through the persisted backoff.
     $utc=[datetime]::UtcNow
-    if (-not $voltControlStatus.available -or $voltControlStatus.globalMappingSafe -isnot [bool] -or -not $voltControlStatus.globalMappingSafe -or $null -eq $voltControlCheckedUtc -or ($utc-$voltControlCheckedUtc).TotalSeconds -lt 0 -or ($utc-$voltControlCheckedUtc).TotalSeconds -gt 25) { return $false }
-    foreach($key in @($script:suspendedAccounts.Keys)) {
-        if ($restorePolicy.excluded_account_ids -contains $key) { continue }
-        $rows=@($voltControlStatus.accounts | Where-Object { $_.accountId -ceq $key })
-        if ($rows.Count -ne 1) { return $false }
-        $a=$rows[0]
-        if ($a.cookieStatus -cne 'dead' -or $a.suspensionSafe -isnot [bool] -or -not $a.suspensionSafe -or $a.uiStatus -cne 'Idle' -or $a.processId) { return $false }
+    # A latched farm-freeze member is independently confirmed frozen and exactly
+    # mapped; the other members' open handoffs are this same episode, not
+    # collateral. Its mapping is re-proven by Get-ArkuzoFarmFreezeAccount.
+    $farmMember = $null
+    if ($Reason -ceq 'FARM_FREEZE' -and $AccountId) {
+        $farmMember = Get-ArkuzoFarmFreezeMemberRecord $State
+        if ($null -eq $farmMember -or $farmMember.status -cne 'Planned' -or $farmMember.accountId -cne $AccountId) { $farmMember = $null }
     }
+    if (-not $voltControlStatus.available -or $null -eq $voltControlCheckedUtc -or ($utc-$voltControlCheckedUtc).TotalSeconds -lt 0 -or ($utc-$voltControlCheckedUtc).TotalSeconds -gt 25) { return $false }
+    if ($voltControlStatus.globalMappingSafe -isnot [bool] -or -not $voltControlStatus.globalMappingSafe) {
+        if ($null -eq $farmMember) { return $false }
+        $account = Get-ArkuzoFarmFreezeAccount $State.TrackerId $State.Watcher.Id
+        if ($null -eq $account -or $account.accountId -cne $AccountId) { return $false }
+    }
+    if (-not (Test-ArkuzoSuspendedRowsSafe)) { return $false }
     if ($null -eq $script:recoveryPending) { return $false }
     if ($script:recoveryPending.Count -eq 0) { return $true }
     if (-not $AccountId) { return $false }
+    if ($null -ne $farmMember -and -not $script:recoveryPending.ContainsKey($AccountId)) { return $true }
     if (-not $script:recoveryPending.ContainsKey($AccountId)) {
         if (-not (Test-ArkuzoStartupIsolation $State $Reason $Sample) -or
             -not (Test-ArkuzoClientIdentity $State.Watcher $State.Watcher.Id $State.StartTicks)) { return $false }
@@ -1782,10 +2051,12 @@ function Invoke-ClientRecovery([int]$ClientId, $State) {
         Warn-Throttled 'recovery-handoff' ("${label}: $detail Other accounts left untouched.")
         return
     }
-    $effectiveCooldown = if ($reason -eq 'VOLT_STARTUP_ERROR') { [math]::Min(5, $healthPolicy.cooldown_sec) } else { $healthPolicy.cooldown_sec }
+    $effectiveCooldown = Get-ArkuzoRecoveryCooldown $reason $healthPolicy
     if (-not (Test-ArkuzoRecoveryBudget $recoveryAttempts $utc $effectiveCooldown $healthPolicy.max_recycles_per_hour)) {
         Warn-Throttled 'recovery-budget' 'Recovery cooldown/hourly budget reached. No restart storm.'; return
     }
+    $farmEpisode = $(if ($reason -ceq 'FARM_FREEZE' -and (Test-ArkuzoFarmFreezeMember $State)) { [string]$script:farmFreeze.Id } else { $null })
+    if ($reason -ceq 'FARM_FREEZE' -and (-not $farmEpisode -or -not (Test-ArkuzoFarmFreezeSlot))) { return }
     $watcher = $State.Watcher
     if (-not (Test-ArkuzoClientIdentity $watcher $ClientId $State.StartTicks)) { Reset-ArkuzoHealthSample $State; return }
     # An unmapped target is not a termination attempt. Do not charge its budget.
@@ -1803,10 +2074,11 @@ function Invoke-ClientRecovery([int]$ClientId, $State) {
             $entry.retryCount = [int]$previousPending.retryCount + 1
         }
         $entry.nextRetryUtc = $utc.AddSeconds((Get-ArkuzoRetryDelay ([math]::Max(1,[int]$entry.retryCount)) $restorePolicy)).ToString('o')
+        if ($farmEpisode) { $entry.farmFreezeEpisode = $farmEpisode }
         $script:recoveryPending[$handoffKey] = $entry
         $reserved = $true
         Save-ArkuzoRecoveryJournal
-        Write-Diagnostic 'RECOVERY_REQUESTED' @{ accountId = $handoffKey; pid = $ClientId; startTicks = $State.StartTicks; reason = $reason; lastSample = $State.LastSnapshot; systemMemory = $systemMemory; relaunchOwner = 'Volt account manager' }
+        Write-Diagnostic 'RECOVERY_REQUESTED' @{ accountId = $handoffKey; pid = $ClientId; startTicks = $State.StartTicks; reason = $reason; lastSample = $State.LastSnapshot; systemMemory = $systemMemory; relaunchOwner = 'Volt account manager'; farmFreezeEpisode = $farmEpisode }
         if ($logFailed) { throw 'Recovery requires functioning audit logging' }
         if (-not (Test-ArkuzoTargetRecovery $watcher $ClientId $State.StartTicks)) { return }
         # Open handoffs require a new fully safe farm mapping after audit/probe
@@ -1839,6 +2111,8 @@ function Invoke-ClientRecovery([int]$ClientId, $State) {
         $watcher.Kill()
         if (-not $watcher.WaitForExit(2000)) { throw 'Client termination not confirmed' }
         $State.RecoveryStatus = 'ExitVerified'
+        # Only now may this member's Volt row be unmapped for the rest of the episode.
+        if ($farmEpisode) { Set-ArkuzoFarmFreezeMemberStatus $State 'Closed' }
         $entry.closedUtc = [datetime]::UtcNow.ToString('o')
         Save-ArkuzoRecoveryJournal
         Write-Diagnostic 'CLIENT_CLOSED_FOR_RECOVERY' @{ accountId = $handoffKey; pid = $ClientId; startTicks = $State.StartTicks; reason = $State.HealthDecision.Reason; note = 'Exit verified. Volt relaunch/game readiness is a separate observation, not guaranteed.' }
@@ -1850,6 +2124,7 @@ function Invoke-ClientRecovery([int]$ClientId, $State) {
             try { $watcher.Refresh(); $exited = $watcher.HasExited } catch { }
             if ($exited -is [bool] -and $exited) {
                 $State.RecoveryStatus = 'ExitVerified'
+                if ($farmEpisode) { Set-ArkuzoFarmFreezeMemberStatus $State 'Closed' }
                 Write-Diagnostic 'CLIENT_CLOSED_FOR_RECOVERY' @{ pid = $ClientId; startTicks = $State.StartTicks; reason = $State.HealthDecision.Reason; note = 'Exit verified after termination error. Volt relaunch/game readiness remains a separate observation.' }
             } elseif (Test-ArkuzoClientIdentity $watcher $ClientId $State.StartTicks) {
                 $State.RecoveryStatus = 'Failed'
@@ -1866,6 +2141,31 @@ function Invoke-ClientRecovery([int]$ClientId, $State) {
             else { $script:recoveryPending.Remove($handoffKey) }
             try { Save-ArkuzoRecoveryJournal } catch { $script:recoveryJournalHealthy = $false }
         }
+    }
+}
+function Invoke-ArkuzoRecoveryCandidates {
+    # At most one recovery per main-loop pass. While a farm-freeze episode runs,
+    # only its members are recycled, so Volt launches stay paced. Try largest
+    # first, skipping unready targets without charging a budget.
+    $farmFreezeActive = Test-ArkuzoFarmFreezeActive
+    $eligible = @($tracked.GetEnumerator() | Where-Object {
+        $_.Value.HealthDecision.Recycle -and
+        -not $_.Value.RecoveryRequested -and
+        (-not $farmFreezeActive -or (Test-ArkuzoFarmFreezeMember $_.Value)) -and
+        ($null -eq $_.Value.LastRecoveryRefusalUtc -or (([DateTime]::UtcNow) - $_.Value.LastRecoveryRefusalUtc).TotalSeconds -ge 30)
+    })
+    # Episode members in the order they froze: the earliest also quits first.
+    $ordered = if ($farmFreezeActive) { @($eligible | Sort-Object { [double]$_.Value.FreezeSince }) } else { @($eligible | Sort-Object { $_.Value.LastSnapshot.privateMB } -Descending) }
+    foreach ($candidate in $ordered) {
+        $effectiveCooldown = Get-ArkuzoRecoveryCooldown ([string]$candidate.Value.HealthDecision.Reason) $healthPolicy
+        if (-not (Test-ArkuzoRecoveryBudget $recoveryAttempts ([DateTime]::UtcNow) $effectiveCooldown $healthPolicy.max_recycles_per_hour)) {
+            # Cooldown is reason-specific: a larger blocked hang/memory
+            # target must not starve a startup error with its own safe budget.
+            Warn-Throttled 'recovery-budget' 'Recovery cooldown/hourly budget reached. No restart storm.'; continue
+        }
+        if ($null -ne ('Arkuzo.LoopWatchdogV1' -as [type])) { [Arkuzo.LoopWatchdogV1]::Mark('recovering client ' + $candidate.Key) }
+        Invoke-ClientRecovery $candidate.Key $candidate.Value
+        if ($candidate.Value.RecoveryRequested) { break }
     }
 }
 function Clear-ArkuzoOutcomeObservation($State) {
@@ -1891,12 +2191,14 @@ function Reset-ArkuzoHealthSample($State) {
     $State.LastSnapshot = $null
     $State.HealthSnapshotUtc = $null
     $State.HangSince = -1.0
+    $State.FreezeSince = -1.0
     $State.StartupErrorSince = -1.0
     $State.DisconnectSince = -1.0
     $State.DisconnectReason = $null
     $State.isDisconnected = $false
     $State.LastHealthSampleTime = $null
     $State.PrivateLimitSince = -1.0
+    $State.HangCpuBase = $null; $State.HangCpuBaseAt = $null; $State.HangCpuPercent = $null
 }
 function Get-ArkuzoHealthDecision($State, $Sample, $Policy, [double]$Now) {
     $reason = ''; $status = ''
@@ -1904,15 +2206,21 @@ function Get-ArkuzoHealthDecision($State, $Sample, $Policy, [double]$Now) {
     # continuous observation, even when both endpoint samples succeeded.
     if ($null -eq $State.LastHealthSampleTime -or $Now -lt [double]$State.LastHealthSampleTime) {
         $State.HangSince = -1.0
+        $State.FreezeSince = -1.0
         $State.StartupErrorSince = -1.0
         $State.DisconnectSince = -1.0
         $State.PrivateLimitSince = -1.0
     } elseif (($Now - [double]$State.LastHealthSampleTime) -gt 5) {
         $State.HangSince = -1.0
+        $State.FreezeSince = -1.0
         $State.PrivateLimitSince = -1.0
     }
     $State.LastHealthSampleTime = $Now
     if ($null -eq $State.HangSince) { $State.HangSince = -1.0 }
+    if ($null -eq $State.FreezeSince) { $State.FreezeSince = -1.0 }
+    # When this client started, on the same clock: a client launched after a
+    # freeze began says nothing about that freeze (see Get-ArkuzoFarmFreezeCandidate).
+    if ($null -eq $State.StartedSec -and $null -ne $Sample.ageSec) { $State.StartedSec = $Now - [double]$Sample.ageSec }
     if ($null -eq $State.StartupErrorSince) { $State.StartupErrorSince = -1.0 }
     if ($null -eq $State.DisconnectSince) { $State.DisconnectSince = -1.0 }
     if ($null -eq $State.PrivateLimitSince) { $State.PrivateLimitSince = -1.0 }
@@ -1925,6 +2233,7 @@ function Get-ArkuzoHealthDecision($State, $Sample, $Policy, [double]$Now) {
     # confirmation grace it is handed back to the verified Volt relaunch owner.
     if ($Sample.launchError) {
         $State.HangSince = -1.0
+        $State.FreezeSince = -1.0
         $State.DisconnectSince = -1.0
         if ([double]$State.StartupErrorSince -lt 0) { $State.StartupErrorSince = $Now }
         $timeout = if ($null -ne $Policy.startup_error_timeout_sec) { [double]$Policy.startup_error_timeout_sec } else { 40.0 }
@@ -1935,14 +2244,30 @@ function Get-ArkuzoHealthDecision($State, $Sample, $Policy, [double]$Now) {
     # In-game disconnect or kick detected from client log.
     if ($Sample.isDisconnected) {
         $State.HangSince = -1.0
+        $State.FreezeSince = -1.0
         if ([double]$State.DisconnectSince -lt 0) { $State.DisconnectSince = $Now }
         $timeout = if ($null -ne $Policy.disconnect_timeout_sec) { [double]$Policy.disconnect_timeout_sec } else { 5.0 }
         $retry = [bool]$Sample.eligible -and [double]$State.DisconnectSince -ge 0 -and ($Now - [double]$State.DisconnectSince) -ge $timeout
         return [pscustomobject]@{ Reason = 'IN_GAME_DISCONNECT'; Recycle = $retry; Status = 'DISCONNECTED' }
     }
     $State.DisconnectSince = -1.0
-    if ([double]$Sample.ageSec -lt [double]$Policy.warmup_sec) {
+    # Freeze onset for the farm-freeze path only, tracked through warm-up too:
+    # clients that freeze while starting quit by themselves ~197 s later like any
+    # other frozen client. A window that never answered yet is still loading and
+    # does not count; past warm-up this matches HangSince.
+    $warm = [double]$Sample.ageSec -lt [double]$Policy.warmup_sec
+    if ($Sample.windowPresent -and $Sample.responding) { $State.EverResponded = $true }
+    if ($Sample.windowPresent -and -not $Sample.responding -and ($State.EverResponded -or -not $warm)) {
+        if ([double]$State.FreezeSince -lt 0) { $State.FreezeSince = $Now }
+    } else { $State.FreezeSince = -1.0 }
+    if ($warm) {
         $State.HangSince = -1.0
+        # A latched episode member is confirmed with the rest of the farm, even
+        # while it is still in warm-up; nothing else is recycled during warm-up.
+        if ([double]$State.FreezeSince -ge 0 -and $Policy.farm_freeze_enabled -and (Test-ArkuzoFarmFreezeMember $State) -and
+            ($null -eq $State.HangCpuPercent -or [double]$State.HangCpuPercent -le [double]$Policy.farm_freeze_max_cpu_percent)) {
+            return [pscustomobject]@{ Reason = 'FARM_FREEZE'; Recycle = [bool]$Sample.eligible; Status = 'FARM FREEZE' }
+        }
         return [pscustomobject]@{ Reason = ''; Recycle = $false; Status = '' }
     }
     # Track responsiveness independently of the higher-priority memory branches.
@@ -1965,6 +2290,10 @@ function Get-ArkuzoHealthDecision($State, $Sample, $Policy, [double]$Now) {
         $status = 'HANG GRACE'
         if (($Now - [double]$State.HangSince) -ge [double]$Policy.hang_timeout_sec) {
             $reason = 'SUSTAINED_HANG'; $status = 'STUCK CLIENT'
+        } elseif ($Policy.farm_freeze_enabled -and (Test-ArkuzoFarmFreezeMember $State) -and
+                  ($null -eq $State.HangCpuPercent -or [double]$State.HangCpuPercent -le [double]$Policy.farm_freeze_max_cpu_percent)) {
+            # Latched episode member: confirmed together with the rest of the farm.
+            $reason = 'FARM_FREEZE'; $status = 'FARM FREEZE'
         }
     }
     return [pscustomobject]@{ Reason = $reason; Recycle = ([bool]$Sample.eligible -and $reason -ne ''); Status = $status }
@@ -2775,6 +3104,8 @@ if ($isConfigLocked) {
         $healthPolicy.disconnect_timeout_sec = [math]::Min($healthPolicy.disconnect_timeout_sec, 5)
         $healthPolicy.cooldown_sec = [math]::Min($healthPolicy.cooldown_sec, 90)
         $healthPolicy.max_recycles_per_hour = [math]::Max($healthPolicy.max_recycles_per_hour, 20)
+        $healthPolicy.farm_freeze_confirm_sec = [math]::Max($healthPolicy.farm_freeze_confirm_sec, 30)
+        $healthPolicy.farm_freeze_spacing_sec = [math]::Max($healthPolicy.farm_freeze_spacing_sec, 15)
     }
 }
 $lastConfigText = [IO.File]::ReadAllText($configFilePath)
@@ -3369,6 +3700,9 @@ function Record-ClientExit([int]$ClientId, $State, [string]$Reason = 'No longer 
         reason = $Reason; lastSample = $State.LastSnapshot; recoveryRequested = [bool]$State.RecoveryRequested
         note = 'An exit alone does not prove a crash; correlate with Windows events.'
     }
+    # A member that is gone (it quit by itself, or a close whose bookkeeping failed
+    # completed after all) may now have its Volt row count down.
+    Set-ArkuzoFarmFreezeMemberStatus $State 'Exited'
     Register-ArkuzoExitedClientRecovery $ClientId $State
 }
 function Register-ArkuzoExitedClientRecovery([int]$ClientId, $State) {
@@ -3817,7 +4151,7 @@ function New-ArkuzoFrame($Model, [int]$Width, [int]$Height) {
                 }
                 $color = [ConsoleColor]::Green
                 if ($row.Ram -ge $Model.TargetMB) { $color = [ConsoleColor]::Yellow }
-                if ($row.Status -in @('NOT RESPONDING','CHECK NOTICE','LEAK GUARD','COMMIT PRESSURE','STUCK CLIENT','VOLT STARTUP ERROR','DISCONNECTED')) { $color = [ConsoleColor]::Red }
+                if ($row.Status -in @('NOT RESPONDING','CHECK NOTICE','LEAK GUARD','COMMIT PRESSURE','STUCK CLIENT','VOLT STARTUP ERROR','DISCONNECTED','FARM FREEZE')) { $color = [ConsoleColor]::Red }
                 $lines.Add((New-ArkuzoLine $text $color $Width))
             }
             if ($rows.Count -gt $shown) { $lines.Add((New-ArkuzoLine "  + $($rows.Count - $shown) more clients (enlarge window)" DarkGray $Width)) }
@@ -4120,7 +4454,9 @@ try {
                         HangSince = -1.0; StartupErrorSince = -1.0; DisconnectSince = -1.0; ParentId = 0; HealthDecision = $null; RecoveryRequested = $false
                         GameReady = $false; EverGameReady = $false; StartupGameHistory = 'UNKNOWN'; GameLogScanned = $false; LogPath = $null; LogOffset = [int64]0; TrackerId = $null; isDisconnected = $false; DisconnectReason = $null
                         BoundAccountId = $null; BoundTrackerId = $null
+                        HangCpuBase = $null; HangCpuBaseAt = $null; HangCpuPercent = $null; FarmFreezeEpisode = $null; FarmFreezePid = $null; FreezeSince = -1.0; StartedSec = $null; EverResponded = $false
                     }
+                    $script:lastClientStartUtc = [datetime]::UtcNow
                     try {
                         $procRecord = Get-CimInstance Win32_Process -Filter "ProcessId=$id" -OperationTimeoutSec 5 -ErrorAction Stop
                         $state.ParentId = [int]$procRecord.ParentProcessId
@@ -4288,6 +4624,7 @@ try {
                 $isResponding = $healthSample.responding; $launchError = $healthSample.launchError
                 $window = $client.MainWindowHandle
                 $state.HealthDecision = Get-ArkuzoHealthDecision $state $healthSample $healthPolicy $sampleTime
+                Update-ArkuzoHangCpu $state $cpuTime $sampleTime $cpuThreads
                 if ($state.HealthDecision.Status) { $status = $state.HealthDecision.Status }
                 # Bind the exact Volt account while it is still verifiable: a kicked client
                 # often closes itself before its turn in the serialized recovery queue.
@@ -4341,22 +4678,9 @@ try {
             # Two seconds keeps the Control Center live; the file is small.
             $nextRuntimeHeartbeat = $clock.Elapsed.TotalSeconds + 2
         }
-        # Try largest first, skipping unready targets without charging a budget.
-        foreach ($candidate in @($tracked.GetEnumerator() | Where-Object {
-            $_.Value.HealthDecision.Recycle -and
-            -not $_.Value.RecoveryRequested -and
-            ($null -eq $_.Value.LastRecoveryRefusalUtc -or (([DateTime]::UtcNow) - $_.Value.LastRecoveryRefusalUtc).TotalSeconds -ge 30)
-        } | Sort-Object { $_.Value.LastSnapshot.privateMB } -Descending)) {
-            $effectiveCooldown = if ($candidate.Value.HealthDecision.Reason -eq 'VOLT_STARTUP_ERROR') { [math]::Min(5, $healthPolicy.cooldown_sec) } else { $healthPolicy.cooldown_sec }
-            if (-not (Test-ArkuzoRecoveryBudget $recoveryAttempts ([DateTime]::UtcNow) $effectiveCooldown $healthPolicy.max_recycles_per_hour)) {
-                # Cooldown is reason-specific: a larger blocked hang/memory
-                # target must not starve a startup error with its own safe budget.
-                Warn-Throttled 'recovery-budget' 'Recovery cooldown/hourly budget reached. No restart storm.'; continue
-            }
-            [Arkuzo.LoopWatchdogV1]::Mark('recovering client ' + $candidate.Key)
-            Invoke-ClientRecovery $candidate.Key $candidate.Value
-            if ($candidate.Value.RecoveryRequested) { break }
-        }
+        [Arkuzo.LoopWatchdogV1]::Mark('farm freeze')
+        Update-ArkuzoFarmFreeze
+        Invoke-ArkuzoRecoveryCandidates
         if ($clock.Elapsed.TotalSeconds -ge $nextLogSample) {
             Write-Diagnostic 'RESOURCE_SAMPLE' @{
                 detected = $clients.Count; managed = $tracked.Count; systemMemory = $systemMemory; voltRecoveryReady = [bool]$voltStatus.safeToRecycle

@@ -1372,7 +1372,8 @@ function Get-ArkuzoVaultSetting($Vault, [string]$Name, $Default, [double]$Min = 
     if (-not [double]::IsNaN($Min)) {
         try { $n = [double]$value } catch { return $Default }
         if ($n -lt $Min -or $n -gt $Max) { return $Default }
-        return [int]$n
+        if ([math]::Abs($n) -le [int]::MaxValue) { return [int]$n }
+        return [long]$n # Millisecond timestamps (e.g. arrangeRequestedAtMs) don't fit an int.
     }
     return $value
 }
@@ -1381,6 +1382,12 @@ function Test-ArkuzoVoltManagerRunning {
     $managers = @(Get-Process -Name tauri-app -ErrorAction SilentlyContinue)
     try { return (@($managers | Where-Object { try { [string]::Equals($_.Path, $voltPath, [StringComparison]::OrdinalIgnoreCase) } catch { $false } }).Count -gt 0) }
     finally { foreach ($m in $managers) { $m.Dispose() } }
+}
+function Test-ArkuzoVoltRelaunching {
+    # Volt open as an executor is fine; Volt acting as the launcher (auto-relaunch on) is not.
+    if (-not (Test-ArkuzoVoltManagerRunning)) { return $false }
+    $status = Get-ArkuzoVoltRecoveryStatus -Root $PSScriptRoot
+    return ($status.safeToRecycle -is [bool] -and $status.safeToRecycle)
 }
 function Resolve-ArkuzoAccountProvider {
     # auto: Arkuzo once the vault holds an account and Volt's manager is not
@@ -1393,8 +1400,8 @@ function Resolve-ArkuzoAccountProvider {
     if ($setting -ceq 'arkuzo') { $next = 'arkuzo' }
     elseif ($setting -cne 'volt') {
         try { $vault = Read-ArkuzoVaultFile; $hasAccounts = $null -ne $vault -and @($vault.accounts).Count -gt 0 } catch { }
-        if ($hasAccounts -and ((Test-ArkuzoNativeProvider) -or -not (Test-ArkuzoVoltManagerRunning))) { $next = 'arkuzo' }
-        elseif ($hasAccounts) { $script:accountProviderNotice = 'Volt is running, so Volt still launches clients. Close Volt (or set "Who launches clients" to Arkuzo) to farm with these accounts.' }
+        if ($hasAccounts -and ((Test-ArkuzoNativeProvider) -or -not (Test-ArkuzoVoltRelaunching))) { $next = 'arkuzo' }
+        elseif ($hasAccounts) { $script:accountProviderNotice = 'Volt''s auto-relaunch is on, so Volt still launches clients. Turn off auto-relaunch in Volt (keep Volt open as your executor), or set "Who launches clients" to Arkuzo.' }
     }
     if ($next -ceq 'volt' -and -not $hasAccounts) { $script:accountProviderNotice = $null }
     if ($next -cne $script:accountProvider) {
@@ -1808,7 +1815,7 @@ function Get-ArkuzoArrangeSettings($Vault) {
     $enum = { param($name, $default, $allowed) $v = [string](Get-ArkuzoVaultSetting $Vault $name $default); if ($allowed -ccontains $v) { $v } else { $default } }
     return @{
         enabled    = ((Get-ArkuzoVaultSetting $Vault 'arrangeWindows' $true) -eq $true)
-        layout     = (& $enum 'arrangeLayout' 'grid' @('grid', 'cascade'))
+        layout     = (& $enum 'arrangeLayout' 'auto' @('auto', 'grid', 'cascade'))
         perRow     = [int](Get-ArkuzoVaultSetting $Vault 'arrangePerRow' 2 1 12)
         width      = [int](Get-ArkuzoVaultSetting $Vault 'arrangeWidth' 320 160 1920)
         height     = [int](Get-ArkuzoVaultSetting $Vault 'arrangeHeight' 240 120 1440)
@@ -1831,6 +1838,19 @@ function Get-ArkuzoWindowSlots([int]$Count, [int[]]$Area, $Settings) {
     $gap = [int][math]::Round($Settings.gap * $scale)
     $areaW = $Area[2] - $Area[0]; $areaH = $Area[3] - $Area[1]
     $right = $Settings.corner -like '*right'; $bottom = $Settings.corner -like 'bottom*'
+    $perRow = [int]$Settings.perRow
+    if ($Settings.layout -ceq 'auto' -and $Count -gt 0) {
+        # Auto: every window on screen, as large as possible, in the width:height shape set.
+        $aspect = [double]$Settings.width / [double]$Settings.height
+        $best = 0.0
+        for ($cols = 1; $cols -le $Count; $cols++) {
+            $rowsNeeded = [int][math]::Ceiling($Count / $cols)
+            $fitW = [math]::Min(($areaW - $gap * ($cols - 1)) / $cols, (($areaH - $gap * ($rowsNeeded - 1)) / $rowsNeeded) * $aspect)
+            if ($fitW -gt $best) { $best = $fitW; $perRow = $cols }
+        }
+        $minW = 160 * $scale; $minH = 120 * $scale
+        $w = [int][math]::Floor([math]::Max($best, $minW)); $h = [int][math]::Floor([math]::Max($w / $aspect, $minH))
+    }
     $slots = @()
     for ($i = 0; $i -lt $Count; $i++) {
         if ($Settings.layout -ceq 'cascade') {
@@ -1839,10 +1859,10 @@ function Get-ArkuzoWindowSlots([int]$Count, [int[]]$Area, $Settings) {
             $dx = ($i % $fit) * $step; $dy = ($i % $fit) * $step
         } else {
             $rows = [math]::Max(1, [int][math]::Floor(($areaH + $gap) / ($h + $gap)))
-            $perBlock = $Settings.perRow * $rows
+            $perBlock = $perRow * $rows
             $block = [int][math]::Floor($i / $perBlock); $within = $i % $perBlock
-            $dx = ($block * $Settings.perRow + ($within % $Settings.perRow)) * ($w + $gap)
-            $dy = [int][math]::Floor($within / $Settings.perRow) * ($h + $gap)
+            $dx = ($block * $perRow + ($within % $perRow)) * ($w + $gap)
+            $dy = [int][math]::Floor($within / $perRow) * ($h + $gap)
         }
         $x = if ($right) { $Area[2] - $dx - $w } else { $Area[0] + $dx }
         $y = if ($bottom) { $Area[3] - $dy - $h } else { $Area[1] + $dy }
@@ -1855,9 +1875,12 @@ function Get-ArkuzoArrangeTargets($Clients, $Accounts, $Settings) {
     # Clients: accountId, processId, startTicks. Returns accountId -> slot index.
     $ids = @{}
     if ($Settings.order -ceq 'fixed') {
-        # Every account keeps its own slot, so windows don't move when another account closes.
+        # Every account the farm keeps in game (or that is running) has its own slot,
+        # so windows don't move when another account closes or relaunches.
+        $running = @($Clients | ForEach-Object { [string]$_.accountId })
+        $farm = @($Accounts | Where-Object { $running -contains [string]$_.accountId -or ($_.autoRelaunch -eq $true -and $_.cookieAlive -eq $true) })
         $i = 0
-        foreach ($a in @($Accounts | Sort-Object { ([string]$_.displayName).ToLowerInvariant() }, { [string]$_.accountId })) { $ids[[string]$a.accountId] = $i; $i++ }
+        foreach ($a in @($farm | Sort-Object { ([string]$_.displayName).ToLowerInvariant() }, { [string]$_.accountId })) { $ids[[string]$a.accountId] = $i; $i++ }
         return $ids
     }
     $sorted = if ($Settings.order -ceq 'launch') { @($Clients | Sort-Object { [long]$_.startTicks }) }
@@ -1869,11 +1892,12 @@ function Get-ArkuzoArrangeTargets($Clients, $Accounts, $Settings) {
 
 function Update-ArkuzoWindowArrangement {
     if (-not (Test-ArkuzoNativeProvider) -or $MonitorOnly -or -not $ownsControllerMutex -or -not $voltControlStatus.available) { return }
-    $settings = Get-ArkuzoArrangeSettings $script:nativeVault
-    $forced = $settings.requestMs -gt $script:arrangeHandledRequestMs
-    if ($forced) { $script:arrangeHandledRequestMs = $settings.requestMs }
-    if (-not $settings.enabled -and -not $forced) { return }
+    # Arranging windows is cosmetic: nothing in it may ever stop the saver.
     try {
+        $settings = Get-ArkuzoArrangeSettings $script:nativeVault
+        $forced = $settings.requestMs -gt $script:arrangeHandledRequestMs
+        if ($forced) { $script:arrangeHandledRequestMs = $settings.requestMs }
+        if (-not $settings.enabled -and -not $forced) { return }
         Initialize-ArkuzoWindowNative
         $clients = @()
         foreach ($state in @($tracked.Values)) {

@@ -191,9 +191,9 @@ try {
     $script:accountProvider = 'volt'; $script:accountProviderSetting = 'auto'
     function Clear-VoltRecoveryCapability { }
     $script:voltRunning = $true
-    function Test-ArkuzoVoltManagerRunning { $script:voltRunning }
+    function Test-ArkuzoVoltRelaunching { $script:voltRunning }
     Resolve-ArkuzoAccountProvider
-    Assert ($script:accountProvider -eq 'volt' -and $script:accountProviderNotice -match 'Volt is running') 'auto keeps a running Volt farm on Volt (its clients are not in the vault)'
+    Assert ($script:accountProvider -eq 'volt' -and $script:accountProviderNotice -match 'auto-relaunch is on') 'auto keeps a relaunching Volt farm on Volt (its clients are not in the vault)'
     $script:voltRunning = $false
     Resolve-ArkuzoAccountProvider
     Assert ($script:accountProvider -eq 'arkuzo') 'auto picks Arkuzo once the vault has accounts and Volt is closed'
@@ -230,16 +230,33 @@ try {
     $set.layout = 'cascade'
     $s = Get-ArkuzoWindowSlots 3 @(0, 0, 1920, 1040, 96) $set
     Assert (($s[2] -join ',') -eq '64,64,320,240') 'cascade steps diagonally'
-    $accts = @([pscustomobject]@{ accountId = 'b'; displayName = 'Bravo' }, [pscustomobject]@{ accountId = 'a'; displayName = 'alpha' }, [pscustomobject]@{ accountId = 'c'; displayName = 'Charlie' })
+    $accts = @([pscustomobject]@{ accountId = 'b'; displayName = 'Bravo'; autoRelaunch = $false; cookieAlive = $true }, [pscustomobject]@{ accountId = 'a'; displayName = 'alpha'; autoRelaunch = $true; cookieAlive = $true },
+        [pscustomobject]@{ accountId = 'c'; displayName = 'Charlie'; autoRelaunch = $true; cookieAlive = $true }, [pscustomobject]@{ accountId = 'd'; displayName = 'Delta'; autoRelaunch = $false; cookieAlive = $true })
     $live = @([pscustomobject]@{ accountId = 'c'; name = 'Charlie'; startTicks = 1 }, [pscustomobject]@{ accountId = 'b'; name = 'Bravo'; startTicks = 2 })
     $t = Get-ArkuzoArrangeTargets $live $accts @{ order = 'fixed' }
-    Assert ($t['a'] -eq 0 -and $t['b'] -eq 1 -and $t['c'] -eq 2) 'fixed order: every account keeps its own spot, offline ones included'
+    Assert ($t['a'] -eq 0 -and $t['b'] -eq 1 -and $t['c'] -eq 2 -and -not $t.ContainsKey('d')) 'fixed order: farm accounts keep their spot while relaunching; switched-off offline accounts take none'
+    # Auto: fit every window on screen as large as possible.
+    $auto = @{ layout = 'auto'; perRow = 2; width = 320; height = 240; gap = 0; corner = 'top-left' }
+    $s = Get-ArkuzoWindowSlots 4 @(0, 0, 1920, 1080, 96) $auto
+    Assert ((($s | ForEach-Object { $_ -join ',' }) -join ' ') -eq '0,0,720,540 720,0,720,540 0,540,720,540 720,540,720,540') 'auto: 4 windows as a 2x2 grid, as large as the screen height allows in 4:3'
+    $s = Get-ArkuzoWindowSlots 10 @(0, 0, 1920, 1040, 96) $auto
+    $maxX = ($s | ForEach-Object { $_[0] + $_[2] } | Measure-Object -Maximum).Maximum; $maxY = ($s | ForEach-Object { $_[1] + $_[3] } | Measure-Object -Maximum).Maximum
+    Assert ($maxX -le 1920 -and $maxY -le 1040 -and $s[0][2] -ge 350) ('auto: 10 windows all on screen and as large as fits (' + ($s[0] -join ',') + ')')
+    $s = Get-ArkuzoWindowSlots 1 @(0, 0, 1920, 1040, 96) $auto
+    Assert ($s[0][3] -le 1040 -and $s[0][2] -le 1920 -and $s[0][3] -ge 1000) 'auto: a single window fills the height'
     $t = Get-ArkuzoArrangeTargets $live $accts @{ order = 'name' }
     Assert ($t['b'] -eq 0 -and $t['c'] -eq 1 -and -not $t.ContainsKey('a')) 'by name: running clients only, no gaps'
     $t = Get-ArkuzoArrangeTargets $live $accts @{ order = 'launch' }
     Assert ($t['c'] -eq 0 -and $t['b'] -eq 1) 'by launch: oldest client first'
     $cfg = Get-ArkuzoArrangeSettings ([pscustomobject]@{ settings = [pscustomobject]@{ arrangePerRow = 99; arrangeLayout = 'spiral'; arrangeVisibility = 'background'; arrangeWidth = 400 } })
-    Assert ($cfg.perRow -eq 2 -and $cfg.layout -eq 'grid' -and $cfg.visibility -eq 'background' -and $cfg.width -eq 400 -and $cfg.enabled) 'invalid layout settings fall back to defaults; valid ones are kept'
+    Assert ($cfg.perRow -eq 2 -and $cfg.layout -eq 'auto' -and $cfg.visibility -eq 'background' -and $cfg.width -eq 400 -and $cfg.enabled) 'invalid layout settings fall back to defaults; valid ones are kept'
+    # Arrange now stores a millisecond timestamp: it must read back, not overflow (crashed the saver).
+    $cfg = Get-ArkuzoArrangeSettings ([pscustomobject]@{ settings = [pscustomobject]@{ arrangeRequestedAtMs = 1794149549000 } })
+    Assert ($cfg.requestMs -eq 1794149549000) 'Arrange now timestamp reads back as a long'
+    $script:nativeVault = [pscustomobject]@{ settings = [pscustomobject]@{ arrangeRequestedAtMs = 1794149549000; arrangeWindows = $true } }
+    $script:accountProvider = 'arkuzo'; $script:voltControlStatus = [pscustomobject]@{ available = $true; accounts = @() }; $script:tracked = @{}
+    Update-ArkuzoWindowArrangement
+    Assert ($script:arrangeHandledRequestMs -eq 1794149549000) 'Arrange now request is handled without throwing'
 
     Write-Host "PASS: Arkuzo accounts: DPAPI interop, exact mapping, CSRF ticket, cookie rotation, paced launches without backoff, safety refusals, no secrets ($script:checks checks)"
 } finally {

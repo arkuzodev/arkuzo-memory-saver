@@ -1220,7 +1220,7 @@ function accountEditor(a, servers, settings) {
       el('button', { class: 'btn accent sm', type: 'submit' }, icon('check'), 'Save')));
 }
 const FARM_FIELDS = [
-  ['provider', 'Who launches clients', 'Arkuzo uses the accounts above; Volt uses its own account manager. Auto picks Arkuzo once you add an account and Volt is closed.', ['enum', ['auto', 'arkuzo', 'volt']]],
+  ['provider', 'Who launches clients', 'Arkuzo uses the accounts above; Volt uses its own account manager. Auto picks Arkuzo once you add an account, unless Volt's auto-relaunch is on.', ['enum', ['auto', 'arkuzo', 'volt']]],
   ['launchDelaySec', 'Launch spacing', 'Seconds between two launches. Roblox and executors cope better with some space.', ['int', 5, 120, 's']],
   ['relaunchDelaySec', 'Relaunch delay', 'Wait after a client closed before launching it again.', ['int', 0, 600, 's']],
   ['launchTimeoutSec', 'Launch timeout', 'If no client appears in this time, the launch is retried.', ['int', 30, 600, 's']],
@@ -1231,10 +1231,10 @@ const FARM_FIELDS = [
 ];
 const LAYOUT_FIELDS = [
   ['arrangeWindows', 'Arrange windows', 'Keep every client in its own small window in an orderly grid.', ['bool']],
-  ['arrangeLayout', 'Layout', 'Grid: side by side in rows. Cascade: stacked diagonally, each title bar visible.', ['enum', ['grid', 'cascade'], { grid: 'Grid', cascade: 'Cascade' }]],
-  ['arrangePerRow', 'Windows per row', 'When a column of rows fills the screen, the next one starts beside it.', ['int', 1, 12, '']],
-  ['arrangeWidth', 'Window width', '', ['int', 160, 1920, 'px']],
-  ['arrangeHeight', 'Window height', '', ['int', 120, 1440, 'px']],
+  ['arrangeLayout', 'Layout', 'Auto: every window on screen, as large as fits, re-fitted as accounts come and go. Grid: your size and windows per row. Cascade: stacked diagonally.', ['enum', ['auto', 'grid', 'cascade'], { auto: 'Auto (fit screen)', grid: 'Grid', cascade: 'Cascade' }]],
+  ['arrangePerRow', 'Windows per row', 'When a column of rows fills the screen, the next one starts beside it.', ['int', 1, 12, ''], (st) => st.arrangeLayout === 'grid'],
+  ['arrangeWidth', 'Window width', '', ['int', 160, 1920, 'px'], (st) => st.arrangeLayout !== 'auto'],
+  ['arrangeHeight', 'Window height', '', ['int', 120, 1440, 'px'], (st) => st.arrangeLayout !== 'auto'],
   ['arrangeGap', 'Gap', 'Space between windows.', ['int', 0, 40, 'px']],
   ['arrangeCorner', 'Start corner', 'Where the first window goes.', ['enum', ['top-left', 'top-right', 'bottom-left', 'bottom-right'], { 'top-left': 'Top left', 'top-right': 'Top right', 'bottom-left': 'Bottom left', 'bottom-right': 'Bottom right' }]],
   ['arrangeMonitor', 'Screen', 'Which monitor the clients go to.', ['monitor']],
@@ -1244,7 +1244,7 @@ const LAYOUT_FIELDS = [
 ];
 function renderFields(box, fields, v) {
   if (box.contains(document.activeElement)) return; // Do not redraw under the cursor.
-  box.replaceChildren(...fields.map(([key, name, hint, rule]) => {
+  box.replaceChildren(...fields.filter((f) => !f[4] || f[4](v.settings)).map(([key, name, hint, rule]) => {
     const value = key === 'provider' ? v.provider : v.settings[key];
     let ctl;
     const save = (val) => key === 'provider'
@@ -1277,7 +1277,7 @@ function renderFarmSettings(v) {
   renderFields($('layoutSettings'), LAYOUT_FIELDS, v);
   const st = v.settings;
   $('sumFarm').textContent = `${st.launchDelaySec}s apart · relaunch after ${st.relaunchDelaySec}s`;
-  $('sumLayout').textContent = !st.arrangeWindows ? 'Off' : st.arrangeLayout === 'cascade' ? `Cascade · ${st.arrangeWidth}×${st.arrangeHeight}` : `${st.arrangePerRow} per row · ${st.arrangeWidth}×${st.arrangeHeight}`;
+  $('sumLayout').textContent = !st.arrangeWindows ? 'Off' : st.arrangeLayout === 'auto' ? 'Auto · fit screen' : st.arrangeLayout === 'cascade' ? `Cascade · ${st.arrangeWidth}×${st.arrangeHeight}` : `${st.arrangePerRow} per row · ${st.arrangeWidth}×${st.arrangeHeight}`;
   const servers = v.privateServers || [];
   $('sumServers').textContent = st.privateServerMode === 'none' ? (servers.length ? `Off · ${servers.length} saved` : 'Off') : st.privateServerMode === 'shared' ? 'One for all' : 'Per account';
   const place = $('placeInput');
@@ -1287,12 +1287,18 @@ function renderFarmSettings(v) {
 }
 // Mirrors Get-ArkuzoWindowSlots in the engine, on the screen this window is on.
 function layoutSlots(count, st, W, H) {
-  const w = st.arrangeWidth, h = st.arrangeHeight, gap = st.arrangeGap, right = st.arrangeCorner.endsWith('right'), bottom = st.arrangeCorner.startsWith('bottom'), out = [];
+  let w = st.arrangeWidth, h = st.arrangeHeight, perRow = st.arrangePerRow;
+  const gap = st.arrangeGap, right = st.arrangeCorner.endsWith('right'), bottom = st.arrangeCorner.startsWith('bottom'), out = [];
+  if (st.arrangeLayout === 'auto' && count > 0) {
+    const aspect = st.arrangeWidth / st.arrangeHeight; let best = 0;
+    for (let cols = 1; cols <= count; cols++) { const rows = Math.ceil(count / cols), fit = Math.min((W - gap * (cols - 1)) / cols, ((H - gap * (rows - 1)) / rows) * aspect); if (fit > best) { best = fit; perRow = cols; } }
+    w = Math.floor(Math.max(best, 160)); h = Math.floor(Math.max(w / aspect, 120));
+  }
   for (let i = 0; i < count; i++) {
     let dx, dy;
     if (st.arrangeLayout === 'cascade') { const step = 32, fit = Math.max(1, Math.floor(Math.min(W - w, H - h) / step) + 1); dx = dy = (i % fit) * step; }
-    else { const rows = Math.max(1, Math.floor((H + gap) / (h + gap))), per = st.arrangePerRow * rows, block = Math.floor(i / per), within = i % per;
-      dx = (block * st.arrangePerRow + within % st.arrangePerRow) * (w + gap); dy = Math.floor(within / st.arrangePerRow) * (h + gap); }
+    else { const rows = Math.max(1, Math.floor((H + gap) / (h + gap))), per = perRow * rows, block = Math.floor(i / per), within = i % per;
+      dx = (block * perRow + within % perRow) * (w + gap); dy = Math.floor(within / perRow) * (h + gap); }
     out.push([right ? W - dx - w : dx, bottom ? H - dy - h : dy, w, h]);
   }
   return out;
@@ -1302,7 +1308,7 @@ function renderLayoutPreview(v) {
   const [SW, SH, W, H] = v.screen || [1920, 1080, 1920, 1040];
   box.style.aspectRatio = `${W} / ${H}`;
   const accounts = (v.accounts || []).slice().sort((a, b) => acctName(a).toLowerCase().localeCompare(acctName(b).toLowerCase()));
-  const shown = st.arrangeOrder === 'fixed' ? accounts : accounts.filter((a) => (a.live || {}).processId || (a.autoRelaunch && a.cookieStatus !== 'dead'));
+  const shown = accounts.filter((a) => (a.live || {}).processId || (st.autoRelaunchEnabled && a.autoRelaunch && a.cookieStatus === 'alive'));
   const list = shown.length ? shown : [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }];
   const slots = layoutSlots(list.length, st, W, H);
   const off = slots.filter(([x, y, w, h]) => x + w > W + 1 || y + h > H + 1 || x < -1 || y < -1).length;

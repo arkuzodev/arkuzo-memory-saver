@@ -369,7 +369,7 @@ VAULT_SETTINGS = {
     'cookieCheckMinutes': (('int', 0, 1440), 60),
     # Window layout of Arkuzo-launched clients (the engine arranges them).
     'arrangeWindows': (('bool',), True),
-    'arrangeLayout': (('enum', ('grid', 'cascade')), 'grid'),
+    'arrangeLayout': (('enum', ('auto', 'grid', 'cascade')), 'auto'),
     'arrangePerRow': (('int', 1, 12), 2),
     'arrangeWidth': (('int', 160, 1920), 320),
     'arrangeHeight': (('int', 120, 1440), 240),

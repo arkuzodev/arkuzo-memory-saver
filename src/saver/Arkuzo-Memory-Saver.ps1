@@ -1838,7 +1838,8 @@ function Get-ArkuzoControlledAccount([string]$TrackerId, [int]$ClientId) {
 function Test-ArkuzoSuspensionInScope($Entry) {
     # Entries without a provider were made by Volt (before Arkuzo accounts existed).
     $owner = if ($null -ne $Entry -and $Entry.provider) { [string]$Entry.provider } else { 'volt' }
-    return ($owner -ceq [string]$script:accountProvider)
+    $current = if ($script:accountProvider) { [string]$script:accountProvider } else { 'volt' }
+    return ($owner -ceq $current)
 }
 function Test-ArkuzoSuspendedRowsSafe {
     # A suspended (dead-cookie) account must still be an exact idle row.

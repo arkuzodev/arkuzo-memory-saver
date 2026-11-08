@@ -1014,12 +1014,60 @@ class _Windows:
         self.u.EnumWindows(self.proc_type(visit), 0)
         return found
 
+    def bring_front(self, pid: int) -> bool:
+        """Raise the process's window over the Control Center. Windows only lets the foreground
+        thread hand focus on, so borrow its input queue for the moment of the switch."""
+        if not self.u:
+            return False
+        # The real browser window carries the page title; Edge briefly shows an "Untitled" one first.
+        wins = [h for h, t in self.windows(pid) if t and not t.startswith('Untitled')]
+        if not wins:
+            return False
+        hwnd = wins[0]
+        k = ctypes.WinDLL('kernel32')
+        u = self.u
+        u.GetForegroundWindow.restype = wintypes.HWND
+        u.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+        u.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        u.SetForegroundWindow.argtypes = [wintypes.HWND]
+        u.BringWindowToTop.argtypes = [wintypes.HWND]
+        foreground = u.GetForegroundWindow()
+        mine = k.GetCurrentThreadId()
+        theirs = u.GetWindowThreadProcessId(foreground, None) if foreground else 0
+        attached = bool(theirs and theirs != mine and u.AttachThreadInput(mine, theirs, True))
+        try:
+            u.ShowWindow(hwnd, 9)  # SW_RESTORE
+            u.BringWindowToTop(hwnd)
+            if not u.SetForegroundWindow(hwnd):
+                # Windows grants focus after a key event; a lone Alt press/release is the usual way.
+                u.keybd_event(0x12, 0, 0, 0)
+                u.keybd_event(0x12, 0, 2, 0)
+                u.SetForegroundWindow(hwnd)
+        finally:
+            if attached:
+                u.AttachThreadInput(mine, theirs, False)
+        return self.focused(pid)
+
+    def focused(self, pid: int) -> bool:
+        if not self.u:
+            return False
+        self.u.GetForegroundWindow.restype = wintypes.HWND
+        owner = wintypes.DWORD()
+        self.u.GetWindowThreadProcessId(self.u.GetForegroundWindow(), ctypes.byref(owner))
+        return owner.value == pid
+
     def close(self, pid: int):
         for hwnd, _ in self.windows(pid):
             self.u.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE: Edge saves the profile (cookies included) as it exits.
 
 
 WINDOWS = _Windows()
+
+
+# Edge signs a new profile in with the Windows Microsoft account and then announces
+# it is syncing; turn that off for the throwaway profile only (user-level switches,
+# invisible to websites, unlike automation flags).
+EDGE_QUIET = '--disable-features=msImplicitSignin,msEdgeFirstSyncOnFirstRun,msEdgeSyncConsent'
 
 
 class BrowserLogin:
@@ -1078,14 +1126,15 @@ class BrowserLogin:
         port_file = profile / 'DevToolsActivePort'
         port_file.unlink(missing_ok=True)
         reader = subprocess.Popen([str(self.browser), f'--user-data-dir={profile}', '--remote-debugging-port=0', '--no-first-run',
-                                   '--no-default-browser-check', *self.reader_args, 'about:blank'])
+                                   '--no-default-browser-check', EDGE_QUIET, '--disable-extensions', '--disable-component-update',
+                                   '--disable-background-networking', '--disable-gpu', *self.reader_args, 'about:blank'])
         socket = None
         try:
             deadline = time.time() + 30
             while not port_file.exists():
                 if time.time() > deadline or reader.poll() is not None:
                     raise VaultError('Edge could not reopen the sign-in profile')
-                time.sleep(0.2)
+                time.sleep(0.05)
             port = int(port_file.read_text(encoding='ascii').split()[0])
             info = json.loads(urllib.request.urlopen(f'http://127.0.0.1:{port}/json/version', timeout=5).read())
             socket = _WebSocket(info['webSocketDebuggerUrl'])
@@ -1109,7 +1158,8 @@ class BrowserLogin:
             self.profile.mkdir()
             # A plain Edge window: only its own profile and the Roblox sign-in page.
             self.proc = subprocess.Popen([str(self.browser), f'--user-data-dir={self.profile}', '--no-first-run', '--no-default-browser-check',
-                                          '--window-size=520,820', *self.extra_args, 'https://www.roblox.com/login'])
+                                          EDGE_QUIET, '--window-size=520,820', *self.extra_args, 'https://www.roblox.com/login'])
+            opened = time.time()
             self._set('waiting', 'Sign in to Roblox in the Edge window. It closes by itself on your Roblox home page, or close it when you are signed in.')
             deadline = time.time() + self.TIMEOUT_SEC
             signed_in = False
@@ -1120,13 +1170,17 @@ class BrowserLogin:
                         self.proc.kill()
                     return self._set('cancelled' if self.cancelled.is_set() else 'failed',
                                      'Sign-in cancelled' if self.cancelled.is_set() else 'Sign-in timed out after 15 minutes')
+                # Started from the Control Center's window, Edge opens behind it: bring it forward
+                # while it settles (it swaps its first window for the real one), then leave focus alone.
+                if time.time() - opened < 10 and not WINDOWS.focused(self.proc.pid):
+                    WINDOWS.bring_front(self.proc.pid)
                 if not signed_in and any(signed_in_title(t) for _, t in WINDOWS.windows(self.proc.pid)):
                     signed_in = True
-                    time.sleep(2)  # Let Roblox finish setting its cookies.
+                    self._set('reading', 'Signed in: reading it from Edge')
+                    time.sleep(0.6)  # Roblox sets its cookies before it opens the home page; a moment for the last ones.
                     WINDOWS.close(self.proc.pid)
-                time.sleep(0.7)
+                time.sleep(0.25)
             self._set('reading', 'Reading the sign-in from Edge')
-            time.sleep(1)  # Edge releases the profile just after its window process exits.
             cookie = self.read_cookie(self.profile)
             if not cookie:
                 return self._set('failed', 'No Roblox sign-in found: sign in completely before closing the window')

@@ -2378,24 +2378,65 @@ function Test-ArkuzoLaunchPacing([datetime]$NowUtc) {
 # ---------------------------------------------------------------------------
 $script:remoteProbe = $null; $script:remoteProbeSec = $null; $script:lastRemoteDisconnectSec = $null
 $script:remoteHoldSinceSec = $null; $script:keepAwakeOn = $false; $script:keepAwakeFailed = $false
+$script:crdBookmark = $null; $script:crdLast = $null; $script:crdServiceCheckSec = $null; $script:crdInstalled = $false
+function Read-ArkuzoChromotingEvent([double]$NowSec) {
+    # Newest Chrome Remote Desktop connect (1) or disconnect (2) as @{ id; utc }, or $null.
+    # A filtered search of the Application log costs up to ~150 ms when the host
+    # has logged nothing lately, so it runs once; afterwards only the records
+    # written since are read, from a bookmark (~0 ms). Only provider, id and time
+    # are read: the message names the viewer's account and is never touched.
+    if ($null -eq $script:crdServiceCheckSec -or ($NowSec - [double]$script:crdServiceCheckSec) -ge 600) {
+        $script:crdServiceCheckSec = $NowSec
+        $script:crdInstalled = ($null -ne (Get-Service -Name 'chromoting' -ErrorAction SilentlyContinue))
+        if (-not $script:crdInstalled) { $script:crdBookmark = $null; $script:crdLast = $null }
+    }
+    if (-not $script:crdInstalled) { return $null }
+    $logName = [Diagnostics.Eventing.Reader.PathType]::LogName
+    try {
+        if ($null -eq $script:crdBookmark) {
+            # Bookmark first: an event written meanwhile is read again next time, never missed.
+            $newest = New-Object Diagnostics.Eventing.Reader.EventLogQuery('Application', $logName, '*'); $newest.ReverseDirection = $true
+            $reader = New-Object Diagnostics.Eventing.Reader.EventLogReader($newest)
+            try { $top = $reader.ReadEvent() } finally { $reader.Dispose() }
+            if ($null -ne $top) { try { $script:crdBookmark = $top.Bookmark } finally { $top.Dispose() } }
+            $query = New-Object Diagnostics.Eventing.Reader.EventLogQuery('Application', $logName, "*[System[Provider[@Name='chromoting'] and (EventID=1 or EventID=2)]]")
+            $query.ReverseDirection = $true
+            $reader = New-Object Diagnostics.Eventing.Reader.EventLogReader($query)
+            try { $record = $reader.ReadEvent() } finally { $reader.Dispose() }
+            if ($null -ne $record) { try { $script:crdLast = @{ id = [int]$record.Id; utc = ([datetime]$record.TimeCreated).ToUniversalTime() } } finally { $record.Dispose() } }
+        } else {
+            $all = New-Object Diagnostics.Eventing.Reader.EventLogQuery('Application', $logName, '*')
+            $reader = New-Object Diagnostics.Eventing.Reader.EventLogReader($all, $script:crdBookmark)
+            try {
+                for ($i = 0; $i -lt 5000; $i++) {
+                    $record = $reader.ReadEvent()
+                    if ($null -eq $record) { break }
+                    try {
+                        $script:crdBookmark = $record.Bookmark
+                        if ($record.ProviderName -ceq 'chromoting' -and ($record.Id -eq 1 -or $record.Id -eq 2)) {
+                            $script:crdLast = @{ id = [int]$record.Id; utc = ([datetime]$record.TimeCreated).ToUniversalTime() }
+                        }
+                    } finally { $record.Dispose() }
+                }
+            } finally { $reader.Dispose() }
+        }
+    } catch { $script:crdBookmark = $null } # Log cleared or unreadable: search again next time.
+    return $script:crdLast
+}
 function Get-ArkuzoRemoteProbe {
     $n = [Arkuzo.RemoteSessionNativeV1]
     $session = $n::OwnSessionId()
-    $probe = @{ sessionId = $session; consoleSessionId = $n::ConsoleSessionId(); connectState = $n::ConnectState($session); protocol = $n::ClientProtocol($session)
+    $crd = Read-ArkuzoChromotingEvent $(if ($null -ne $clock) { [double]$clock.Elapsed.TotalSeconds } else { 0 })
+    return @{ sessionId = $session; consoleSessionId = $n::ConsoleSessionId(); connectState = $n::ConnectState($session); protocol = $n::ClientProtocol($session)
         lockState = $n::LockState($session); inputDesktop = $n::InputDesktopName(); display = ($n::DisplayMode() -join 'x'); monitors = $n::MonitorCount()
-        crdEventId = $null; crdEventUtc = $null }
-    try {
-        # Newest connect/disconnect only; the message (it names the viewer's account) is never read.
-        $query = New-Object Diagnostics.Eventing.Reader.EventLogQuery('Application', [Diagnostics.Eventing.Reader.PathType]::LogName,
-            "*[System[Provider[@Name='chromoting'] and (EventID=1 or EventID=2)]]")
-        $query.ReverseDirection = $true
-        $reader = New-Object Diagnostics.Eventing.Reader.EventLogReader($query)
-        try { $record = $reader.ReadEvent() } finally { $reader.Dispose() }
-        if ($null -ne $record) {
-            try { $probe.crdEventId = [int]$record.Id; $probe.crdEventUtc = ([datetime]$record.TimeCreated).ToUniversalTime() } finally { $record.Dispose() }
-        }
-    } catch { } # Chrome Remote Desktop not installed, or the log is unreadable.
-    return $probe
+        crdEventId = $(if ($null -ne $crd) { $crd.id } else { $null }); crdEventUtc = $(if ($null -ne $crd) { $crd.utc } else { $null })
+        bootUtc = [datetime]::UtcNow.AddMilliseconds(-[double]$n::UptimeMs()) }
+}
+function Test-ArkuzoCrdConnected($Probe) {
+    # Pure. A connect logged before the last boot is stale: a restart while
+    # connected leaves no disconnect event behind.
+    if ($null -eq $Probe -or $null -eq $Probe.crdEventId -or [int]$Probe.crdEventId -ne 1) { return $false }
+    return ($null -eq $Probe.bootUtc -or $null -eq $Probe.crdEventUtc -or [datetime]$Probe.crdEventUtc -gt [datetime]$Probe.bootUtc)
 }
 function ConvertTo-ArkuzoRemoteRecord($Probe) {
     if ($null -eq $Probe) { return $null }
@@ -2407,7 +2448,7 @@ function ConvertTo-ArkuzoRemoteRecord($Probe) {
         locked = $(switch ([int]$Probe.lockState) { 0 { $true } 1 { $false } default { $null } })
         inputDesktop = $Probe.inputDesktop; display = $Probe.display; monitors = $Probe.monitors
         chromeRemoteDesktop = $(if ($null -eq $Probe.crdEventId) { $null } else {
-            @{ connected = ([int]$Probe.crdEventId -eq 1); changedUtc = $(if ($Probe.crdEventUtc) { ([datetime]$Probe.crdEventUtc).ToString('o') } else { $null }) } }) }
+            @{ connected = (Test-ArkuzoCrdConnected $Probe); changedUtc = $(if ($Probe.crdEventUtc) { ([datetime]$Probe.crdEventUtc).ToString('o') } else { $null }) } }) }
 }
 function Compare-ArkuzoRemoteProbe($Previous, $Current) {
     # Pure. What changed between two probes, as stable codes for the log.
@@ -4078,6 +4119,8 @@ namespace Arkuzo {
    try { if (bytes < 20) return -1; return Marshal.ReadInt32(buffer, 16); } finally { WTSFreeMemory(buffer); }
   }
   public static int MonitorCount() { return GetSystemMetrics(80); }
+  [DllImport("kernel32.dll")] static extern ulong GetTickCount64();
+  public static long UptimeMs() { return (long)GetTickCount64(); }
   // "Default" while the user's desktop takes input; "Winlogon" on the lock or sign-in screen; "" when it cannot be opened.
   public static string InputDesktopName() {
    IntPtr desktop = OpenInputDesktop(0, false, 0x0001);

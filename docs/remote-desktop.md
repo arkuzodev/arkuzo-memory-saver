@@ -4,7 +4,7 @@ Closing a Chrome Remote Desktop session while clients run freezes every Roblox c
 
 ## What to do
 
-- **Chrome Remote Desktop: minimise it, don't disconnect.** Leave the session connected and minimise the tab or window. No client froze while a session was connected. If you do disconnect, the saver restarts the clients one at a time straight away (see below), which costs each account about 2-3 minutes.
+- **Chrome Remote Desktop: minimise it, don't disconnect.** Leave the session connected and minimise the tab or window. No client froze while a session was connected (the longest such stretch in the logs was about 5 minutes). If you do disconnect, the saver restarts the clients one at a time straight away (see below), which costs each account about 2-3 minutes.
 - **Remote Desktop (RDP): use "Leave Remote Desktop safely"** (Control Center, Settings, Remote desktop). It runs `tscon <your session> /dest:console`, which moves your session to the PC's own screen and closes the RDP window without disconnecting the session, so the clients keep drawing. It needs administrator rights; without them the Control Center shows the command to run in an administrator Command Prompt. Afterwards the PC is signed in and **unlocked on its monitor** until you lock it there.
 - **Parsec, AnyDesk, TeamViewer, RustDesk** show the console session like Chrome Remote Desktop does. The saver doesn't recognise their disconnects yet. If one freezes the farm, the normal farm-freeze fast path still recovers it (35 s confirmation instead of 20 s).
 
@@ -30,7 +30,7 @@ All logs on the farm PC from 21 Oct to 8 Nov: the saver's `data/Arkuzo-Logs`, th
 - **12 of the 14 disconnects with clients running froze them, 70 clients in all.** The other two had one client each: on 21 Oct 00:23 it stalled and answered again 20 s later, on 21 Oct 10:08 it froze 63 s after the disconnect.
 - **None of the 53 frozen clients with a complete log ever answered again.** All of them sat at 0-2% CPU and quit 191-262 s later.
 - **Connecting never froze anything.** The rows for connects in the raw correlation only show hangs because the session was closed again within 90 s.
-- **No connected period froze the farm,** however long it lasted.
+- **No connected period froze the farm, but none lasted long.** The longest connected stretch with clients running was about 5 minutes (8 Nov 16:15-16:19); the others lasted 13 s to 2 minutes. Staying connected for hours is the obvious next test (below).
 - **The 3-minute exit is Roblox's own watchdog.** The client logs stop at the disconnect, apart from a "Websocket closed" line from another thread 30 s later. Each ends with Roblox's crash-report line "Terminated due it was hanging past timeout" about 200 s later (exit code 0).
 - **The 0-13 s spread is measurement, not the freeze itself.** The saver sees a hang once Windows has marked the window as not responding (5 s) and checks the clients one after another.
 
@@ -44,11 +44,23 @@ What changes at that moment is still open:
 - **Display mode:** a resolution change leaves no event either. The PC has one monitor (1920×1080 at 144 Hz, HDMI) and a Meta Quest virtual display adapter that fails to load at every boot. The Roblox logs record a swap-chain resize at startup but none at the disconnect.
 - **Volt:** every logged freeze happened with Volt injected into every client, so the logs can't separate Roblox from Volt. The saver itself, the Control Center and other windows kept running through every disconnect, so the freeze is specific to the clients.
 
+**Not only remote desktop.** Two of the four farm-wide freezes in [farm-freeze recovery](farm-freeze-recovery.md) came with no Chrome Remote Desktop event nearby. Each one had a system device or display service change a few seconds before it:
+
+- **26 Oct 13:19:** Meta's Oculus services (`OVRLibraryService`, `OVRServiceLauncher`) started at 13:18:56-13:19:13. Seven clients were seen frozen at 13:19:09-11, so they froze about 5 s earlier. Those services own the Meta Virtual Monitor display adapter on this PC.
+- **27 Oct 07:38:** Windows Update installed Gaming Services and GameInput at 07:38:41-59. Its virtual device `SWD\XvddEnum\XvddRootDevice` was surprise-removed at 07:38:52. Six clients were seen frozen at 07:38:50-59.
+
+All of these are a system-wide device or display change that every client on the desktop hears about at once. That fits a client deadlocking while it handles such a broadcast, with Roblox or Volt. It is a hypothesis, not a finding. The fast path recovers these freezes too, with the normal 35 s confirmation.
+
 To answer this, the saver now logs a `REMOTE_SESSION_CHANGED` event whenever anything below changes: the Chrome Remote Desktop state, this session's connect state and protocol, whether it is on the console, the lock state (`WTSSessionInfoEx`), the input desktop (`Default`, or `Winlogon` on the lock screen), the primary display mode, and the monitor count. The event also counts the clients running and answering at that moment. The next disconnect shows in the log which of these moved.
 
 ## What the saver does now
 
-**Recognises remote sessions.** About every 2 s it reads the newest connect or disconnect event of the Chrome Remote Desktop host (about 10 ms; the event text, which names the viewer's Google account, is never read or logged) and its own session's state through the WTS API. Its starting state is logged once as `REMOTE_SESSION_STATE`. All of this is read-only.
+**Recognises remote sessions.** About every 2 s it checks for new Chrome Remote Desktop connect or disconnect events, and reads its own session's state through the WTS API.
+- It reads only the provider, id and time of each event. The event text names the viewer's Google account and is never read or logged.
+- At start it searches the Application log once (13 ms here; up to 150 ms on this PC's 52,000-record log when nothing matches). After that it reads only the records written since, from a bookmark, in under 1 ms.
+- Without the Chrome Remote Desktop host service it reads nothing.
+- A "connected" event from before the last boot counts as stale, because a restart while connected logs no disconnect.
+- The starting state is logged once as `REMOTE_SESSION_STATE`. All of this is read-only.
 
 **Acts on a freeze right after a disconnect sooner.** A farm-wide freeze whose first client froze between 10 s before and `farm_freeze_remote_window_sec` (60 s) after a remote disconnect is confirmed after `farm_freeze_remote_confirm_sec` (20 s) instead of `farm_freeze_confirm_sec` (35 s). `FARM_FREEZE_DETECTED` then says `cause: remote-disconnect`. Every other gate of the [farm-freeze fast path](farm-freeze-recovery.md) is unchanged: exact account mapping, the journal entry before each close, the hourly budget, the 30 s quiet period after Volt's own launches, and one close every `farm_freeze_spacing_sec`. 20 s is safe here because none of the clients frozen by a disconnect came back (above). Generic correlated hangs, in contrast, sometimes cleared within 30 s ([farm-freeze recovery](farm-freeze-recovery.md#how-long-to-confirm)). With `config_lock` the floor is 15 s.
 
@@ -56,7 +68,7 @@ To answer this, the saver now logs a `REMOTE_SESSION_CHANGED` event whenever any
 
 **Holds recovery while an RDP session is disconnected.** While the saver's own session is disconnected (Windows state `WTSDisconnected`, i.e. RDP), clients can't draw and relaunched ones couldn't either. Hang recovery, the farm-freeze fast path and missing-account launches wait until the session reconnects or is moved to the console, for at most `remote_hold_max_sec` (10 min; 0 turns it off). Critical commit pressure still recycles. Volt's own relaunches are outside the saver's control. Chrome Remote Desktop never triggers the hold: its session stays connected, and its frozen clients never come back, so waiting would only cost time.
 
-**Keeps the display awake.** While clients run, the saver asks Windows to keep the display and the PC on (`SetThreadExecutionState` with `ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED`) and releases the request when no client is left or the saver stops. The power plan is not changed. On this PC display-off and sleep are already set to never on AC power, so this only guards against a later power-plan change or a laptop on battery. It doesn't stop a screen saver, and it doesn't lock or unlock anything. Turn it off with `keep_display_awake`.
+**Keeps the display awake.** While clients run, the saver asks Windows to keep the display and the PC on (`SetThreadExecutionState` with `ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED`) and releases the request when no client is left or the saver stops. The power plan is not changed. `powercfg /requests` lists the saver under DISPLAY and SYSTEM while the request is held (checked on the farm PC). On this PC display-off and sleep are already set to never on AC power, so this only guards against a later power-plan change or a laptop on battery. It doesn't stop a screen saver, and it doesn't lock or unlock anything. Turn it off with `keep_display_awake`.
 
 **Tells you in the Control Center.** The Overview shows a notice while Chrome Remote Desktop is connected with clients running ("minimise it, do not disconnect"), while you're on RDP ("Leave Remote Desktop safely"), and while an RDP hold is active. Settings has a Remote desktop card with the current state (session, lock, display mode, keep-awake, hold) and the RDP button. Disconnects and the other changes appear in the activity feed.
 

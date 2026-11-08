@@ -158,8 +158,31 @@ $script:remoteProbe = Probe 4 2 -Session 3 -Console 1; $script:remoteHoldSinceSe
 $status = Get-ArkuzoRemoteStatus
 Assert ($status.protocol -ceq 'rdp' -and $status.sessionState -ceq 'disconnected' -and -not $status.onConsole -and $status.hold -and $status.holdLeftSec -eq 500 -and $null -eq $status.chromeRemoteDesktop) 'status: disconnected RDP session with time left on the hold'
 
+# A connect logged before the last boot is stale (a restart while connected logs no disconnect).
+$boot = [datetime]'2026-11-08T14:19:00Z'
+$stale = Probe 0 0 1 $boot.AddHours(-3); $stale.bootUtc = $boot
+$fresh = Probe 0 0 1 $boot.AddMinutes(5); $fresh.bootUtc = $boot
+Assert (-not (Test-ArkuzoCrdConnected $stale) -and (Test-ArkuzoCrdConnected $fresh)) 'only a connect since boot counts as connected'
+$script:remoteProbe = $stale
+Assert (-not (Get-ArkuzoRemoteStatus).chromeRemoteDesktop.connected) 'so a stale connect raises no notice'
+
+# ---- Chrome Remote Desktop events: one search, then only new records ---------------------------
+$script:crdServiceCheckSec = $null; $script:crdBookmark = $null; $script:crdLast = $null
+$a = Read-ArkuzoChromotingEvent 0
+$sw = [Diagnostics.Stopwatch]::StartNew(); $b = Read-ArkuzoChromotingEvent 2; $sw.Stop()
+Assert (($null -eq $a -and $null -eq $b) -or ($a.id -eq $b.id -and $a.utc -eq $b.utc)) 'the incremental read keeps the newest connect/disconnect'
+if ($script:crdInstalled) {
+    Assert ($null -ne $script:crdBookmark -and $sw.ElapsedMilliseconds -lt 100) ("later reads only cover new records ($($sw.ElapsedMilliseconds) ms)")
+}
+function Get-Service { $null }
+$script:crdServiceCheckSec = $null
+Assert ($null -eq (Read-ArkuzoChromotingEvent 3) -and $null -eq $script:crdBookmark) 'without the Chrome Remote Desktop host nothing is read'
+Remove-Item function:Get-Service
+
 # ---- Live, read-only probes on this machine -----------------------------------------------------
+$script:crdServiceCheckSec = $null; $script:crdBookmark = $null; $script:crdLast = $null
 $live = Get-ArkuzoRemoteProbe
+Assert ($live.bootUtc -is [datetime] -and $live.bootUtc -lt [datetime]::UtcNow) 'boot time comes from the uptime counter'
 Assert ([int]$live.sessionId -ge 0 -and $live.display -match '^\d+x\d+x\d+x\d+$' -and [int]$live.monitors -ge 0) 'probe reads session and display'
 Assert ($null -eq $live.crdEventId -or [int]$live.crdEventId -in 1, 2) 'Chrome Remote Desktop state comes from its own events, if installed'
 $json = (ConvertTo-ArkuzoRemoteRecord $live) | ConvertTo-Json -Depth 4 -Compress

@@ -1,6 +1,6 @@
 # Farm-wide freeze recovery
 
-A display change (a Chrome Remote Desktop disconnect, a driver reload) can freeze every Roblox client on the host at the same moment. This page records what the saver logs show about those freezes, what Volt needs to relaunch a farm cleanly, how the saver now handles them, and the downtime measured before and after. Settings are in [configuration](configuration.md#health-recovery-candidate-policy) (`health.farm_freeze_*`).
+A display change (a Chrome Remote Desktop disconnect, a driver reload) can freeze every Roblox client on the host at the same moment. This page records what the saver logs show about those freezes, what Volt needs to relaunch a farm cleanly, how the saver now handles them, and the downtime measured before and after. Settings are in [configuration](configuration.md#health-recovery-candidate-policy) (`health.farm_freeze_*`). Freezes caused by a remote-desktop disconnect have their own page: [remote desktop disconnects](remote-desktop.md).
 
 ## What the logs show
 

@@ -54,7 +54,7 @@ Then choose a mode: *One server for all*, or *Per account* (pick the server in e
 
 | Setting | Default | Meaning |
 | :--- | :--- | :--- |
-| Who launches clients | Auto | *Arkuzo* uses these accounts, *Volt* uses Volt's account manager. *Auto* picks Arkuzo once you have added an account and Volt isn't running; while Volt runs, Volt keeps launching (so a running Volt farm is never left without recovery). |
+| Who launches clients | Auto | *Arkuzo* uses these accounts, *Volt* uses Volt's account manager. *Auto* picks Arkuzo once you have added an account, unless Volt is open with auto-relaunch on (then Volt is still the launcher, so a Volt farm is never left without recovery). Volt open only as your executor is fine. |
 | Launch spacing | 12 s | Minimum gap between two launches. |
 | Relaunch delay | 8 s | Wait after a client closed before launching it again. |
 | Launch timeout | 120 s | Time for a launched client to appear before the launch is retried. |

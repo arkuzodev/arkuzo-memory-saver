@@ -348,6 +348,71 @@ function Test-ArkuzoRecoveryBudget($AttemptTimes, [datetime]$NowUtc, [int]$Coold
         return $true
     } catch { return $false }
 }
+function Read-ArkuzoBoundedFile([string]$Path, [long]$Offset, [int]$MaxBytes, [int]$TimeoutMs = 2000) {
+    # Every read of a Roblox log goes through here. The log of a client that froze
+    # at a remote-desktop disconnect could not even be opened: CreateFile blocked
+    # until the client was gone, and the saver hung on it at every start
+    # (8 Nov 16:28-17:21). The open and read run on a worker thread; a read that
+    # outlasts TimeoutMs reports TimedOut, and until it finishes that file is
+    # skipped at once, so at most one worker per file can be stuck.
+    # Offset < 0 reads the last MaxBytes; a gap larger than MaxBytes is skipped.
+    if (-not ('Arkuzo.BoundedReadV1' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Text;
+using System.Threading.Tasks;
+namespace Arkuzo {
+ public sealed class BoundedReadResult { public bool Ok; public bool TimedOut; public long Length; public long Start; public int Count; public string Text = ""; }
+ public static class BoundedReadV1 {
+  static readonly object Gate = new object();
+  static readonly Dictionary<string, Task<BoundedReadResult>> Pending = new Dictionary<string, Task<BoundedReadResult>>(StringComparer.OrdinalIgnoreCase);
+  public static BoundedReadResult Read(string path, long offset, int maxBytes, int timeoutMs) {
+   Task<BoundedReadResult> task;
+   lock (Gate) {
+    if (Pending.TryGetValue(path, out task) && !task.IsCompleted) return new BoundedReadResult { TimedOut = true };
+    task = Task.Run(() => ReadNow(path, offset, maxBytes));
+    Pending[path] = task;
+   }
+   if (!task.Wait(timeoutMs)) return new BoundedReadResult { TimedOut = true };
+   lock (Gate) { Task<BoundedReadResult> current; if (Pending.TryGetValue(path, out current) && current == task) Pending.Remove(path); }
+   return task.Result;
+  }
+  public static int Stuck() { lock (Gate) { int n = 0; foreach (var t in Pending.Values) if (!t.IsCompleted) n++; return n; } }
+  static BoundedReadResult ReadNow(string path, long offset, int maxBytes) {
+   try {
+    if (!File.Exists(path)) return new BoundedReadResult();
+    using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)) {
+     long len = fs.Length;
+     long start = offset < 0 ? Math.Max(0L, len - maxBytes) : offset;
+     if (start > len) return new BoundedReadResult { Ok = true, Length = len, Start = start };
+     if (offset >= 0 && len - start > maxBytes) start = len - maxBytes;
+     int want = (int)Math.Min((long)maxBytes, len - start);
+     var buffer = new byte[want];
+     fs.Seek(start, SeekOrigin.Begin);
+     int got = 0;
+     while (got < want) { int n = fs.Read(buffer, got, want - got); if (n <= 0) break; got += n; }
+     return new BoundedReadResult { Ok = true, Length = len, Start = start, Count = got, Text = Encoding.UTF8.GetString(buffer, 0, got) };
+    }
+   } catch (Exception) { return new BoundedReadResult(); }
+  }
+ }
+}
+'@
+    }
+    $result = [Arkuzo.BoundedReadV1]::Read($Path, $Offset, $MaxBytes, $TimeoutMs)
+    if ($result.TimedOut) {
+        Warn-Throttled 'roblox-log-blocked' 'A Roblox log file did not open within 2 s (a frozen client can hold it); it is skipped until it opens again.'
+    }
+    return $result
+}
+function Read-ArkuzoLogHeadLines([string]$Path, [int]$Lines, [int]$MaxBytes = 262144) {
+    # The first $Lines lines of a log, read through Read-ArkuzoBoundedFile.
+    $r = Read-ArkuzoBoundedFile $Path 0 $MaxBytes
+    if (-not $r.Ok -or [string]::IsNullOrEmpty($r.Text)) { return @() }
+    return @($r.Text -split "`r?`n" | Select-Object -First $Lines)
+}
 function Find-RobloxProcessLog([int]$TargetProcessId, [string]$TrackerId = $null, [datetime]$StartTimeUtc = [datetime]::MinValue, [string]$LogsDir = $null) {
     try {
         if ($TrackerId -notmatch '\A[0-9]+\z' -or $StartTimeUtc -eq [datetime]::MinValue) { return $null }
@@ -362,7 +427,7 @@ function Find-RobloxProcessLog([int]$TargetProcessId, [string]$TrackerId = $null
                     if ($f.Name -notmatch '_(\d{8}T\d{6}Z)_Player_') { continue }
                     $fTime = [DateTime]::ParseExact($matches[1], 'yyyyMMdd\THHmmss\Z', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal).ToUniversalTime()
                     if ([Math]::Abs(($fTime - $StartTimeUtc.ToUniversalTime()).TotalSeconds) -gt 30) { continue }
-                    $lines = Get-Content -LiteralPath $f.FullName -TotalCount 100 -ErrorAction SilentlyContinue
+                    $lines = Read-ArkuzoLogHeadLines $f.FullName 100 131072
                     $content = $lines -join "`n"
                     if ($content -match "websiteBTId is\s*(\d+)" -or $content -match "BTID is overriden to\s*(\d+)") {
                         if ($matches[1] -eq $TrackerId) { return $f.FullName }
@@ -504,33 +569,16 @@ function Resolve-ArkuzoAccountName([int]$ProcessId, [string]$TrackerId = $null, 
     return 'Unknown account'
 }
 function Read-RobloxLogTail([string]$Path, [ref]$CurrentOffset) {
-    if (-not (Test-Path -LiteralPath $Path)) { return $null }
-    $fs = $null
-    try {
-        $fs = [IO.FileStream]::new($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
-        $len = $fs.Length
-        if ($len -le 0) { return $null }
-        if ($CurrentOffset.Value -le 0) {
-            # Initial read: inspect up to 64KB tail to catch recent disconnects without reading massive files
-            $start = [Math]::Max(0L, $len - 65536L)
-            $fs.Seek($start, [IO.SeekOrigin]::Begin) | Out-Null
-            $toRead = [int]($len - $start)
-            $buf = New-Object byte[] $toRead
-            $read = $fs.Read($buf, 0, $toRead)
-            $CurrentOffset.Value = $len
-            return [Text.Encoding]::UTF8.GetString($buf, 0, $read)
-        }
-        if ($len -lt $CurrentOffset.Value) { $CurrentOffset.Value = 0; return $null }
-        if ($len -eq $CurrentOffset.Value) { return $null }
-        if (($len - $CurrentOffset.Value) -gt 65536) { $CurrentOffset.Value = $len - 65536 }
-        $fs.Seek($CurrentOffset.Value, [IO.SeekOrigin]::Begin) | Out-Null
-        $toRead = [int]($len - $CurrentOffset.Value)
-        $buf = New-Object byte[] $toRead
-        $read = $fs.Read($buf, 0, $toRead)
-        $CurrentOffset.Value += $read
-        return [Text.Encoding]::UTF8.GetString($buf, 0, $read)
-    } catch { return $null }
-    finally { if ($null -ne $fs) { $fs.Dispose() } }
+    # New text since $CurrentOffset (the last 64 KB on the first read or after a
+    # larger gap). Bounded: a log that cannot be opened returns $null and keeps the offset.
+    $offset = [long]$CurrentOffset.Value
+    $r = Read-ArkuzoBoundedFile $Path $(if ($offset -le 0) { -1 } else { $offset }) 65536
+    if (-not $r.Ok -or $r.Length -le 0) { return $null }
+    if ($offset -le 0) { $CurrentOffset.Value = $r.Length; return $r.Text }
+    if ($r.Length -lt $offset) { $CurrentOffset.Value = 0; return $null }
+    if ($r.Count -le 0) { return $null }
+    $CurrentOffset.Value = $r.Start + $r.Count
+    return $r.Text
 }
 function Get-RobloxLogDisconnectReason([string]$NewText) {
     if ([string]::IsNullOrWhiteSpace($NewText)) { return $null }
@@ -965,18 +1013,25 @@ function Get-ArkuzoHealthPolicy($Config) {
     $defaults = @{ enabled = $false; private_limit_mb = 4096; hang_timeout_sec = 120; warmup_sec = 90; pressure_percent = 85; pressure_min_private_mb = 2048; cooldown_sec = 60; max_recycles_per_hour = 20; trim_spacing_sec = 2; startup_error_timeout_sec = 40; disconnect_timeout_sec = 5; private_limit_sustain_sec = 60
         # Farm-wide freeze fast path (see Get-ArkuzoFarmFreezeCandidate).
         farm_freeze_enabled = $true; farm_freeze_confirm_sec = 35; farm_freeze_min_clients = 3; farm_freeze_onset_window_sec = 15
-        farm_freeze_max_cpu_percent = 5; farm_freeze_spacing_sec = 20; farm_freeze_refreeze_sec = 900 }
+        farm_freeze_max_cpu_percent = 5; farm_freeze_spacing_sec = 20; farm_freeze_refreeze_sec = 900
+        # Remote sessions (see docs/remote-desktop.md): a freeze that starts within
+        # farm_freeze_remote_window_sec after a remote-desktop disconnect is confirmed
+        # after farm_freeze_remote_confirm_sec; a disconnected RDP session holds
+        # recovery and launches for at most remote_hold_max_sec.
+        farm_freeze_remote_confirm_sec = 20; farm_freeze_remote_window_sec = 60; remote_hold_max_sec = 600; keep_display_awake = $true }
     if ($null -ne $Config) {
         foreach ($key in @($defaults.Keys)) { if ($null -ne $Config.$key) { $defaults[$key] = $Config.$key } }
     }
     $ranges = @{ private_limit_mb = @(1024,16384); hang_timeout_sec = @(60,900); warmup_sec = @(60,900); pressure_percent = @(60,98); pressure_min_private_mb = @(1024,16384); cooldown_sec = @(30,300); max_recycles_per_hour = @(1,60); trim_spacing_sec = @(1,30); startup_error_timeout_sec = @(0,300); disconnect_timeout_sec = @(0,300); private_limit_sustain_sec = @(0,300)
-        farm_freeze_confirm_sec = @(20,120); farm_freeze_min_clients = @(3,50); farm_freeze_onset_window_sec = @(5,60); farm_freeze_max_cpu_percent = @(1,10); farm_freeze_spacing_sec = @(10,60); farm_freeze_refreeze_sec = @(0,86400) }
+        farm_freeze_confirm_sec = @(20,120); farm_freeze_min_clients = @(3,50); farm_freeze_onset_window_sec = @(5,60); farm_freeze_max_cpu_percent = @(1,10); farm_freeze_spacing_sec = @(10,60); farm_freeze_refreeze_sec = @(0,86400)
+        farm_freeze_remote_confirm_sec = @(10,120); farm_freeze_remote_window_sec = @(10,300); remote_hold_max_sec = @(0,3600) }
     foreach ($key in $ranges.Keys) {
         $value = [double]$defaults[$key]
         if ($value -lt $ranges[$key][0] -or $value -gt $ranges[$key][1] -or [double]::IsNaN($value) -or [double]::IsInfinity($value)) { throw "Invalid health setting: $key" }
     }
     if ($defaults.enabled -isnot [bool]) { throw 'health.enabled must be a JSON boolean' }
     if ($defaults.farm_freeze_enabled -isnot [bool]) { throw 'health.farm_freeze_enabled must be a JSON boolean' }
+    if ($defaults.keep_display_awake -isnot [bool]) { throw 'health.keep_display_awake must be a JSON boolean' }
     return $defaults
 }
 function Clear-VoltRecoveryCapability {
@@ -1310,7 +1365,7 @@ $script:nativeLaunches = @{}        # accountId -> launch [datetime] UTC, until 
 $script:nativeLastLaunchUtc = $null
 $script:nativeSingletons = @()
 $script:nativeVaultFailed = $false
-$script:nativeVoltConflict = @{ checkedUtc = [datetime]::MinValue; userIds = @() }
+$script:nativeVoltConflict = @{ checkedUtc = [datetime]::MinValue; userIds = @(); usernames = $null }
 $script:nativeVault = $null
 $script:NativeVaultMutexName = 'Local\ArkuzoAccountVault'
 $script:NativeVaultEntropy = [Text.Encoding]::ASCII.GetBytes('Arkuzo.AccountVault.v1')
@@ -1372,7 +1427,8 @@ function Get-ArkuzoVaultSetting($Vault, [string]$Name, $Default, [double]$Min = 
     if (-not [double]::IsNaN($Min)) {
         try { $n = [double]$value } catch { return $Default }
         if ($n -lt $Min -or $n -gt $Max) { return $Default }
-        return [int]$n
+        if ([math]::Abs($n) -le [int]::MaxValue) { return [int]$n }
+        return [long]$n # Millisecond timestamps (e.g. arrangeRequestedAtMs) don't fit an int.
     }
     return $value
 }
@@ -1381,6 +1437,13 @@ function Test-ArkuzoVoltManagerRunning {
     $managers = @(Get-Process -Name tauri-app -ErrorAction SilentlyContinue)
     try { return (@($managers | Where-Object { try { [string]::Equals($_.Path, $voltPath, [StringComparison]::OrdinalIgnoreCase) } catch { $false } }).Count -gt 0) }
     finally { foreach ($m in $managers) { $m.Dispose() } }
+}
+function Test-ArkuzoVoltRelaunching {
+    # Volt open as an executor is fine. Volt is the launcher only while it runs
+    # clients of its own with auto-relaunch on (a Volt farm).
+    if (@((Get-ArkuzoVoltRunningAccounts).usernames).Count -eq 0) { return $false }
+    $status = Get-ArkuzoVoltRecoveryStatus -Root $PSScriptRoot
+    return ($status.safeToRecycle -is [bool] -and $status.safeToRecycle)
 }
 function Resolve-ArkuzoAccountProvider {
     # auto: Arkuzo once the vault holds an account and Volt's manager is not
@@ -1393,8 +1456,8 @@ function Resolve-ArkuzoAccountProvider {
     if ($setting -ceq 'arkuzo') { $next = 'arkuzo' }
     elseif ($setting -cne 'volt') {
         try { $vault = Read-ArkuzoVaultFile; $hasAccounts = $null -ne $vault -and @($vault.accounts).Count -gt 0 } catch { }
-        if ($hasAccounts -and ((Test-ArkuzoNativeProvider) -or -not (Test-ArkuzoVoltManagerRunning))) { $next = 'arkuzo' }
-        elseif ($hasAccounts) { $script:accountProviderNotice = 'Volt is running, so Volt still launches clients. Close Volt (or set "Who launches clients" to Arkuzo) to farm with these accounts.' }
+        if ($hasAccounts -and ((Test-ArkuzoNativeProvider) -or -not (Test-ArkuzoVoltRelaunching))) { $next = 'arkuzo' }
+        elseif ($hasAccounts) { $script:accountProviderNotice = 'Volt is running its own clients with auto-relaunch on, so Volt still launches. Close Volt''s clients (Volt can stay open as your executor), or set "Who launches clients" to Arkuzo.' }
     }
     if ($next -ceq 'volt' -and -not $hasAccounts) { $script:accountProviderNotice = $null }
     if ($next -cne $script:accountProvider) {
@@ -1420,29 +1483,38 @@ function Enable-ArkuzoMultiInstance {
     }
 }
 
-function Get-ArkuzoVoltRelaunchConflict($Vault) {
-    # Two launchers on one account kick each other in a loop ("signed in
-    # elsewhere"). While Volt runs with auto-relaunch on for an account that is
-    # also in the vault, Arkuzo launches nothing for that account.
+function Get-ArkuzoVoltRunningAccounts {
+    # Accounts Volt is running a client for right now: live clients whose browser
+    # tracker id is one of Volt's. Volt relaunches only clients it started itself,
+    # so these are the only accounts where Volt and Arkuzo could both launch (and
+    # kick each other, "signed in elsewhere"). Returns @{ userIds; usernames }.
     $utc = [datetime]::UtcNow
-    if (($utc - $script:nativeVoltConflict.checkedUtc).TotalSeconds -lt 30) { return $script:nativeVoltConflict.userIds }
-    $ids = @()
+    if (($utc - $script:nativeVoltConflict.checkedUtc).TotalSeconds -lt 10 -and $null -ne $script:nativeVoltConflict.usernames) { return $script:nativeVoltConflict }
+    $result = @{ checkedUtc = $utc; userIds = @(); usernames = @() }
     try {
-        $managers = @(Get-Process -Name tauri-app -ErrorAction SilentlyContinue)
-        $running = @($managers | Where-Object { try { [string]::Equals($_.Path, $voltPath, [StringComparison]::OrdinalIgnoreCase) } catch { $false } }).Count -gt 0
-        foreach ($m in $managers) { $m.Dispose() }
-        if ($running) {
-            $status = Get-ArkuzoVoltRecoveryStatus -Root $PSScriptRoot
-            if ($status.safeToRecycle -is [bool] -and $status.safeToRecycle) {
-                $map = Invoke-ArkuzoVoltProbe '--map'
-                $voltUsers = @()
-                if ($null -ne $map -and $null -ne $map.byUserId) { $voltUsers = @($map.byUserId.PSObject.Properties.Name) }
-                $ids = @($Vault.accounts | Where-Object { $voltUsers -contains [string]$_.userId } | ForEach-Object { [string]$_.userId })
+        if (Test-ArkuzoVoltManagerRunning) {
+            $map = Invoke-ArkuzoVoltProbe '--map'
+            if ($null -ne $map -and $null -ne $map.byTracker) {
+                $names = @()
+                foreach ($c in @(Get-ArkuzoNativeClients)) {
+                    if ($c.trackerId -and $map.byTracker.PSObject.Properties.Name -contains [string]$c.trackerId) { $names += ([string]$map.byTracker.([string]$c.trackerId)).ToLowerInvariant() }
+                }
+                $result.usernames = @($names | Select-Object -Unique)
+                if ($null -ne $map.byUserId) {
+                    $result.userIds = @($map.byUserId.PSObject.Properties | Where-Object { $result.usernames -contains ([string]$_.Value).ToLowerInvariant() } | ForEach-Object { [string]$_.Name })
+                }
             }
         }
-    } catch { $ids = @() }
-    $script:nativeVoltConflict = @{ checkedUtc = $utc; userIds = $ids }
-    return $ids
+    } catch { }
+    $script:nativeVoltConflict = $result
+    return $result
+}
+function Get-ArkuzoVoltRelaunchConflict($Vault) {
+    # Arkuzo leaves an account alone while Volt is running a client for it.
+    $volt = Get-ArkuzoVoltRunningAccounts
+    $ids = @($volt.userIds)
+    $names = @($volt.usernames)
+    return @($Vault.accounts | Where-Object { $ids -contains [string]$_.userId -or $names -contains ([string]$_.username).ToLowerInvariant() } | ForEach-Object { [string]$_.userId })
 }
 function Invoke-ArkuzoVoltProbe([string]$Mode) {
     $child = $null
@@ -1509,7 +1581,7 @@ function Get-ArkuzoNativeStatus($Clients = $null) {
             processId = $(if ($live.Count -eq 1) { $live[0].processId } else { $null }); controlReady = [bool]$ready; rowReady = [bool]$ready
             launchRequestedAtMs = [long]$a.launchRequestedAtMs; closeRequestedAtMs = [long]$a.closeRequestedAtMs; voltConflict = [bool]$blocked }
     }
-    $script:accountProviderNotice = if ($conflicts.Count -gt 0) { 'Volt is running with auto-relaunch on for ' + $conflicts.Count + ' of these accounts. Turn off Volt''s auto-relaunch (or close Volt): two launchers on one account kick each other.' } else { $null }
+    $script:accountProviderNotice = if ($conflicts.Count -gt 0) { 'Volt is running ' + $conflicts.Count + ' of these accounts, so Arkuzo leaves them to Volt (two launchers on one account kick each other). Close those clients in Volt to hand them over.' } else { $null }
     return [pscustomobject]@{ available = $true; globalMappingSafe = [bool]$mappingSafe; processMappingSafe = [bool]$mappingSafe; unmappedAccountIds = @()
         managerId = $PID; managerStartTicks = $script:controllerStartTicks; relaunchDelayMs = ([int]$restorePolicy.relaunch_delay_sec * 1000)
         accounts = $accounts; farmRunning = [bool]$farmRunning; provider = 'arkuzo'; reason = 'Arkuzo account vault' }
@@ -1808,7 +1880,7 @@ function Get-ArkuzoArrangeSettings($Vault) {
     $enum = { param($name, $default, $allowed) $v = [string](Get-ArkuzoVaultSetting $Vault $name $default); if ($allowed -ccontains $v) { $v } else { $default } }
     return @{
         enabled    = ((Get-ArkuzoVaultSetting $Vault 'arrangeWindows' $true) -eq $true)
-        layout     = (& $enum 'arrangeLayout' 'grid' @('grid', 'cascade'))
+        layout     = (& $enum 'arrangeLayout' 'auto' @('auto', 'grid', 'cascade'))
         perRow     = [int](Get-ArkuzoVaultSetting $Vault 'arrangePerRow' 2 1 12)
         width      = [int](Get-ArkuzoVaultSetting $Vault 'arrangeWidth' 320 160 1920)
         height     = [int](Get-ArkuzoVaultSetting $Vault 'arrangeHeight' 240 120 1440)
@@ -1831,6 +1903,19 @@ function Get-ArkuzoWindowSlots([int]$Count, [int[]]$Area, $Settings) {
     $gap = [int][math]::Round($Settings.gap * $scale)
     $areaW = $Area[2] - $Area[0]; $areaH = $Area[3] - $Area[1]
     $right = $Settings.corner -like '*right'; $bottom = $Settings.corner -like 'bottom*'
+    $perRow = [int]$Settings.perRow
+    if ($Settings.layout -ceq 'auto' -and $Count -gt 0) {
+        # Auto: every window on screen, as large as possible, in the width:height shape set.
+        $aspect = [double]$Settings.width / [double]$Settings.height
+        $best = 0.0
+        for ($cols = 1; $cols -le $Count; $cols++) {
+            $rowsNeeded = [int][math]::Ceiling($Count / $cols)
+            $fitW = [math]::Min(($areaW - $gap * ($cols - 1)) / $cols, (($areaH - $gap * ($rowsNeeded - 1)) / $rowsNeeded) * $aspect)
+            if ($fitW -gt $best) { $best = $fitW; $perRow = $cols }
+        }
+        $minW = 160 * $scale; $minH = 120 * $scale
+        $w = [int][math]::Floor([math]::Max($best, $minW)); $h = [int][math]::Floor([math]::Max($w / $aspect, $minH))
+    }
     $slots = @()
     for ($i = 0; $i -lt $Count; $i++) {
         if ($Settings.layout -ceq 'cascade') {
@@ -1839,10 +1924,10 @@ function Get-ArkuzoWindowSlots([int]$Count, [int[]]$Area, $Settings) {
             $dx = ($i % $fit) * $step; $dy = ($i % $fit) * $step
         } else {
             $rows = [math]::Max(1, [int][math]::Floor(($areaH + $gap) / ($h + $gap)))
-            $perBlock = $Settings.perRow * $rows
+            $perBlock = $perRow * $rows
             $block = [int][math]::Floor($i / $perBlock); $within = $i % $perBlock
-            $dx = ($block * $Settings.perRow + ($within % $Settings.perRow)) * ($w + $gap)
-            $dy = [int][math]::Floor($within / $Settings.perRow) * ($h + $gap)
+            $dx = ($block * $perRow + ($within % $perRow)) * ($w + $gap)
+            $dy = [int][math]::Floor($within / $perRow) * ($h + $gap)
         }
         $x = if ($right) { $Area[2] - $dx - $w } else { $Area[0] + $dx }
         $y = if ($bottom) { $Area[3] - $dy - $h } else { $Area[1] + $dy }
@@ -1855,9 +1940,12 @@ function Get-ArkuzoArrangeTargets($Clients, $Accounts, $Settings) {
     # Clients: accountId, processId, startTicks. Returns accountId -> slot index.
     $ids = @{}
     if ($Settings.order -ceq 'fixed') {
-        # Every account keeps its own slot, so windows don't move when another account closes.
+        # Every account the farm keeps in game (or that is running) has its own slot,
+        # so windows don't move when another account closes or relaunches.
+        $running = @($Clients | ForEach-Object { [string]$_.accountId })
+        $farm = @($Accounts | Where-Object { $running -contains [string]$_.accountId -or ($_.autoRelaunch -eq $true -and $_.cookieAlive -eq $true) })
         $i = 0
-        foreach ($a in @($Accounts | Sort-Object { ([string]$_.displayName).ToLowerInvariant() }, { [string]$_.accountId })) { $ids[[string]$a.accountId] = $i; $i++ }
+        foreach ($a in @($farm | Sort-Object { ([string]$_.displayName).ToLowerInvariant() }, { [string]$_.accountId })) { $ids[[string]$a.accountId] = $i; $i++ }
         return $ids
     }
     $sorted = if ($Settings.order -ceq 'launch') { @($Clients | Sort-Object { [long]$_.startTicks }) }
@@ -1869,11 +1957,12 @@ function Get-ArkuzoArrangeTargets($Clients, $Accounts, $Settings) {
 
 function Update-ArkuzoWindowArrangement {
     if (-not (Test-ArkuzoNativeProvider) -or $MonitorOnly -or -not $ownsControllerMutex -or -not $voltControlStatus.available) { return }
-    $settings = Get-ArkuzoArrangeSettings $script:nativeVault
-    $forced = $settings.requestMs -gt $script:arrangeHandledRequestMs
-    if ($forced) { $script:arrangeHandledRequestMs = $settings.requestMs }
-    if (-not $settings.enabled -and -not $forced) { return }
+    # Arranging windows is cosmetic: nothing in it may ever stop the saver.
     try {
+        $settings = Get-ArkuzoArrangeSettings $script:nativeVault
+        $forced = $settings.requestMs -gt $script:arrangeHandledRequestMs
+        if ($forced) { $script:arrangeHandledRequestMs = $settings.requestMs }
+        if (-not $settings.enabled -and -not $forced) { return }
         Initialize-ArkuzoWindowNative
         $clients = @()
         foreach ($state in @($tracked.Values)) {
@@ -2113,13 +2202,24 @@ function Test-ArkuzoFrozenSample($State, $Policy) {
         -not $snap.launchError -and -not $State.isDisconnected -and -not $State.RecoveryRequested -and
         $null -ne $State.HangCpuPercent -and [double]$State.HangCpuPercent -le [double]$Policy.farm_freeze_max_cpu_percent)
 }
-function Get-ArkuzoFarmFreezeCandidate($States, $Policy, [double]$Now) {
+function Test-ArkuzoRemoteDisconnectOnset($FirstOnset, $DisconnectSec, $Policy) {
+    # Pure. A Chrome Remote Desktop disconnect froze the clients within 0-13 s of
+    # it on 12 of the 14 logged disconnects with clients running, and none of
+    # those clients answered again (docs/remote-desktop.md).
+    # Onsets are recorded up to ~10 s after the real hang and the disconnect time
+    # comes from another clock, so allow 10 s before it.
+    if ($null -eq $FirstOnset -or $null -eq $DisconnectSec -or $null -eq $Policy) { return $false }
+    $offset = [double]$FirstOnset - [double]$DisconnectSec
+    return ($offset -ge -10 -and $offset -le [double]$Policy.farm_freeze_remote_window_sec)
+}
+function Get-ArkuzoFarmFreezeCandidate($States, $Policy, [double]$Now, $RemoteDisconnectSec = $null) {
     # Pure. Finds the largest group of frozen clients whose onsets lie within
     # farm_freeze_onset_window_sec. It qualifies with at least
     # farm_freeze_min_clients members that are a strict majority of the clients
     # already running when its last member froze (clients Volt launched afterwards,
     # e.g. while it is still starting the farm, say nothing about that freeze),
-    # and is confirmed once its LAST member has been frozen for farm_freeze_confirm_sec.
+    # and is confirmed once its LAST member has been frozen for farm_freeze_confirm_sec,
+    # or farm_freeze_remote_confirm_sec when it began right after a remote disconnect.
     if ($null -eq $Policy -or -not $Policy.farm_freeze_enabled) { return $null }
     $population = @($States | Where-Object { $null -ne $_ -and $null -ne $_.LastSnapshot -and -not $_.RecoveryRequested })
     $frozen = @($population | Where-Object { Test-ArkuzoFrozenSample $_ $Policy } | Sort-Object { [double]$_.FreezeSince })
@@ -2134,8 +2234,12 @@ function Get-ArkuzoFarmFreezeCandidate($States, $Policy, [double]$Now) {
     $first = ($onsets | Measure-Object -Minimum).Minimum; $last = ($onsets | Measure-Object -Maximum).Maximum
     $present = @($population | Where-Object { $null -eq $_.StartedSec -or [double]$_.StartedSec -le [double]$last })
     if ((2 * $best.Count) -le $present.Count) { return $null }
+    $remote = Test-ArkuzoRemoteDisconnectOnset $first $RemoteDisconnectSec $Policy
+    $confirm = [double]$Policy.farm_freeze_confirm_sec
+    if ($remote -and $null -ne $Policy.farm_freeze_remote_confirm_sec) { $confirm = [math]::Min($confirm, [double]$Policy.farm_freeze_remote_confirm_sec) }
     return [pscustomobject]@{ Members = $best; Population = $present.Count; FirstOnset = [double]$first; LastOnset = [double]$last
-        Confirmed = (($Now - [double]$last) -ge [double]$Policy.farm_freeze_confirm_sec) }
+        Confirmed = (($Now - [double]$last) -ge $confirm); RemoteDisconnect = $remote; ConfirmSec = $confirm
+        RemoteDisconnectOffsetSec = $(if ($remote) { [math]::Round([double]$first - [double]$RemoteDisconnectSec, 1) } else { $null }) }
 }
 function Test-ArkuzoFarmFreezeActive {
     return ($null -ne $script:farmFreeze -and $script:farmFreeze.State -ceq 'Active')
@@ -2242,6 +2346,7 @@ function Start-ArkuzoFarmFreezeEpisode($Candidate, [double]$Now) {
     Write-Diagnostic 'FARM_FREEZE_DETECTED' @{ episode = $script:farmFreeze.Id; population = $Candidate.Population; frozen = @($Candidate.Members).Count
         planned = @($order | ForEach-Object { $m = $members[[string]$_]; @{ pid = $m.pid; accountId = $m.accountId; onsetOffsetSec = $m.onsetOffsetSec; cpuPercent = $m.cpuPercent } })
         skipped = $skipped; confirmSec = [math]::Round($Now - $Candidate.LastOnset, 1); spacingSec = $healthPolicy.farm_freeze_spacing_sec
+        cause = $(if ($Candidate.RemoteDisconnect) { 'remote-disconnect' } else { 'unknown' }); remoteDisconnectOffsetSec = $Candidate.RemoteDisconnectOffsetSec
         note = 'Correlated freeze: members are closed one at a time at Volt launch spacing through the normal guarded recovery.' }
     return $true
 }
@@ -2275,11 +2380,17 @@ function Update-ArkuzoFarmFreeze {
     }
     if ($MonitorOnly -or -not $healthPolicy.enabled -or -not $healthPolicy.farm_freeze_enabled -or -not $restorePolicy.enabled -or
         -not $ownsControllerMutex -or -not $recoveryJournalHealthy -or $logFailed) { return }
-    $candidate = Get-ArkuzoFarmFreezeCandidate @($tracked.Values) $healthPolicy $now
+    # A disconnected RDP session cannot render relaunched clients either.
+    if (Test-ArkuzoRemoteHold $now) { return }
+    $candidate = Get-ArkuzoFarmFreezeCandidate @($tracked.Values) $healthPolicy $now $script:lastRemoteDisconnectSec
     if ($null -eq $candidate -or -not $candidate.Confirmed) { return }
     # A farm that freezes again soon after an episode is not helped by fast
     # recycling (the display is likely still gone): use hang_timeout_sec instead.
-    if ($null -ne $script:lastFarmFreezeStartSec -and ($now - [double]$script:lastFarmFreezeStartSec) -lt [double]$healthPolicy.farm_freeze_refreeze_sec) {
+    # A new remote disconnect since that episode is a new, discrete cause: the
+    # replacement clients ran fine until the user disconnected again.
+    $newDisconnect = ($candidate.RemoteDisconnect -and $null -ne $script:lastRemoteDisconnectSec -and
+        ($null -eq $script:lastFarmFreezeStartSec -or [double]$script:lastRemoteDisconnectSec -gt [double]$script:lastFarmFreezeStartSec))
+    if (-not $newDisconnect -and $null -ne $script:lastFarmFreezeStartSec -and ($now - [double]$script:lastFarmFreezeStartSec) -lt [double]$healthPolicy.farm_freeze_refreeze_sec) {
         Warn-Throttled 'farm-freeze' 'Farm froze again soon after the last fast recovery. Using the normal hang timeout this time.'
         return
     }
@@ -2304,6 +2415,171 @@ function Test-ArkuzoLaunchPacing([datetime]$NowUtc) {
         if ($age -ge 0 -and $age -lt $due) { return $false }
     }
     return $true
+}
+# ---------------------------------------------------------------------------
+# Remote sessions (docs/remote-desktop.md). Chrome Remote Desktop streams the
+# console session, so Windows itself records nothing when its viewer leaves:
+# the host's own Application-log events (source "chromoting", 1 connected,
+# 2 disconnected) are the only signal. RDP shows up as this process's own WTS
+# session state. Everything here is read-only except the process-scoped
+# keep-awake request, which Windows drops when the saver exits.
+# ---------------------------------------------------------------------------
+$script:remoteProbe = $null; $script:remoteProbeSec = $null; $script:lastRemoteDisconnectSec = $null
+$script:remoteHoldSinceSec = $null; $script:keepAwakeOn = $false; $script:keepAwakeFailed = $false
+$script:crdBookmark = $null; $script:crdLast = $null; $script:crdServiceCheckSec = $null; $script:crdInstalled = $false
+function Read-ArkuzoChromotingEvent([double]$NowSec) {
+    # Newest Chrome Remote Desktop connect (1) or disconnect (2) as @{ id; utc }, or $null.
+    # A filtered search of the Application log costs up to ~150 ms when the host
+    # has logged nothing lately, so it runs once; afterwards only the records
+    # written since are read, from a bookmark (~0 ms). Only provider, id and time
+    # are read: the message names the viewer's account and is never touched.
+    if ($null -eq $script:crdServiceCheckSec -or ($NowSec - [double]$script:crdServiceCheckSec) -ge 600) {
+        $script:crdServiceCheckSec = $NowSec
+        $script:crdInstalled = ($null -ne (Get-Service -Name 'chromoting' -ErrorAction SilentlyContinue))
+        if (-not $script:crdInstalled) { $script:crdBookmark = $null; $script:crdLast = $null }
+    }
+    if (-not $script:crdInstalled) { return $null }
+    $logName = [Diagnostics.Eventing.Reader.PathType]::LogName
+    try {
+        if ($null -eq $script:crdBookmark) {
+            # Bookmark first: an event written meanwhile is read again next time, never missed.
+            $newest = New-Object Diagnostics.Eventing.Reader.EventLogQuery('Application', $logName, '*'); $newest.ReverseDirection = $true
+            $reader = New-Object Diagnostics.Eventing.Reader.EventLogReader($newest)
+            try { $top = $reader.ReadEvent() } finally { $reader.Dispose() }
+            if ($null -ne $top) { try { $script:crdBookmark = $top.Bookmark } finally { $top.Dispose() } }
+            $query = New-Object Diagnostics.Eventing.Reader.EventLogQuery('Application', $logName, "*[System[Provider[@Name='chromoting'] and (EventID=1 or EventID=2)]]")
+            $query.ReverseDirection = $true
+            $reader = New-Object Diagnostics.Eventing.Reader.EventLogReader($query)
+            try { $record = $reader.ReadEvent() } finally { $reader.Dispose() }
+            if ($null -ne $record) { try { $script:crdLast = @{ id = [int]$record.Id; utc = ([datetime]$record.TimeCreated).ToUniversalTime() } } finally { $record.Dispose() } }
+        } else {
+            $all = New-Object Diagnostics.Eventing.Reader.EventLogQuery('Application', $logName, '*')
+            $reader = New-Object Diagnostics.Eventing.Reader.EventLogReader($all, $script:crdBookmark)
+            try {
+                for ($i = 0; $i -lt 5000; $i++) {
+                    $record = $reader.ReadEvent()
+                    if ($null -eq $record) { break }
+                    try {
+                        $script:crdBookmark = $record.Bookmark
+                        if ($record.ProviderName -ceq 'chromoting' -and ($record.Id -eq 1 -or $record.Id -eq 2)) {
+                            $script:crdLast = @{ id = [int]$record.Id; utc = ([datetime]$record.TimeCreated).ToUniversalTime() }
+                        }
+                    } finally { $record.Dispose() }
+                }
+            } finally { $reader.Dispose() }
+        }
+    } catch { $script:crdBookmark = $null } # Log cleared or unreadable: search again next time.
+    return $script:crdLast
+}
+function Get-ArkuzoRemoteProbe {
+    $n = [Arkuzo.RemoteSessionNativeV1]
+    $session = $n::OwnSessionId()
+    $crd = Read-ArkuzoChromotingEvent $(if ($null -ne $clock) { [double]$clock.Elapsed.TotalSeconds } else { 0 })
+    return @{ sessionId = $session; consoleSessionId = $n::ConsoleSessionId(); connectState = $n::ConnectState($session); protocol = $n::ClientProtocol($session)
+        lockState = $n::LockState($session); inputDesktop = $n::InputDesktopName(); display = ($n::DisplayMode() -join 'x'); monitors = $n::MonitorCount()
+        crdEventId = $(if ($null -ne $crd) { $crd.id } else { $null }); crdEventUtc = $(if ($null -ne $crd) { $crd.utc } else { $null })
+        bootUtc = [datetime]::UtcNow.AddMilliseconds(-[double]$n::UptimeMs()) }
+}
+function Test-ArkuzoCrdConnected($Probe) {
+    # Pure. A connect logged before the last boot is stale: a restart while
+    # connected leaves no disconnect event behind.
+    if ($null -eq $Probe -or $null -eq $Probe.crdEventId -or [int]$Probe.crdEventId -ne 1) { return $false }
+    return ($null -eq $Probe.bootUtc -or $null -eq $Probe.crdEventUtc -or [datetime]$Probe.crdEventUtc -gt [datetime]$Probe.bootUtc)
+}
+function ConvertTo-ArkuzoRemoteRecord($Probe) {
+    if ($null -eq $Probe) { return $null }
+    $states = @{ 0 = 'active'; 1 = 'connected'; 2 = 'connectQuery'; 3 = 'shadow'; 4 = 'disconnected'; 5 = 'idle'; 6 = 'listen'; 7 = 'reset'; 8 = 'down'; 9 = 'init' }
+    $state = [int]$Probe.connectState
+    return @{ sessionId = $Probe.sessionId; onConsole = ([int]$Probe.sessionId -ge 0 -and [int]$Probe.sessionId -eq [int]$Probe.consoleSessionId)
+        sessionState = $(if ($states.ContainsKey($state)) { $states[$state] } else { 'unknown' })
+        protocol = $(switch ([int]$Probe.protocol) { 0 { 'console' } 2 { 'rdp' } default { 'unknown' } })
+        locked = $(switch ([int]$Probe.lockState) { 0 { $true } 1 { $false } default { $null } })
+        inputDesktop = $Probe.inputDesktop; display = $Probe.display; monitors = $Probe.monitors
+        chromeRemoteDesktop = $(if ($null -eq $Probe.crdEventId) { $null } else {
+            @{ connected = (Test-ArkuzoCrdConnected $Probe); changedUtc = $(if ($Probe.crdEventUtc) { ([datetime]$Probe.crdEventUtc).ToString('o') } else { $null }) } }) }
+}
+function Compare-ArkuzoRemoteProbe($Previous, $Current) {
+    # Pure. What changed between two probes, as stable codes for the log.
+    if ($null -eq $Previous -or $null -eq $Current) { return @() }
+    $changes = @()
+    if ($Current.crdEventId -ne $Previous.crdEventId -or $Current.crdEventUtc -ne $Previous.crdEventUtc) {
+        if ([int]$Current.crdEventId -eq 1) { $changes += 'CRD_CONNECTED' } elseif ([int]$Current.crdEventId -eq 2) { $changes += 'CRD_DISCONNECTED' }
+    }
+    if ([int]$Current.connectState -ne [int]$Previous.connectState) {
+        if ([int]$Current.connectState -eq 4) { $changes += 'SESSION_DISCONNECTED' }
+        elseif ([int]$Previous.connectState -eq 4) { $changes += 'SESSION_RECONNECTED' }
+        else { $changes += 'SESSION_STATE_CHANGED' }
+    }
+    $wasConsole = ([int]$Previous.sessionId -eq [int]$Previous.consoleSessionId); $isConsole = ([int]$Current.sessionId -eq [int]$Current.consoleSessionId)
+    if ($isConsole -ne $wasConsole) { $changes += $(if ($isConsole) { 'SESSION_ON_CONSOLE' } else { 'SESSION_LEFT_CONSOLE' }) }
+    if ([int]$Current.protocol -ne [int]$Previous.protocol) { $changes += 'PROTOCOL_CHANGED' }
+    if ([int]$Current.lockState -ne [int]$Previous.lockState) {
+        if ([int]$Current.lockState -eq 0) { $changes += 'SESSION_LOCKED' } elseif ([int]$Current.lockState -eq 1) { $changes += 'SESSION_UNLOCKED' }
+    }
+    if ([string]$Current.inputDesktop -cne [string]$Previous.inputDesktop) { $changes += 'INPUT_DESKTOP_CHANGED' }
+    if ([string]$Current.display -cne [string]$Previous.display) { $changes += 'DISPLAY_MODE_CHANGED' }
+    if ([int]$Current.monitors -ne [int]$Previous.monitors) { $changes += 'MONITOR_COUNT_CHANGED' }
+    return $changes
+}
+function Get-ArkuzoRemoteDisconnectSec($Probe, [datetime]$NowUtc, [double]$NowSec) {
+    # Pure. The saver-clock time of the newest Chrome Remote Desktop disconnect, or $null.
+    if ($null -eq $Probe -or $null -eq $Probe.crdEventId -or [int]$Probe.crdEventId -ne 2 -or $null -eq $Probe.crdEventUtc) { return $null }
+    return $NowSec - [math]::Max(0, ($NowUtc - [datetime]$Probe.crdEventUtc).TotalSeconds)
+}
+function Test-ArkuzoRemoteHold([double]$NowSec) {
+    # While this saver's own session is disconnected (RDP), clients cannot render
+    # and replacements would land in the same session: hold launches and
+    # recovery, for at most remote_hold_max_sec.
+    if ($null -eq $script:remoteHoldSinceSec -or $null -eq $healthPolicy -or [double]$healthPolicy.remote_hold_max_sec -le 0) { return $false }
+    return (($NowSec - [double]$script:remoteHoldSinceSec) -lt [double]$healthPolicy.remote_hold_max_sec)
+}
+function Update-ArkuzoRemoteState($Probe, [datetime]$NowUtc, [double]$NowSec) {
+    # Applies one probe; returns the change codes. Separate from the probe so tests drive it.
+    $previous = $script:remoteProbe; $script:remoteProbe = $Probe
+    $changes = @(Compare-ArkuzoRemoteProbe $previous $Probe)
+    $crdAt = Get-ArkuzoRemoteDisconnectSec $Probe $NowUtc $NowSec
+    if ($null -ne $crdAt -and ($null -eq $script:lastRemoteDisconnectSec -or $crdAt -gt [double]$script:lastRemoteDisconnectSec + 1)) { $script:lastRemoteDisconnectSec = $crdAt }
+    if ([int]$Probe.connectState -eq 4) {
+        if ($null -eq $script:remoteHoldSinceSec) { $script:remoteHoldSinceSec = $NowSec; $script:lastRemoteDisconnectSec = $NowSec }
+    } else { $script:remoteHoldSinceSec = $null }
+    return $changes
+}
+function Update-ArkuzoRemoteSession {
+    if ($null -eq $clock) { return }
+    $now = [double]$clock.Elapsed.TotalSeconds
+    if ($null -ne $script:remoteProbeSec -and ($now - [double]$script:remoteProbeSec) -lt 2) { return }
+    $script:remoteProbeSec = $now
+    try { $probe = Get-ArkuzoRemoteProbe } catch { Warn-Throttled 'remote-probe' 'Remote-session state is unavailable; remote disconnects are not recognised.'; return }
+    $first = ($null -eq $script:remoteProbe)
+    $changes = @(Update-ArkuzoRemoteState $probe ([datetime]::UtcNow) $now)
+    if ($first -or $changes.Count -gt 0) {
+        $states = @($tracked.Values)
+        Write-Diagnostic $(if ($first) { 'REMOTE_SESSION_STATE' } else { 'REMOTE_SESSION_CHANGED' }) @{ changes = $changes; current = (ConvertTo-ArkuzoRemoteRecord $probe)
+            clients = $states.Count; responding = @($states | Where-Object { $null -ne $_.LastSnapshot -and $_.LastSnapshot.responding -eq $true }).Count
+            hold = (Test-ArkuzoRemoteHold $now)
+            note = 'Chrome Remote Desktop runs in the console session; only its own events show when the viewer leaves. See docs/remote-desktop.md.' }
+    }
+}
+function Update-ArkuzoKeepAwake([bool]$Wanted) {
+    # Process-scoped SetThreadExecutionState from the main loop thread: keeps the
+    # display (and so the clients' swap chains) on while clients run. Nothing is
+    # changed in the power plan; Windows drops the request when the saver exits.
+    if ($Wanted -eq [bool]$script:keepAwakeOn -or ($Wanted -and $script:keepAwakeFailed)) { return }
+    $ok = $false
+    try { $ok = [Arkuzo.RemoteSessionNativeV1]::KeepAwake($Wanted) } catch { $ok = $false }
+    if ($Wanted -and -not $ok) { $script:keepAwakeFailed = $true; Warn-Throttled 'keep-awake' 'Could not ask Windows to keep the display on.'; return }
+    $script:keepAwakeOn = $Wanted
+    Write-Diagnostic 'KEEP_AWAKE' @{ on = $Wanted; clients = $tracked.Count; note = 'Display and system kept awake while clients run (process-scoped; the power plan is unchanged).' }
+}
+function Get-ArkuzoRemoteStatus {
+    $record = ConvertTo-ArkuzoRemoteRecord $script:remoteProbe
+    if ($null -eq $record) { return $null }
+    $now = $(if ($null -ne $clock) { [double]$clock.Elapsed.TotalSeconds } else { 0 })
+    $record.keepAwake = [bool]$script:keepAwakeOn
+    $record.hold = (Test-ArkuzoRemoteHold $now)
+    $record.holdLeftSec = $(if ($record.hold) { [math]::Round([double]$healthPolicy.remote_hold_max_sec - ($now - [double]$script:remoteHoldSinceSec)) } else { $null })
+    $record.lastDisconnectAgoSec = $(if ($null -ne $script:lastRemoteDisconnectSec) { [math]::Round($now - [double]$script:lastRemoteDisconnectSec) } else { $null })
+    return $record
 }
 function New-ArkuzoPendingEntry([string]$AccountId,[string]$TrackerId,[int]$OldId=0,[long]$OldTicks=0) {
     return @{accountId=$AccountId;oldTrackerId=$TrackerId;oldPid=$OldId;oldStartTicks=$OldTicks;createdUtc=[datetime]::UtcNow.ToString('o');closedUtc=$null;status='AwaitingReplacement';retryCount=0;nextRetryUtc=$null;readySinceUtc=$null;lastObservedUtc=$null;replacementPid=0;replacementStartTicks=0}
@@ -2472,10 +2748,14 @@ function Update-ArkuzoRecoveryOutcomes {
                 $launchGap = if ($native) { [int](Get-ArkuzoVaultSetting $script:nativeVault 'launchDelaySec' 12 5 120) } else { [int]$restorePolicy.retry_base_sec }
                 $launchCap = if ($native) { [math]::Max([int]$restorePolicy.retry_max_per_hour, 120) } else { [int]$restorePolicy.retry_max_per_hour }
                 if (-not (Test-ArkuzoRecoveryBudget $launchAttempts $utc $launchGap $launchCap)) {
+                    if ($native) { continue } # Launch spacing: normal, not worth a warning.
                     Warn-Throttled 'restore-budget' 'Missing-account launch budget/backoff active. Other clients remain protected; automatic retry will resume.';continue
                 }
                 if ($null -eq $systemMemory -or $systemMemory.commitPercent -ge $healthPolicy.pressure_percent) {
                     Warn-Throttled 'restore-pressure' 'New account launch delayed: OS commit headroom insufficient/unavailable.';continue
+                }
+                if ($null -ne $clock -and (Test-ArkuzoRemoteHold ([double]$clock.Elapsed.TotalSeconds))) {
+                    Warn-Throttled 'remote-hold' 'Remote Desktop session is disconnected: launches and recovery wait until it reconnects.';continue
                 }
                 if (-not $(if ($native) { Test-ArkuzoNativeLaunchSlot $utc } else { Test-ArkuzoLaunchPacing $utc })) {
                     # Not charged: the request simply waits for a quiet launch slot.
@@ -2523,6 +2803,8 @@ function Update-ArkuzoLivePolicy {
             # launches at least 15 s apart (closer launches raise its startup notice).
             $newHealth.farm_freeze_confirm_sec = [math]::Max($newHealth.farm_freeze_confirm_sec, 30)
             $newHealth.farm_freeze_spacing_sec = [math]::Max($newHealth.farm_freeze_spacing_sec, 15)
+            # No multi-client freeze that followed a remote disconnect ever answered again.
+            $newHealth.farm_freeze_remote_confirm_sec = [math]::Max($newHealth.farm_freeze_remote_confirm_sec, 15)
         }
         $newPagefile=Get-ArkuzoPagefilePolicy -Input $cfg.pagefile -PressurePercent $newHealth.pressure_percent
         if (-not $newPagefile.valid) { throw ('Invalid pagefile policy: '+($newPagefile.errors -join '; ')) }
@@ -2568,7 +2850,7 @@ function Write-ArkuzoRuntimeStatus {
             pending=@($recoveryPending.Values);pendingRecoveries=$recoveryPending.Count;suspendedAccounts=@($script:suspendedAccounts.Values);suspendedAccountCount=$script:suspendedAccounts.Count;missingRecoveryBlocked=(-not $controlFresh -or $missing.Count -gt 0 -or $recoveryPending.Count -gt 0)
             voltControlAvailable=[bool]$voltControlStatus.available;recoveryJournalHealthy=[bool]$recoveryJournalHealthy;systemMemory=$systemMemory;health=$healthPolicy;recovery=$restorePolicy;logFailed=$logFailed
             pagefilePolicy=$pagefilePolicy;pagefile=$script:pagefileStatus;nativePrivileges=$script:nativePrivilegeInitialization;graphics=$script:graphicsStatus
-            updateAvailable=$script:updateAvailableStatus
+            updateAvailable=$script:updateAvailableStatus;remoteSession=(Get-ArkuzoRemoteStatus)
             accountProvider=$script:accountProvider;accountProviderNotice=$script:accountProviderNotice;farmRunning=[bool]$voltControlStatus.farmRunning
             quarantined=@(if ($null -ne $script:quarantinedAccounts) { $script:quarantinedAccounts.Values })
             uptimeSec=$(if ($null -ne $script:clock) { [math]::Round($script:clock.Elapsed.TotalSeconds,1) } else { 0 })
@@ -2692,6 +2974,11 @@ function Invoke-ClientRecovery([int]$ClientId, $State) {
     # Observation service can update the decision during IO. Bind this attempt
     # to its original reason; a changed condition needs a new authorized attempt.
     $reason = $State.HealthDecision.Reason
+    # Clients in a disconnected RDP session cannot render, and neither could their
+    # replacements. Critical commit pressure still protects the host.
+    if ($reason -cne 'SYSTEM_COMMIT_PRESSURE' -and $null -ne $clock -and (Test-ArkuzoRemoteHold ([double]$clock.Elapsed.TotalSeconds))) {
+        Warn-Throttled 'remote-hold' 'Remote Desktop session is disconnected: launches and recovery wait until it reconnects.'; return
+    }
     # Re-read capability immediately before acting, not merely at startup.
     Update-VoltRecoveryCapability -SyncControl
     if (-not $voltStatus.safeToRecycle -or -not (Test-ArkuzoClientOwnership $State)) { return }
@@ -3794,6 +4081,7 @@ if ($isConfigLocked) {
         $healthPolicy.max_recycles_per_hour = [math]::Max($healthPolicy.max_recycles_per_hour, 20)
         $healthPolicy.farm_freeze_confirm_sec = [math]::Max($healthPolicy.farm_freeze_confirm_sec, 30)
         $healthPolicy.farm_freeze_spacing_sec = [math]::Max($healthPolicy.farm_freeze_spacing_sec, 15)
+        $healthPolicy.farm_freeze_remote_confirm_sec = [math]::Max($healthPolicy.farm_freeze_remote_confirm_sec, 15)
     }
 }
 $lastConfigText = [IO.File]::ReadAllText($configFilePath)
@@ -3829,6 +4117,76 @@ if ($PSBoundParameters.ContainsKey('Mode')) {
         if (-not $PSBoundParameters.ContainsKey('PollMs')) { $PollMs = 250 }
         if (-not $PSBoundParameters.ContainsKey('SoftLimit') -and -not $HardLimit) { $SoftLimit = $true }
     }
+}
+
+if (-not ('Arkuzo.RemoteSessionNativeV1' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace Arkuzo {
+ // Read-only remote-session and display probes, plus the process-scoped
+ // keep-awake request. Nothing here changes system configuration.
+ public static class RemoteSessionNativeV1 {
+  [DllImport("kernel32.dll")] static extern uint WTSGetActiveConsoleSessionId();
+  [DllImport("kernel32.dll")] static extern bool ProcessIdToSessionId(uint pid, out uint session);
+  [DllImport("kernel32.dll")] static extern uint GetCurrentProcessId();
+  [DllImport("kernel32.dll")] static extern uint SetThreadExecutionState(uint flags);
+  [DllImport("wtsapi32.dll", SetLastError = true)] static extern bool WTSQuerySessionInformationW(IntPtr server, uint session, int infoClass, out IntPtr buffer, out uint bytes);
+  [DllImport("wtsapi32.dll")] static extern void WTSFreeMemory(IntPtr memory);
+  [DllImport("user32.dll")] static extern int GetSystemMetrics(int index);
+  [DllImport("user32.dll", SetLastError = true)] static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
+  [DllImport("user32.dll")] static extern bool CloseDesktop(IntPtr desktop);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool GetUserObjectInformationW(IntPtr obj, int index, System.Text.StringBuilder info, int length, out int needed);
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  struct DevMode {
+   [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string DeviceName;
+   public short SpecVersion, DriverVersion, Size, DriverExtra; public int Fields;
+   public int PositionX, PositionY, DisplayOrientation, DisplayFixedOutput;
+   public short Color, Duplex, YResolution, TTOption, Collate;
+   [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string FormName;
+   public short LogPixels; public int BitsPerPel, PelsWidth, PelsHeight, DisplayFlags, DisplayFrequency;
+   public int IcmMethod, IcmIntent, MediaType, DitherType, Reserved1, Reserved2, PanningWidth, PanningHeight;
+  }
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool EnumDisplaySettingsW(string device, int mode, ref DevMode devMode);
+
+  public static int OwnSessionId() { uint s; return ProcessIdToSessionId(GetCurrentProcessId(), out s) ? (int)s : -1; }
+  public static int ConsoleSessionId() { uint s = WTSGetActiveConsoleSessionId(); return s == 0xFFFFFFFF ? -1 : (int)s; }
+  static int QueryInt(int session, int infoClass, int size) {
+   IntPtr buffer; uint bytes;
+   if (session < 0 || !WTSQuerySessionInformationW(IntPtr.Zero, (uint)session, infoClass, out buffer, out bytes)) return -1;
+   try { if (bytes < size) return -1; return size == 2 ? Marshal.ReadInt16(buffer) : Marshal.ReadInt32(buffer); } finally { WTSFreeMemory(buffer); }
+  }
+  // WTS_CONNECTSTATE_CLASS: 0 Active, 1 Connected, 4 Disconnected, ...
+  public static int ConnectState(int session) { return QueryInt(session, 8, 4); }
+  // 0 console, 1 legacy ICA, 2 RDP.
+  public static int ClientProtocol(int session) { return QueryInt(session, 16, 2); }
+  // WTSSessionInfoEx (25) -> WTSINFOEX_LEVEL1_W.SessionFlags: 0 locked, 1 unlocked, -1 unknown.
+  public static int LockState(int session) {
+   IntPtr buffer; uint bytes;
+   if (session < 0 || !WTSQuerySessionInformationW(IntPtr.Zero, (uint)session, 25, out buffer, out bytes)) return -1;
+   try { if (bytes < 20) return -1; return Marshal.ReadInt32(buffer, 16); } finally { WTSFreeMemory(buffer); }
+  }
+  public static int MonitorCount() { return GetSystemMetrics(80); }
+  [DllImport("kernel32.dll")] static extern ulong GetTickCount64();
+  public static long UptimeMs() { return (long)GetTickCount64(); }
+  // "Default" while the user's desktop takes input; "Winlogon" on the lock or sign-in screen; "" when it cannot be opened.
+  public static string InputDesktopName() {
+   IntPtr desktop = OpenInputDesktop(0, false, 0x0001);
+   if (desktop == IntPtr.Zero) return "";
+   try { var name = new System.Text.StringBuilder(256); int needed; return GetUserObjectInformationW(desktop, 2, name, name.Capacity * 2, out needed) ? name.ToString() : ""; }
+   finally { CloseDesktop(desktop); }
+  }
+  // Primary display mode: width, height, refresh rate, bits per pixel (zeros when unavailable).
+  public static int[] DisplayMode() {
+   var mode = new DevMode(); mode.Size = (short)Marshal.SizeOf(typeof(DevMode));
+   if (!EnumDisplaySettingsW(null, -1, ref mode)) return new int[] { 0, 0, 0, 0 };
+   return new int[] { mode.PelsWidth, mode.PelsHeight, mode.DisplayFrequency, mode.BitsPerPel };
+  }
+  // ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED for the calling thread, or ES_CONTINUOUS alone to release.
+  public static bool KeepAwake(bool on) { return SetThreadExecutionState(on ? 0x80000003u : 0x80000000u) != 0; }
+ }
+}
+'@
 }
 
 if (-not ('Arkuzo.MemorySaverNativeV1' -as [type])) {
@@ -5293,7 +5651,7 @@ try {
                     $state.LogPath = Find-RobloxProcessLog -TargetProcessId $id -TrackerId $state.TrackerId -StartTimeUtc $client.StartTime.ToUniversalTime()
                     if ($null -ne $state.LogPath) {
                         try {
-                            $headLines = @(Get-Content -LiteralPath $state.LogPath -TotalCount 350 -ErrorAction SilentlyContinue)
+                            $headLines = @(Read-ArkuzoLogHeadLines $state.LogPath 350)
                             $headText = $headLines -join "`n"
                             if ($headText -match '(?i)\[DFLog::NetworkClient\] Connection accepted from') {
                                 $state.GameReady = $true; $state.EverGameReady = $true
@@ -5380,6 +5738,9 @@ try {
             # Two seconds keeps the Control Center live; the file is small.
             $nextRuntimeHeartbeat = $clock.Elapsed.TotalSeconds + 2
         }
+        [Arkuzo.LoopWatchdogV1]::Mark('remote session')
+        Update-ArkuzoRemoteSession
+        Update-ArkuzoKeepAwake ((-not $MonitorOnly) -and [bool]$healthPolicy.keep_display_awake -and $tracked.Count -gt 0)
         [Arkuzo.LoopWatchdogV1]::Mark('farm freeze')
         Update-ArkuzoFarmFreeze
         Invoke-ArkuzoRecoveryCandidates
@@ -5566,6 +5927,7 @@ try {
     } catch {
         Write-ArkuzoFailureDiagnostic 'SAVER_CLEANUP_ERROR' $_
     } finally {
+        try { if ($script:keepAwakeOn) { [void][Arkuzo.RemoteSessionNativeV1]::KeepAwake($false) } } catch { }
         # Cleanup/console failures must not mask the fatal error or skip lock and
         # diagnostic finalization. These independent best-effort steps never throw.
         try { Write-Diagnostic 'SESSION_STOP' @{ uptimeSeconds = [Math]::Round($clock.Elapsed.TotalSeconds, 1); trims = $trimCount } } catch { Write-ArkuzoFailureDiagnostic 'SAVER_CLEANUP_ERROR' $_ }

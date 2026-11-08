@@ -328,6 +328,75 @@ body.light .console li.warning .txt { color: #92400e; } body.light .console li.c
 @keyframes breathe { 50% { opacity: 0.55; transform: scale(0.92); } }
 @keyframes ring { from { opacity: 0.8; transform: scale(0.96); } to { opacity: 0; transform: scale(1.18); } }
 
+/* ---------- accounts ---------- */
+.farm-h { display: flex; align-items: center; gap: 14px; padding: 16px 18px; flex-wrap: wrap; }
+.farm-t .ttl { font-size: 16px; font-weight: 700; }
+.farm-t .st { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+.farm-stats { display: flex; gap: 18px; margin-left: 8px; }
+.farm-stats div { display: grid; gap: 1px; }
+.farm-stats b { font-size: 17px; font-variant-numeric: tabular-nums; }
+.farm-stats span { font-size: 10px; font-weight: 700; letter-spacing: 0.14em; color: var(--dim); text-transform: uppercase; }
+.notice { margin: 0 18px 14px; padding: 10px 12px; border-radius: 10px; font-size: 12.5px; color: var(--text); background: rgba(251,191,36,0.08); box-shadow: inset 0 0 0 1px rgba(251,191,36,0.28); }
+.vrow { grid-template-columns: 34px minmax(150px, 1.4fr) 132px minmax(170px, 1fr) 70px 112px; cursor: default; }
+.colhead.vrow { padding: 4px 10px 2px; margin: 0 8px; }
+.avatar { width: 34px; height: 34px; border-radius: 10px; object-fit: cover; display: grid; place-items: center; font-size: 11px; font-weight: 800; color: #a78bfa;
+  background: linear-gradient(180deg, rgba(167,139,250,0.22), rgba(167,139,250,0.08)); box-shadow: 0 0 0 1px rgba(0,0,0,0.45), inset 0 1px 0 rgba(var(--ov), 0.1); }
+.ck-cell { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ck-cell .sb { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.row-actions { display: flex; gap: 6px; justify-content: flex-end; }
+.btn.sm { height: 27px; padding: 0 10px; font-size: 12px; border-radius: 8px; gap: 5px; }
+.btn.sm svg { width: 13px; height: 13px; }
+.btn.icon { width: 27px; padding: 0; justify-content: center; }
+.btn:disabled { opacity: 0.5; cursor: default; }
+.grp { font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; padding: 1px 6px; border-radius: 6px; color: var(--text-2); background: rgba(var(--ov), 0.07); }
+.editor { margin: 0 10px 10px 56px; padding: 12px 14px; border-radius: 12px; display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px 14px; align-items: end; }
+.editor label { display: grid; gap: 5px; font-size: 11.5px; color: var(--muted); font-weight: 650; }
+.editor .wide { grid-column: 1 / -1; }
+.editor .bar { grid-column: 1 / -1; display: flex; gap: 8px; justify-content: flex-end; }
+.inp, .editor select, .field input.inp { height: 31px; border: 0; border-radius: 9px; padding: 0 10px; color: var(--text); outline: none; min-width: 0; width: 100%;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--surface-hover) 94%, #fff), color-mix(in srgb, var(--surface-2) 40%, var(--surface-hover)));
+  box-shadow: 0 0 0 1px rgba(0,0,0,var(--edge-a)), 0 1px 3px rgba(0,0,0,0.28), inset 0 1px 0 rgba(var(--ov), 0.1); }
+.inp:focus, .editor select:focus { box-shadow: 0 0 0 1px rgba(var(--a), 0.85), 0 0 12px rgba(var(--a), 0.3), inset 0 1px 0 rgba(var(--ov), 0.1); }
+.editor select option { background: var(--surface); color: var(--text); }
+.field input.inp { width: 150px; }
+.add-panel { margin: 2px 14px 10px; padding: 12px; border-radius: 12px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.add-panel .inp { flex: 1 1 320px; width: auto; }
+.add-panel .hint { flex-basis: 100%; color: var(--muted); font-size: 11.5px; }
+.login-line { margin: 2px 14px 10px; padding: 10px 12px; border-radius: 12px; display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--text-2); }
+.spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid rgba(var(--a), 0.25); border-top-color: var(--accent); animation: spin 0.8s linear infinite; flex: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.srv-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px; align-items: center; padding: 8px 2px; }
+.srv-row + .srv-row { box-shadow: 0 -1px 0 rgba(0,0,0,0.25), 0 -2px 0 rgba(var(--ov), 0.025); }
+.srv-add { display: grid; grid-template-columns: 140px minmax(0, 1fr) auto; gap: 8px; margin-top: 10px; }
+
+.farm-join { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 0 18px 16px 76px; }
+.farm-join .lbl { font-size: 10px; font-weight: 700; letter-spacing: 0.14em; color: var(--dim); text-transform: uppercase; }
+.farm-join .inp { width: 190px; font-variant-numeric: tabular-nums; }
+.farm-join .hint { color: var(--muted); font-size: 12px; }
+.farm-join .pill { margin-left: 2px; }
+details.fold > summary { list-style: none; cursor: pointer; user-select: none; }
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary .pane-h { padding-right: 16px; }
+details.fold > summary .sum { margin-left: auto; color: var(--muted); font-size: 12px; text-align: right; }
+details.fold > summary .chev { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 8px; color: var(--muted); transition: transform 0.18s; flex: none; }
+details.fold > summary .chev svg { width: 15px; height: 15px; }
+details.fold[open] > summary .chev { transform: rotate(90deg); color: var(--accent); }
+details.fold > summary:hover .chev { background: rgba(var(--ov), 0.06); }
+details.fold:not([open]) > summary + .divider { display: none; }
+.folds { display: grid; grid-template-columns: 1fr; gap: 14px; align-items: start; }
+@media (min-width: 1240px) { .folds { grid-template-columns: 1fr 1fr; } .folds .wide { grid-column: 1 / -1; } }
+.layout-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 0.9fr); gap: 18px; align-items: start; }
+@media (max-width: 1100px) { .layout-grid { grid-template-columns: 1fr; } }
+.preview-box { position: sticky; top: 0; display: grid; gap: 10px; }
+.screen { position: relative; width: 100%; border-radius: 10px; overflow: hidden;
+  background: linear-gradient(180deg, rgba(var(--ov), 0.05), rgba(var(--ov), 0.02)); box-shadow: inset 0 0 0 1px rgba(var(--ov), 0.09), 0 0 0 1px rgba(0,0,0,0.35); }
+.screen .win { position: absolute; border-radius: 3px; display: grid; place-items: center; font-size: 9px; font-weight: 800; color: var(--text); overflow: hidden;
+  background: linear-gradient(180deg, rgba(var(--a), 0.42), rgba(var(--a), 0.18)); box-shadow: inset 0 0 0 1px rgba(var(--a), 0.75), 0 2px 6px rgba(0,0,0,0.35); }
+.screen .win.off { background: rgba(var(--ov), 0.06); box-shadow: inset 0 0 0 1px rgba(var(--ov), 0.18); color: var(--dim); }
+.screen .win.bg { opacity: 0.55; }
+.preview-cap { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 11.5px; flex-wrap: wrap; }
+.preview-cap .spacer { flex: 1; }
+
 /* ---------- small screens ---------- */
 @media (max-width: 900px) {
   body { overflow: auto; }
@@ -343,6 +412,12 @@ body.light .console li.warning .txt { color: #92400e; } body.light .console li.c
   .presets, .themes { grid-template-columns: 1fr 1fr; }
   .crow, .crow.compact { grid-template-columns: 26px minmax(0, 1fr) auto; }
   .crow > .hide-sm, .crow .memcell, .colhead { display: none; }
+  .vrow { grid-template-columns: 34px minmax(0, 1fr) auto; }
+  .vrow > .hide-sm { display: none; }
+  .editor { margin-left: 10px; }
+  .farm-stats { margin-left: 0; }
+  .farm-join { padding-left: 18px; }
+  .srv-add { grid-template-columns: 1fr; }
   .toasts { right: 14px; bottom: 14px; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
@@ -427,7 +502,7 @@ body.light .console li.warning .txt { color: #92400e; } body.light .console li.c
           <article class="card" id="ovClientsCard">
             <div class="card-h"><span class="cap">Clients</span><span class="card-s num" id="ovClientsSub"></span><div class="spacer"></div><button class="btn ghost" data-goto="clients">Open<span data-icon="chevron-right"></span></button></div>
             <div class="rows" id="ovClients"></div>
-            <div class="empty-state" id="ovClientsEmpty" hidden><strong>No Roblox clients running</strong>Launch accounts from Volt; they appear here within seconds.</div>
+            <div class="empty-state" id="ovClientsEmpty" hidden><strong>No Roblox clients running</strong>Start the farm on the Accounts page; clients appear here within seconds.</div>
           </article>
           <article class="card">
             <div class="card-h"><span class="cap">Recent activity</span><div class="spacer"></div><button class="btn ghost" data-goto="activity">Open<span data-icon="chevron-right"></span></button></div>
@@ -442,14 +517,68 @@ body.light .console li.warning .txt { color: #92400e; } body.light .console li.c
             <div class="card-h"><span class="cap">Running clients</span><span class="card-s num" id="clientsSub"></span></div>
             <div class="colhead crow" id="colhead"><span></span><span>Account</span><span>Status</span><span style="text-align:right">Resident</span><span class="hide-sm" style="text-align:right">Private</span><span class="hide-sm" style="text-align:right">CPU</span><span class="hide-sm" style="text-align:right">Trim</span></div>
             <div class="rows" id="clients"></div>
-            <div class="empty-state" id="clientsEmpty" hidden><strong>No Roblox clients running</strong>Launch accounts from Volt; they appear here within seconds.</div>
+            <div class="empty-state" id="clientsEmpty" hidden><strong>No Roblox clients running</strong>Start the farm on the Accounts page; clients appear here within seconds.</div>
           </article>
           <article class="card detail" id="clientDetail"></article>
         </div>
       </section>
 
       <section class="page" data-page="accounts" hidden>
-        <article class="card" id="accountsCard">
+        <article class="card" id="farmCard">
+          <div class="farm-h">
+            <span class="tile lg" id="farmTile" style="--c:#7e879a"><span data-icon="play"></span></span>
+            <div class="farm-t"><div class="ttl" id="farmTitle">Farm stopped</div><div class="st" id="farmSub">Start the farm to launch every account that has relaunch on.</div></div>
+            <div class="farm-stats" id="farmStats"></div>
+            <div class="spacer"></div>
+            <button class="btn" id="btnFarmStopClose" hidden title="Stop relaunching and close every Arkuzo client"><span data-icon="x"></span>Stop &amp; close clients</button>
+            <button class="btn danger" id="btnFarmStop" hidden><span data-icon="power"></span>Stop farm</button>
+            <button class="btn accent" id="btnFarmStart"><span data-icon="play"></span>Start farm</button>
+          </div>
+          <div class="farm-join">
+            <span class="lbl">Place</span>
+            <input class="inp" id="placeInput" inputmode="numeric" autocomplete="off" placeholder="Place ID, e.g. 920587237" aria-label="Place to farm">
+            <span class="hint" id="placeHint">The number in the game's link: roblox.com/games/<b>ID</b>/…</span>
+            <span id="serverPill"></span>
+          </div>
+          <div class="notice" id="farmNotice" hidden></div>
+        </article>
+        <article class="card" id="vaultCard">
+          <div class="card-h"><span class="cap">Accounts</span><span class="card-s" id="vaultSub"></span><div class="spacer"></div>
+            <button class="btn ghost sm" id="btnCheckAll" title="Ask Roblox whether every cookie is still signed in"><span data-icon="check"></span>Check all</button>
+            <button class="btn sm" id="btnSignIn" title="Sign in to Roblox in a normal Microsoft Edge window; the account is added when you are signed in"><span data-icon="enter"></span>Sign in with browser</button>
+            <button class="btn accent sm" id="btnAddCookie"><span data-icon="plus"></span>Add cookie</button>
+          </div>
+          <form class="add-panel well" id="addPanel" hidden autocomplete="off">
+            <input class="inp" id="cookieInput" type="password" spellcheck="false" autocomplete="off" placeholder="Paste the .ROBLOSECURITY cookie" aria-label="Roblox cookie">
+            <button class="btn accent sm" type="submit"><span data-icon="plus"></span>Add account</button>
+            <button class="btn ghost sm" type="button" id="btnAddCancel">Cancel</button>
+            <span class="hint">Checked with Roblox, then stored on this PC encrypted for your Windows account. It never leaves this PC except to Roblox.</span>
+          </form>
+          <div class="login-line well" id="loginLine" hidden></div>
+          <div class="colhead vrow"><span></span><span>Account</span><span>Status</span><span class="hide-sm">Cookie</span><span class="hide-sm">Relaunch</span><span></span></div>
+          <div class="rows" id="vaultRows"></div>
+          <div class="empty-state" id="vaultEmpty" hidden><strong>No accounts yet</strong>Add a Roblox account by pasting its cookie or signing in with the browser. Arkuzo then launches, watches and relaunches it without Volt.</div>
+        </article>
+        <div class="folds">
+          <details class="card fold wide" id="foldLayout">
+            <summary><div class="pane-h"><span class="tile lg" style="--c:#38bdf8"><span data-icon="hud"></span></span><div><div class="ttl">Window layout</div><div class="st">Small client windows in an orderly grid, like Volt</div></div><span class="sum" id="sumLayout"></span><span class="chev"><span data-icon="chevron-right"></span></span></div></summary>
+            <div class="divider"></div>
+            <div class="card-b layout-grid"><div id="layoutSettings"></div>
+              <div class="preview-box"><div class="screen" id="layoutPreview"></div>
+                <div class="preview-cap"><span id="previewCap"></span><span class="spacer"></span><button class="btn sm" id="btnArrange" title="Put every client window in its place now"><span data-icon="hud"></span>Arrange now</button></div></div></div>
+          </details>
+          <details class="card fold" id="foldFarm">
+            <summary><div class="pane-h"><span class="tile lg" style="--c:#34d399"><span data-icon="play"></span></span><div><div class="ttl">Farm settings</div><div class="st">Launch pacing, relaunch and cookie checks</div></div><span class="sum" id="sumFarm"></span><span class="chev"><span data-icon="chevron-right"></span></span></div></summary>
+            <div class="divider"></div>
+            <div class="card-b" id="farmSettings"></div>
+          </details>
+          <details class="card fold" id="foldServers">
+            <summary><div class="pane-h"><span class="tile lg" style="--c:#f472b6"><span data-icon="containers"></span></span><div><div class="ttl">Private servers</div><div class="st">Join a private server instead of a public one</div></div><span class="sum" id="sumServers"></span><span class="chev"><span data-icon="chevron-right"></span></span></div></summary>
+            <div class="divider"></div>
+            <div class="card-b" id="serverBox"></div>
+          </details>
+        </div>
+        <article class="card" id="accountsCard" hidden>
           <div class="card-h"><span class="cap">Volt accounts</span><span class="card-s" id="acctSub"></span></div>
           <div class="rows" id="accounts"></div>
           <div class="empty-state" id="acctEmpty" hidden><strong>Volt Account Manager not reachable</strong>Open Volt with the Account Manager visible; accounts and auto-recovery appear here.</div>
@@ -521,7 +650,9 @@ const $ = (id) => document.getElementById(id);
 
 // ---------- vector icons: the Arkuzo Client's own VectorIcons path set ----------
 const ICON_SPECS = {
-  search: 'c 11 11 7; p M20.5 20.5 L16 16', x: 'p M18 6 L6 18; p M6 6 L18 18', check: 'p M20 6 L9 17 L4 12',
+  search: 'c 11 11 7; p M20.5 20.5 L16 16', x: 'p M18 6 L6 18; p M6 6 L18 18', check: 'p M20 6 L9 17 L4 12', plus: 'p M12 5 V19; p M5 12 H19',
+  trash: 'p M4 7 H20; p M9 7 V4.5 H15 V7; f M6 7 L7 20 H17 L18 7', pencil: 'f M4 20 L5 15.5 L15.5 5 Q17 3.5 18.5 5 L19 5.5 Q20.5 7 19 8.5 L8.5 19 Z; p M13.5 7 L17 10.5',
+  refresh: 'a 12 12 8 30 300; p M20 4 V9 H15',
   'chevron-right': 'p M9 6 L15 12 L9 18', play: 'f M7 4.5 L19 12 L7 19.5 Z', power: 'a 12 13 8 120 300; p M12 3 V11',
   enter: 'p M9 10 L4 15 L9 20; p M20 4 V11 Q20 15 16 15 H4', info: 'c 12 12 10; p M12 16 V11.5; d 12 8',
   warning: 'f M10.3 3.9 L1.9 18 Q1.2 20.5 3.8 20.5 H20.2 Q22.8 20.5 22.1 18 L13.7 3.9 Q12 1.4 10.3 3.9 Z; p M12 9 V13; d 12 16.8',
@@ -650,7 +781,7 @@ for (const [name, hex] of Object.entries(ACCENTS)) {
 }
 const PAGES = {
   overview: ['Overview', 'Farm health at a glance'], clients: ['Clients', 'Every Roblox client the saver manages'],
-  accounts: ['Accounts', 'Volt accounts and auto-recovery'], activity: ['Activity', 'What the saver and autopilot did'], settings: ['Settings', 'Look, memory, CPU, health and recovery'],
+  accounts: ['Accounts', 'Your Roblox accounts, farm start and relaunch'], activity: ['Activity', 'What the saver and autopilot did'], settings: ['Settings', 'Look, memory, CPU, health and recovery'],
 };
 function showPage(page) {
   if (!PAGES[page]) return;
@@ -970,6 +1101,263 @@ function renderAccounts(st) {
   }));
 }
 
+// ---------- Arkuzo accounts ----------
+const agoMs = (ms) => ms ? fmtDur((Date.now() - ms) / 1000) + ' ago' : 'never';
+const acctName = (a) => a.alias || a.displayName || a.username || 'Account';
+function avatarFor(a) {
+  const img = el('img', { class: 'avatar', alt: '', loading: 'lazy', src: `/api/avatar?userId=${a.userId}` });
+  img.addEventListener('error', () => img.replaceWith(el('span', { class: 'avatar', text: initials(acctName(a)) })), { once: true });
+  return img;
+}
+async function loadVault() {
+  try { S.vault = await fetch('/api/vault', { cache: 'no-store' }).then((r) => r.json()); S.vaultAt = Date.now(); renderVault(); }
+  catch (e) { /* the state poll shows offline */ }
+}
+async function vaultAct(path, body, done, level) {
+  try { const r = await post(path, body); if (done) toast(done, level || 'good'); await loadVault(); return r.result; }
+  catch (e) { toast(e.message, 'critical'); await loadVault(); return null; }
+}
+function accountStatus(a, hb, farmRunning) {
+  if (a.cookieStatus === 'dead') return ['critical', 'Signed out'];
+  const live = a.live || {}, pid = live.processId;
+  const q = ((hb && hb.quarantined) || []).find((x) => x.accountId === a.id), until = q && Date.parse(q.untilUtc);
+  if (q && (!until || until > Date.now())) return ['serious', 'Quarantined'];
+  if (pid) {
+    const c = ((hb && hb.clients) || []).find((x) => x.pid === pid);
+    if (!c) return ['good', 'Running'];
+    const s = clientStatus(c, false);
+    return [s.level, s.label];
+  }
+  if (live.uiStatus === 'Launching') return ['info', 'Launching'];
+  if (((hb && hb.pending) || []).some((p) => p.accountId === a.id)) return ['warning', 'Relaunching'];
+  if (farmRunning && a.autoRelaunch) return ['neutral', 'Queued'];
+  return ['neutral', 'Offline'];
+}
+function renderVault() {
+  const v = S.vault; if (!v) return;
+  const st = S.state || {}, hb = st.heartbeat, active = v.activeProvider || (hb && hb.accountProvider), native = active === 'arkuzo';
+  const accounts = (v.accounts || []).slice().sort((a, b) => acctName(a).localeCompare(acctName(b)));
+  const farm = !!v.settings.farmRunning, inGame = accounts.filter((a) => (a.live || {}).processId).length;
+  const relaunch = accounts.filter((a) => a.autoRelaunch && a.cookieStatus !== 'dead').length, dead = accounts.filter((a) => a.cookieStatus === 'dead').length;
+  $('navAccounts').textContent = String(accounts.length || ((hb && hb.accounts) || []).length);
+  $('navAccounts').className = 'badge num' + (dead ? ' alert' : accounts.length ? '' : ' quiet');
+  // Farm card.
+  $('farmTile').style.setProperty('--c', farm ? '#34d399' : '#7e879a');
+  $('farmTitle').textContent = !native && accounts.length ? 'Volt is launching clients' : farm ? 'Farm running' : 'Farm stopped';
+  $('farmSub').textContent = !native && accounts.length ? 'Switch "Who launches clients" below to Arkuzo to farm without Volt.'
+    : farm ? `Keeping ${relaunch} account${relaunch === 1 ? '' : 's'} in game; relaunching ${v.settings.relaunchDelaySec}s after a close, launches ${v.settings.launchDelaySec}s apart.`
+    : 'Start the farm to launch every account that has relaunch on.';
+  $('farmStats').replaceChildren(...[['In game', `${inGame}/${accounts.length}`], ['Relaunch on', relaunch], ['Signed out', dead]].map(([k, n]) => el('div', {}, el('b', { text: String(n) }), el('span', { text: k }))));
+  $('btnFarmStart').hidden = farm; $('btnFarmStop').hidden = !farm; $('btnFarmStopClose').hidden = !farm;
+  $('btnFarmStart').disabled = !accounts.length;
+  const notice = v.error || v.providerNotice || (hb && hb.accountProviderNotice) ||
+    (v.unreadableCount ? `${v.unreadableCount} account row${v.unreadableCount === 1 ? '' : 's'} in data/accounts.json could not be read and ${v.unreadableCount === 1 ? 'is' : 'are'} kept untouched there.` : '');
+  $('farmNotice').hidden = !notice; $('farmNotice').textContent = notice || '';
+  // Sign-in line.
+  const login = v.login || {};
+  const busy = ['starting', 'waiting', 'reading'].includes(login.state);
+  $('btnSignIn').disabled = !v.browserLogin || busy;
+  if (!v.browserLogin) $('btnSignIn').title = 'Microsoft Edge is needed for browser sign-in';
+  $('loginLine').hidden = !busy;
+  if (busy) $('loginLine').replaceChildren(el('span', { class: 'spin' }), el('span', { text: login.message || 'Waiting for sign-in' }), el('div', { class: 'spacer' }),
+    el('button', { class: 'btn ghost sm', onclick: () => vaultAct('/api/vault/login/cancel', {}, 'Sign-in cancelled', 'neutral') }, 'Cancel'));
+  if (S.loginState && S.loginState !== login.state && (login.state === 'success' || login.state === 'failed')) toast(login.message, login.state === 'success' ? 'good' : 'critical');
+  S.loginState = login.state;
+  // Rows.
+  $('vaultSub').textContent = accounts.length ? `${accounts.length} account${accounts.length === 1 ? '' : 's'} · cookies encrypted on this PC` : '';
+  const editing = document.querySelector('#vaultRows .editor');
+  if (editing && editing.contains(document.activeElement)) { renderFarmSettings(v); renderServers(v); return; } // Never redraw under the cursor.
+  $('vaultEmpty').hidden = accounts.length > 0;
+  const servers = v.privateServers || [];
+  const rows = [];
+  for (const a of accounts.filter((x) => matches(acctName(x), x.username, x.group, x.notes))) {
+    const [level, label] = accountStatus(a, hb, farm);
+    const sw = el('input', { type: 'checkbox', 'aria-label': `Relaunch ${acctName(a)}` });
+    sw.checked = !!a.autoRelaunch;
+    sw.addEventListener('change', () => vaultAct('/api/vault/update', { id: a.id, fields: { autoRelaunch: sw.checked } }, `${acctName(a)}: relaunch ${sw.checked ? 'on' : 'off'}`, sw.checked ? 'good' : 'neutral'));
+    const ck = a.checking ? pill('info', 'Checking…', true) : a.cookieStatus === 'alive' ? pill('good', 'Alive', true) : a.cookieStatus === 'dead' ? pill('critical', 'Dead', true) : pill('neutral', 'Unchecked', true);
+    const live = !!(a.live || {}).processId || (a.live || {}).uiStatus === 'Launching';
+    const sub = el('div', { class: 'sb', style: 'display:flex;gap:6px;align-items:center' }, el('span', { text: '@' + a.username }), a.group ? el('span', { class: 'grp', text: a.group }) : null,
+      a.lastError && a.cookieStatus !== 'alive' ? el('span', { title: a.lastError, text: '· ' + a.lastError }) : null);
+    rows.push(el('div', { class: 'mrow vrow', 'aria-selected': String(S.vaultEdit === a.id) },
+      avatarFor(a),
+      el('div', { style: 'min-width:0' }, el('div', { class: 'nm', text: acctName(a) }), sub),
+      pill(level, label, true),
+      el('div', { class: 'ck-cell hide-sm' }, ck, el('span', { class: 'sb', text: a.lastCheckAtMs ? agoMs(a.lastCheckAtMs) : '' }),
+        el('button', { class: 'btn ghost sm icon', title: 'Check this cookie with Roblox', disabled: a.checking, onclick: () => vaultAct('/api/vault/check', { ids: [a.id] }, `Checking ${acctName(a)}…`, 'info') }, icon('refresh'))),
+      el('label', { class: 'sw hide-sm', title: 'Keep this account in game while the farm runs' }, sw, el('span', { class: 'track' })),
+      el('div', { class: 'row-actions' },
+        live ? el('button', { class: 'btn sm', title: 'Close this client and stop relaunching it', onclick: () => vaultAct('/api/vault/close', { id: a.id }, `Closing ${acctName(a)}`, 'neutral') }, icon('x'), 'Close')
+             : el('button', { class: 'btn sm', disabled: a.cookieStatus === 'dead' || !native, title: native ? 'Launch this account now' : 'Arkuzo launches only when it is the launcher (Farm settings)',
+                 onclick: () => vaultAct('/api/vault/launch', { id: a.id }, `Launching ${acctName(a)}…`, 'info') }, icon('play'), 'Launch'),
+        el('button', { class: 'btn ghost sm icon', title: 'Edit', 'aria-expanded': String(S.vaultEdit === a.id), onclick: () => { S.vaultEdit = S.vaultEdit === a.id ? null : a.id; renderVault(); } }, icon('pencil')))));
+    if (S.vaultEdit === a.id) rows.push(accountEditor(a, servers, v.settings));
+  }
+  $('vaultRows').replaceChildren(...rows);
+  renderFarmSettings(v);
+  renderServers(v);
+  $('accountsCard').hidden = native || !((hb && hb.accounts) || []).length;
+}
+function accountEditor(a, servers, settings) {
+  const f = {};
+  const field = (key, label, value, extra) => { f[key] = el('input', Object.assign({ class: 'inp', value: value || '', maxlength: key === 'notes' ? 500 : 40 }, extra || {})); return el('label', { class: key === 'notes' ? 'wide' : '' }, label, f[key]); };
+  const serverSel = el('select', {}, el('option', { value: '', text: 'Public server' }), ...servers.map((sv) => el('option', { value: sv.id, text: `${sv.name} · ${sv.placeId}` })));
+  serverSel.value = a.privateServerId || '';
+  const save = async () => {
+    const fields = { alias: f.alias.value, group: f.group.value, notes: f.notes.value, placeId: f.placeId.value.trim(), privateServerId: serverSel.value || null };
+    const r = await vaultAct('/api/vault/update', { id: a.id, fields }, `${f.alias.value || a.username} saved`);
+    if (r) { S.vaultEdit = null; renderVault(); }
+  };
+  return el('form', { class: 'editor well', onsubmit: (e) => { e.preventDefault(); save(); } },
+    field('alias', 'Name shown here', a.alias, { placeholder: a.displayName }), field('group', 'Group', a.group),
+    field('placeId', 'Place (overrides the farm default)', a.placeId, { inputmode: 'numeric', placeholder: settings.defaultPlaceId || 'Farm default' }),
+    el('label', {}, settings.privateServerMode === 'assigned' ? 'Private server' : 'Private server (needs mode "Per account")', serverSel),
+    field('notes', 'Notes', a.notes),
+    el('div', { class: 'bar' },
+      el('span', { class: 'sb', style: 'margin-right:auto;color:var(--dim);font-size:11.5px', text: `User ${a.userId} · tracker ${a.browserTrackerId} · added ${agoMs(a.createdAtMs)} · launched ${agoMs(a.lastLaunchAtMs)}` }),
+      el('button', { class: 'btn danger sm', type: 'button', onclick: () => { if (confirm(`Remove ${acctName(a)} and its stored cookie from this PC? A running client keeps running.`)) vaultAct('/api/vault/remove', { id: a.id }, `${acctName(a)} removed`, 'neutral'); } }, icon('trash'), 'Remove'),
+      el('button', { class: 'btn ghost sm', type: 'button', onclick: () => { S.vaultEdit = null; renderVault(); } }, 'Cancel'),
+      el('button', { class: 'btn accent sm', type: 'submit' }, icon('check'), 'Save')));
+}
+const FARM_FIELDS = [
+  ['provider', 'Who launches clients', 'Arkuzo uses the accounts above; Volt uses its own account manager. Auto picks Arkuzo once you add an account and Volt is closed.', ['enum', ['auto', 'arkuzo', 'volt']]],
+  ['launchDelaySec', 'Launch spacing', 'Seconds between two launches. Roblox and executors cope better with some space.', ['int', 5, 120, 's']],
+  ['relaunchDelaySec', 'Relaunch delay', 'Wait after a client closed before launching it again.', ['int', 0, 600, 's']],
+  ['launchTimeoutSec', 'Launch timeout', 'If no client appears in this time, the launch is retried.', ['int', 30, 600, 's']],
+  ['autoRelaunchEnabled', 'Relaunch accounts', 'Master switch for every account\'s relaunch toggle.', ['bool']],
+  ['multiInstance', 'Multiple clients', 'Hold Roblox\'s single-instance lock so many clients run side by side.', ['bool']],
+  ['launchMethod', 'Launch method', 'Direct starts RobloxPlayerBeta; Protocol goes through Roblox\'s launcher (updates Roblox first).', ['enum', ['direct', 'protocol']]],
+  ['cookieCheckMinutes', 'Cookie check', 'Ask Roblox whether every cookie is still signed in this often (0 = only by hand).', ['int', 0, 1440, 'min']],
+];
+const LAYOUT_FIELDS = [
+  ['arrangeWindows', 'Arrange windows', 'Keep every client in its own small window in an orderly grid.', ['bool']],
+  ['arrangeLayout', 'Layout', 'Grid: side by side in rows. Cascade: stacked diagonally, each title bar visible.', ['enum', ['grid', 'cascade'], { grid: 'Grid', cascade: 'Cascade' }]],
+  ['arrangePerRow', 'Windows per row', 'When a column of rows fills the screen, the next one starts beside it.', ['int', 1, 12, '']],
+  ['arrangeWidth', 'Window width', '', ['int', 160, 1920, 'px']],
+  ['arrangeHeight', 'Window height', '', ['int', 120, 1440, 'px']],
+  ['arrangeGap', 'Gap', 'Space between windows.', ['int', 0, 40, 'px']],
+  ['arrangeCorner', 'Start corner', 'Where the first window goes.', ['enum', ['top-left', 'top-right', 'bottom-left', 'bottom-right'], { 'top-left': 'Top left', 'top-right': 'Top right', 'bottom-left': 'Bottom left', 'bottom-right': 'Bottom right' }]],
+  ['arrangeMonitor', 'Screen', 'Which monitor the clients go to.', ['monitor']],
+  ['arrangeOrder', 'Order', 'Fixed: every account keeps its own spot, even while another is relaunching. By name or by launch: no gaps.', ['enum', ['fixed', 'name', 'launch'], { fixed: 'Fixed per account', name: 'By name', launch: 'By launch time' }]],
+  ['arrangeMode', 'Hold position', 'Keep: windows moved away snap back. Place once: new windows are placed, then you can move them freely.', ['enum', ['keep', 'once'], { keep: 'Keep in place', once: 'Place once' }]],
+  ['arrangeVisibility', 'Windows', 'Normal: they stay where Windows puts them. Behind: kept under your other windows, never stealing focus. Minimized: in the taskbar (renders least).', ['enum', ['normal', 'background', 'minimized'], { normal: 'Normal', background: 'Behind other windows', minimized: 'Minimized' }]],
+];
+function renderFields(box, fields, v) {
+  if (box.contains(document.activeElement)) return; // Do not redraw under the cursor.
+  box.replaceChildren(...fields.map(([key, name, hint, rule]) => {
+    const value = key === 'provider' ? v.provider : v.settings[key];
+    let ctl;
+    const save = (val) => key === 'provider'
+      ? post('/api/config', { changes: { accounts: { provider: val } } }).then(() => { toast(`Launcher: ${val}`, 'good'); loadVault(); }).catch((e) => { toast(e.message, 'critical'); loadVault(); })
+      : vaultAct('/api/vault/settings', { changes: { [key]: val } }, `${name} saved`);
+    if (rule[0] === 'bool') {
+      const input = el('input', { type: 'checkbox' }); input.checked = !!value;
+      input.addEventListener('change', () => save(input.checked));
+      ctl = el('label', { class: 'sw' }, input, el('span', { class: 'track' }));
+    } else if (rule[0] === 'enum') {
+      ctl = el('select', {}, ...rule[1].map((o) => el('option', { value: o, text: (rule[2] || {})[o] || o.charAt(0).toUpperCase() + o.slice(1) })));
+      ctl.value = value; ctl.addEventListener('change', () => save(ctl.value));
+    } else if (rule[0] === 'monitor') {
+      const n = Math.max(1, v.monitors || 1);
+      ctl = el('select', {}, el('option', { value: '0', text: 'Main screen' }), ...Array.from({ length: n }, (_, i) => el('option', { value: String(i + 1), text: `Screen ${i + 1}` })));
+      ctl.value = String(value || 0); ctl.addEventListener('change', () => save(Number(ctl.value)));
+    } else if (rule[0] === 'text') {
+      ctl = el('input', { class: 'inp', value: value || '', inputmode: 'numeric', placeholder: 'e.g. 920587237' });
+      ctl.addEventListener('change', () => save(ctl.value.trim()));
+    } else {
+      ctl = el('input', { type: 'number', min: rule[1], max: rule[2], value });
+      ctl.addEventListener('change', () => save(Number(ctl.value)));
+    }
+    const hintEl = el('span', { class: 'hint2' }); hintEl.innerHTML = hint.replace(/</g, '&lt;').replace(/&lt;b>/g, '<b>').replace(/&lt;\/b>/g, '</b>');
+    return el('div', { class: 'field' }, el('span', { class: 'name', text: name }), hintEl, el('div', { class: 'ctl' }, ctl, rule[3] ? el('span', { class: 'unit', text: rule[3] }) : null));
+  }));
+}
+function renderFarmSettings(v) {
+  renderFields($('farmSettings'), FARM_FIELDS, v);
+  renderFields($('layoutSettings'), LAYOUT_FIELDS, v);
+  const st = v.settings;
+  $('sumFarm').textContent = `${st.launchDelaySec}s apart · relaunch after ${st.relaunchDelaySec}s`;
+  $('sumLayout').textContent = !st.arrangeWindows ? 'Off' : st.arrangeLayout === 'cascade' ? `Cascade · ${st.arrangeWidth}×${st.arrangeHeight}` : `${st.arrangePerRow} per row · ${st.arrangeWidth}×${st.arrangeHeight}`;
+  const servers = v.privateServers || [];
+  $('sumServers').textContent = st.privateServerMode === 'none' ? (servers.length ? `Off · ${servers.length} saved` : 'Off') : st.privateServerMode === 'shared' ? 'One for all' : 'Per account';
+  const place = $('placeInput');
+  if (document.activeElement !== place) place.value = st.defaultPlaceId || '';
+  $('serverPill').replaceChildren(st.privateServerMode === 'none' ? '' : pill('info', st.privateServerMode === 'shared' ? 'Private server for all' : 'Private server per account', true));
+  renderLayoutPreview(v);
+}
+// Mirrors Get-ArkuzoWindowSlots in the engine, on the screen this window is on.
+function layoutSlots(count, st, W, H) {
+  const w = st.arrangeWidth, h = st.arrangeHeight, gap = st.arrangeGap, right = st.arrangeCorner.endsWith('right'), bottom = st.arrangeCorner.startsWith('bottom'), out = [];
+  for (let i = 0; i < count; i++) {
+    let dx, dy;
+    if (st.arrangeLayout === 'cascade') { const step = 32, fit = Math.max(1, Math.floor(Math.min(W - w, H - h) / step) + 1); dx = dy = (i % fit) * step; }
+    else { const rows = Math.max(1, Math.floor((H + gap) / (h + gap))), per = st.arrangePerRow * rows, block = Math.floor(i / per), within = i % per;
+      dx = (block * st.arrangePerRow + within % st.arrangePerRow) * (w + gap); dy = Math.floor(within / st.arrangePerRow) * (h + gap); }
+    out.push([right ? W - dx - w : dx, bottom ? H - dy - h : dy, w, h]);
+  }
+  return out;
+}
+function renderLayoutPreview(v) {
+  const st = v.settings, box = $('layoutPreview');
+  const [SW, SH, W, H] = v.screen || [1920, 1080, 1920, 1040];
+  box.style.aspectRatio = `${W} / ${H}`;
+  const accounts = (v.accounts || []).slice().sort((a, b) => acctName(a).toLowerCase().localeCompare(acctName(b).toLowerCase()));
+  const shown = st.arrangeOrder === 'fixed' ? accounts : accounts.filter((a) => (a.live || {}).processId || (a.autoRelaunch && a.cookieStatus !== 'dead'));
+  const list = shown.length ? shown : [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }];
+  const slots = layoutSlots(list.length, st, W, H);
+  const off = slots.filter(([x, y, w, h]) => x + w > W + 1 || y + h > H + 1 || x < -1 || y < -1).length;
+  box.replaceChildren(...list.map((a, i) => {
+    const [x, y, w, h] = slots[i], live = !!(a.live || {}).processId;
+    return el('div', { class: 'win' + (shown.length && !live ? ' off' : '') + (st.arrangeVisibility === 'background' ? ' bg' : ''), title: a.username ? acctName(a) : '',
+      style: `left:${x / W * 100}%;top:${y / H * 100}%;width:${w / W * 100}%;height:${h / H * 100}%`, text: a.username ? initials(acctName(a)) : '' });
+  }));
+  box.style.opacity = st.arrangeWindows ? '1' : '0.45';
+  $('previewCap').textContent = !st.arrangeWindows ? 'Arranging is off'
+    : `${list.length} window${list.length === 1 ? '' : 's'}${shown.length ? '' : ' (example)'}` + (off ? ` · ${off} off-screen: make them smaller or use more per row` : '') + (st.arrangeVisibility === 'minimized' ? ' · minimized' : '');
+}
+for (const id of ['foldLayout', 'foldFarm', 'foldServers']) {
+  const d = $(id), saved = store.get('arkuzo-' + id);
+  d.open = saved == null ? id === 'foldLayout' : saved === '1';
+  d.addEventListener('toggle', () => store.set('arkuzo-' + id, d.open ? '1' : '0'));
+}
+$('placeInput').addEventListener('change', () => vaultAct('/api/vault/settings', { changes: { defaultPlaceId: $('placeInput').value.trim() } }, 'Place saved'));
+$('placeInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('placeInput').blur(); });
+$('btnArrange').onclick = () => vaultAct('/api/vault/arrange', {}, 'Arranging client windows', 'good');
+function renderServers(v) {
+  const box = $('serverBox');
+  if (box.contains(document.activeElement)) return;
+  const servers = v.privateServers || [], used = (id) => (v.accounts || []).filter((a) => a.privateServerId === id).length;
+  const mode = el('select', { style: 'width:180px' }, ...[['none', 'Off (public servers)'], ['shared', 'One server for all'], ['assigned', 'Per account']].map(([k, t]) => el('option', { value: k, text: t })));
+  mode.value = v.settings.privateServerMode;
+  mode.addEventListener('change', () => vaultAct('/api/vault/settings', { changes: { privateServerMode: mode.value } }, 'Private server mode saved'));
+  const shared = el('select', { style: 'width:180px' }, el('option', { value: '', text: 'Choose a server' }), ...servers.map((sv) => el('option', { value: sv.id, text: sv.name })));
+  shared.value = v.settings.sharedPrivateServerId || '';
+  shared.addEventListener('change', () => vaultAct('/api/vault/settings', { changes: { sharedPrivateServerId: shared.value || null } }, 'Shared server saved'));
+  const name = el('input', { class: 'inp', placeholder: 'Name', maxlength: 60 }), link = el('input', { class: 'inp', placeholder: 'Private server link (share or privateServerLinkCode link)' });
+  const add = el('button', { class: 'btn accent sm', type: 'submit' }, icon('plus'), 'Add');
+  box.replaceChildren(
+    el('div', { class: 'field' }, el('span', { class: 'name', text: 'Mode' }), el('span', { class: 'hint2', text: 'Per account: pick the server in each account\'s editor.' }), el('div', { class: 'ctl' }, mode)),
+    v.settings.privateServerMode === 'shared' ? el('div', { class: 'field' }, el('span', { class: 'name', text: 'Server' }), el('span', { class: 'hint2', text: 'Every account joins this one.' }), el('div', { class: 'ctl' }, shared)) : '',
+    ...(servers.length ? servers.map((sv) => el('div', { class: 'srv-row' }, el('div', { style: 'min-width:0' }, el('div', { class: 'nm', style: 'font-weight:650', text: sv.name }), el('div', { class: 'sb', style: 'color:var(--muted);font-size:11.5px', text: `Place ${sv.placeId} · ${used(sv.id)} account${used(sv.id) === 1 ? '' : 's'}` })),
+      el('span'), el('button', { class: 'btn ghost sm icon', title: 'Remove', onclick: () => { if (confirm(`Remove ${sv.name}?`)) vaultAct('/api/vault/servers/remove', { id: sv.id }, `${sv.name} removed`, 'neutral'); } }, icon('trash'))))
+      : [el('div', { class: 'sb', style: 'color:var(--muted);font-size:12px;padding:8px 2px', text: 'No private servers yet. The link code is stored encrypted like the cookies.' })]),
+    el('form', { class: 'srv-add', onsubmit: async (e) => { e.preventDefault(); add.disabled = true; const r = await vaultAct('/api/vault/servers/add', { name: name.value, link: link.value }, 'Private server added'); add.disabled = false; if (r) { name.value = ''; link.value = ''; } } }, name, link, add));
+}
+$('btnAddCookie').onclick = () => { $('addPanel').hidden = !$('addPanel').hidden; if (!$('addPanel').hidden) $('cookieInput').focus(); };
+$('btnAddCancel').onclick = () => { $('cookieInput').value = ''; $('addPanel').hidden = true; };
+$('addPanel').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const cookie = $('cookieInput').value; $('cookieInput').value = '';
+  if (!cookie.trim()) return;
+  const r = await vaultAct('/api/vault/add', { cookie }, null);
+  if (r) { toast(r.updated ? `${r.displayName}: cookie refreshed` : `Added ${r.displayName} (@${r.username})`, 'good'); $('addPanel').hidden = true; }
+});
+$('btnSignIn').onclick = () => vaultAct('/api/vault/login', {}, 'Sign in to Roblox in the Edge window that opened', 'info');
+$('btnCheckAll').onclick = () => vaultAct('/api/vault/check', {}, 'Checking every cookie with Roblox…', 'info');
+$('btnFarmStart').onclick = () => vaultAct('/api/farm/start', {}, 'Farm started: launching accounts one by one', 'good');
+$('btnFarmStop').onclick = () => vaultAct('/api/farm/stop', {}, 'Farm stopped: clients keep running, nothing is relaunched', 'warning');
+$('btnFarmStopClose').onclick = () => { if (confirm('Stop the farm and close every Arkuzo client?')) vaultAct('/api/farm/stop', { closeClients: true }, 'Farm stopped; closing clients', 'warning'); };
+
 // ---------- activity ----------
 function feedItems(filter) {
   return S.events.filter((e) => (filter === 'all' || (filter === 'recovery' && e.category === 'recovery') ||
@@ -999,6 +1387,7 @@ function renderAll() {
   renderSaver(st); renderIssues(st); renderKpis(st); renderClients(st); renderAccounts(st); renderFeed(); redrawCharts(); syncPrefs(st.prefs);
   const stale = isStale(st);
   for (const id of ['kpis', 'ovClientsCard', 'clientsCard', 'accountsCard']) $(id).classList.toggle('stale', stale);
+  renderVault();
 }
 // Each open window registers with its id; closing the last one quits the Control Center cleanly.
 const PAGE_ID = Math.random().toString(36).slice(2, 12);
@@ -1020,6 +1409,7 @@ async function poll() {
     if (st.events.length) { S.events.push(...st.events); S.lastEvent = st.events[st.events.length - 1].id;
       if (S.events.length > 500) { const drop = S.events.length - 500; S.events.splice(0, drop); S.seenEvents = Math.max(0, S.seenEvents - drop); } }
     if (S.live) renderAll(); else renderSaver(st);
+    if (S.page === 'accounts' || !S.vaultAt || Date.now() - S.vaultAt > 15000 || ['starting', 'waiting', 'reading'].includes(S.loginState)) loadVault();
     introProgress(st);
   } catch (e) { $('offline').hidden = false; }
   finally { setTimeout(poll, 2000); }

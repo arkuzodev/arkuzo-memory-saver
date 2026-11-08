@@ -114,6 +114,14 @@ The **88% threshold is a candidate-selection policy, not a guarantee**. OS commi
 | `abandon_after_sec` | `5400` | Unresolved recovery age after which the same quarantine applies. |
 | `quarantine_sec` | `1800` | How long a quarantined account is left untouched before normal recovery resumes. `0` releases it without a quarantine. |
 
+## `accounts`: who launches clients
+
+| Key | Values | Meaning |
+| :--- | :--- | :--- |
+| `provider` | `auto` (default), `arkuzo`, `volt` | `arkuzo`: the saver launches and relaunches the accounts in `data/accounts.json` itself. `volt`: Volt's account manager does, as before. `auto`: Arkuzo once `data/accounts.json` holds an account and Volt's manager isn't running, otherwise Volt. An active Arkuzo farm stays on Arkuzo if Volt starts later. |
+
+Arkuzo's account list, farm settings (place, launch spacing, relaunch delay, launch timeout) and private servers live in `data/accounts.json`, managed on the Control Center's Accounts page; see [accounts without Volt](accounts.md). With `arkuzo`, the `recovery` section's journal, quarantine and readiness settings still apply. Its Volt-specific waits (`restore_wait_sec`, `relaunch_delay_sec`, `retry_base_sec`) are replaced by the account list's relaunch delay, launch spacing and launch timeout.
+
 ## `pagefile`: guarded virtual memory scaling (bounded)
 
 | Key | Default | Meaning |

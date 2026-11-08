@@ -115,13 +115,18 @@ try {
         $diagnostic = @($records | Where-Object { $_.event -eq 'NATIVE_PRIVILEGES' })
         Assert ($diagnostic.Count -eq 1) 'Initialization status must reach the real JSON-line diagnostic log.'
         Assert ($diagnostic[0].data.privileges[0].Win32Error -eq 1300) 'Diagnostic must preserve the real unavailable privilege code.'
-        $key = 'native-privilege-' + $absent
-        Assert ($script:dashboardIssues.ContainsKey($key)) 'Unavailable privilege must reach the real Warn-Throttled dashboard issue map.'
-        Assert ($script:dashboardIssues[$key].Message.Contains($absent) -and $script:dashboardIssues[$key].Message.Contains('Win32 1300')) 'Dashboard warning must name the unavailable privilege and error code.'
+        # A privilege the account simply doesn't hold (normal, non-administrator) is logged, not shown.
+        Assert ($script:dashboardIssues.Count -eq 0) 'An absent privilege must not raise a dashboard notice.'
+        Assert (@($records | Where-Object { $_.event -eq 'WARNING' }).Count -eq 0) 'An absent privilege must not log a warning.'
+        # One that is held but can't be enabled still warns, with the existing 30-second throttling.
+        $failed = [pscustomobject]@{ Name = 'SeIncreaseWorkingSetPrivilege'; Status = 'Failed'; Present = $true; Succeeded = $false; Enabled = $false; Win32Error = 5; Message = 'AdjustTokenPrivileges failed (Win32 5)' }
+        $status = [pscustomobject]@{ attempted=$true; available=$false; reason='Completed'; privileges=@($failed) }
+        Write-ArkuzoNativePrivilegeStatus $status
         Write-ArkuzoNativePrivilegeStatus $status
         $records = @(Get-Content -LiteralPath $script:logPath | ForEach-Object { $_ | ConvertFrom-Json })
+        Assert ($script:dashboardIssues.ContainsKey('native-privilege-SeIncreaseWorkingSetPrivilege') -and $script:dashboardIssues['native-privilege-SeIncreaseWorkingSetPrivilege'].Message.Contains('Win32 5')) 'A held privilege that fails to enable must reach the dashboard with its error code.'
         Assert (@($records | Where-Object { $_.event -eq 'WARNING' }).Count -eq 1) 'Unavailable-privilege warning must use existing 30-second throttling.'
-        Write-Output 'PASS: real unavailable result reaches JSON diagnostics and throttled dashboard warning.'
+        Write-Output 'PASS: an absent privilege is logged only; a failed one reaches diagnostics and a throttled dashboard warning.'
     }
     $script:warnings = @{}; $script:dashboardIssues = @{}
     foreach ($gate in @(

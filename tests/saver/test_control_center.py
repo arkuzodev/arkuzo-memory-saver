@@ -356,6 +356,9 @@ class IssueTests(unittest.TestCase):
         self.assertTrue(any('91%' in t for t in titles))
         self.assertTrue(any('Farmer01' in t for t in titles))
         self.assertEqual(cc.derive_issues(None, None, {'state': 'stopped'}), [])
+        # Arkuzo launches the clients: Volt's Account Manager is not needed.
+        titles = [i['title'] for i in cc.derive_issues(dict(hb, accountProvider='arkuzo'), 3, {'state': 'running'})]
+        self.assertFalse(any('Volt' in t for t in titles))
 
 
 class HttpTests(unittest.TestCase):

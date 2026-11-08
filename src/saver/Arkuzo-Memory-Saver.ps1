@@ -4368,6 +4368,9 @@ function Write-ArkuzoNativePrivilegeStatus($Status) {
     Write-Diagnostic 'NATIVE_PRIVILEGES' $Status
     if (-not $Status.attempted) { return }
     foreach ($privilege in @($Status.privileges)) {
+        # Normal (non-administrator) accounts don't hold SeDebugPrivilege at all; the saver
+        # works without it. Only a privilege that is held but can't be enabled is worth a notice.
+        if ($privilege.Status -ceq 'NotAssigned' -or $privilege.Present -eq $false) { continue }
         if (-not $privilege.Succeeded -or -not $privilege.Enabled) {
             Warn-Throttled ('native-privilege-' + $privilege.Name) ($privilege.Name + ' unavailable: ' + $privilege.Message + ' Native operations remain best-effort; process protections still apply.')
         }

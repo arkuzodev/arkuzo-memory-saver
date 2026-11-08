@@ -1561,7 +1561,8 @@ def derive_issues(hb, age, supervisor_state) -> list:
         add('critical', 'Recovery journal is not healthy', 'Recovery is blocked; check data/recovery-state.json.')
     if not (hb.get('recovery') or {}).get('enabled'):
         add('warning', 'Account recovery is disabled in settings')
-    if not hb.get('voltControlAvailable'):
+    arkuzo = hb.get('accountProvider') == 'arkuzo'
+    if not arkuzo and not hb.get('voltControlAvailable'):  # Only Volt farms need Volt's Account Manager.
         add('warning', 'Volt Account Manager is not reachable', 'Keep Volt open with the Account Manager accessible so clients can be recovered.')
     memory = hb.get('systemMemory') or {}
     commit = float(memory.get('commitPercent') or 0)
@@ -1579,7 +1580,9 @@ def derive_issues(hb, age, supervisor_state) -> list:
             f"{q.get('retryCount')} failed recoveries; retried automatically after the quarantine ends.")
     dead = hb.get('suspendedAccounts') or []
     if dead:
-        add('warning', f'{len(dead)} account(s) paused with a dead cookie', 'Log those accounts in again in Volt; they resume automatically.')
+        add('warning', f'{len(dead)} account(s) paused with a dead cookie',
+            'Add them again on the Accounts page (cookie or browser sign-in); they resume automatically.' if arkuzo
+            else 'Log those accounts in again in Volt; they resume automatically.')
     return issues
 
 

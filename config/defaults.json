@@ -26,7 +26,14 @@
     "cooldown_sec": 90,
     "max_recycles_per_hour": 20,
     "trim_spacing_sec": 2,
-    "private_limit_sustain_sec": 60
+    "private_limit_sustain_sec": 60,
+    "farm_freeze_enabled": true,
+    "farm_freeze_confirm_sec": 35,
+    "farm_freeze_min_clients": 3,
+    "farm_freeze_onset_window_sec": 15,
+    "farm_freeze_max_cpu_percent": 2,
+    "farm_freeze_spacing_sec": 20,
+    "farm_freeze_refreeze_sec": 900
   },
   "recovery": {
     "enabled": true,

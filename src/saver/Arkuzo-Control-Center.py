@@ -87,6 +87,9 @@ SCHEMA = {
         'cooldown_sec': ('int', 30, 300), 'max_recycles_per_hour': ('int', 1, 60), 'trim_spacing_sec': ('int', 1, 30),
         'startup_error_timeout_sec': ('int', 0, 300), 'disconnect_timeout_sec': ('int', 0, 300),
         'private_limit_sustain_sec': ('int', 0, 300),
+        'farm_freeze_enabled': ('bool',), 'farm_freeze_confirm_sec': ('int', 20, 120), 'farm_freeze_min_clients': ('int', 3, 50),
+        'farm_freeze_onset_window_sec': ('int', 5, 60), 'farm_freeze_max_cpu_percent': ('int', 1, 10),
+        'farm_freeze_spacing_sec': ('int', 10, 60), 'farm_freeze_refreeze_sec': ('int', 0, 86400),
     },
     'recovery': {
         'enabled': ('bool',), 'restore_missing': ('bool',), 'restore_wait_sec': ('int', 90, 900),
@@ -106,6 +109,7 @@ EVENT_KINDS = {
     'CLIENT_START': 'client', 'CLIENT_EXIT': 'client', 'CLIENT_STATE_CHANGED': 'client',
     'CLIENT_LOG_DISCONNECT_DETECTED': 'recovery', 'EXECUTOR_KICK_SIGNAL_TRIGGERED': 'recovery',
     'RECOVERY_REQUESTED': 'recovery', 'CLIENT_CLOSED_FOR_RECOVERY': 'recovery', 'EXITED_CLIENT_RECOVERY_QUEUED': 'recovery', 'ACCOUNT_RESTORED_VERIFIED': 'recovery',
+    'FARM_FREEZE_DETECTED': 'recovery', 'FARM_FREEZE_EPISODE_END': 'recovery',
     'VOLT_MISSING_LAUNCH_REQUEST': 'recovery', 'VOLT_MISSING_LAUNCH_RESULT': 'recovery', 'MISSING_ACCOUNT_DETECTED': 'recovery',
     'RECOVERY_OUTCOME_STATE': 'recovery', 'RECOVERY_QUARANTINED': 'recovery', 'RECOVERY_CANCELLED_BY_POLICY': 'recovery',
     'LAUNCH_REFUSED_DEAD_COOKIE': 'recovery', 'COOKIE_ACCOUNT_SUSPENDED': 'recovery', 'COOKIE_ACCOUNT_RESUMED': 'recovery',
@@ -356,7 +360,7 @@ def summarize_event(record: dict, names: dict) -> dict | None:
     elif kind == 'CLIENT_STATE_CHANGED':
         sample = data.get('sample') if isinstance(data.get('sample'), dict) else {}
         state = sample.get('state')
-        if state not in ('STUCK CLIENT', 'LEAK GUARD', 'DISCONNECTED', 'VOLT STARTUP ERROR', 'CRITICAL COMMIT', 'NOT RESPONDING', 'COMMIT PRESSURE'):
+        if state not in ('STUCK CLIENT', 'LEAK GUARD', 'DISCONNECTED', 'VOLT STARTUP ERROR', 'CRITICAL COMMIT', 'NOT RESPONDING', 'COMMIT PRESSURE', 'FARM FREEZE'):
             return None  # Ordinary transitions would drown the feed.
         level = 'warning'
         text = f"{sample.get('account') or 'PID ' + str(sample.get('pid'))}: {state.lower()}"
@@ -375,6 +379,14 @@ def summarize_event(record: dict, names: dict) -> dict | None:
     elif kind == 'EXITED_CLIENT_RECOVERY_QUEUED':
         why = {'IN_GAME_DISCONNECT': 'disconnected', 'UNRESPONSIVE_EXIT': 'frozen', 'SUSTAINED_HANG': 'frozen'}.get(data.get('reason'), 'waiting for recovery')
         level, text = 'warning', f"{who()} closed while {why}; relaunch queued"
+    elif kind == 'FARM_FREEZE_DETECTED':
+        planned = data.get('planned') if isinstance(data.get('planned'), list) else []
+        level, text = 'warning', (f"Farm-wide freeze: {data.get('frozen')} of {data.get('population')} clients stopped together; "
+                                  f"recycling {len(planned)}, {data.get('spacingSec')} s apart")
+    elif kind == 'FARM_FREEZE_EPISODE_END':
+        members = data.get('members') if isinstance(data.get('members'), dict) else {}
+        closed = int(members.get('Closed') or 0)
+        text = f"Farm-freeze recovery {str(data.get('outcome', '')).lower()}: {closed} closed for relaunch"
     elif kind == 'VOLT_MISSING_LAUNCH_REQUEST':
         text = f"Asked Volt to launch {who()} (attempt {data.get('attempt')})"
     elif kind == 'VOLT_MISSING_LAUNCH_RESULT':

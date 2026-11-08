@@ -127,6 +127,26 @@ Case 'Flattened UI rows bind by exact username, not ancestor or slot' {
     Assert ($c.Status.accounts[1].uiStatus -eq 'Idle') 'Other account remains idle'
     Assert $c.Status.accounts[1].controlReady 'Missing account has exact idle launch control'
 }
+Case 'A row Volt is relaunching is reported by account, without loosening controlReady' {
+    $f=Fixture; $c=New-VoltControlContext @f
+    Assert ($c.Status.processMappingSafe -and @($c.Status.unmappedAccountIds).Count -eq 0) 'Fully mapped farm reports no unmapped rows'
+    Assert ($c.Status.accounts[0].rowReady -and $c.Status.accounts[1].rowReady) 'Exact rows are row-ready'
+    # Alpha's client exited and Volt counts down its relaunch: neither Connected nor Idle.
+    $f=Fixture; $f.Processes=@(); $f.Nodes[3].name='Relaunching in 28 seconds'; $f.Nodes[4].name='Waiting'
+    $c=New-VoltControlContext @f
+    Assert ($c.Status.available -and -not $c.Status.globalMappingSafe) 'A counting-down row breaks global mapping as before'
+    Assert ($c.Status.processMappingSafe) 'Process ownership itself is still exact'
+    Assert (@($c.Status.unmappedAccountIds).Count -eq 1 -and $c.Status.unmappedAccountIds[0] -ceq $f.Inventory.accounts[0].accountId) 'Exactly the relaunching account is named'
+    Assert (-not $c.Status.accounts[0].controlReady -and -not $c.Status.accounts[1].controlReady) 'controlReady still requires the whole farm'
+    Assert (-not $c.Status.accounts[0].rowReady -and $c.Status.accounts[1].rowReady) 'Only the exact idle row stays row-ready'
+    Assert (($c.Status | ConvertTo-Json -Depth 10) -match '"unmappedAccountIds":\s*\[') 'Unmapped rows serialize as a list'
+    # A live process Volt does not own poisons process mapping and every row.
+    $f=Fixture; $f.Processes[0].ownerStable=$false; $c=New-VoltControlContext @f
+    Assert (-not $c.Status.processMappingSafe -and -not $c.Status.accounts[0].rowReady -and -not $c.Status.accounts[1].rowReady) 'Unowned process fails every row closed'
+    # A Connected row whose socket names another process is unmapped too.
+    $f=Fixture; $f.Nodes[3].name='Socket connected to Roblox process PID 21'; $c=New-VoltControlContext @f
+    Assert (-not $c.Status.globalMappingSafe -and $c.Status.unmappedAccountIds -contains $f.Inventory.accounts[0].accountId -and -not $c.Status.accounts[0].rowReady) 'Socket mismatch is unmapped'
+}
 Case 'Ambiguous account identity blocks the entire adapter' {
     foreach($field in @('accountId','username','displayName','trackerId')) {
         $f=Fixture; $f.Inventory.accounts[1].$field=$f.Inventory.accounts[0].$field

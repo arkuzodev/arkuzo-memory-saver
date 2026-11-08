@@ -31,7 +31,7 @@
     "farm_freeze_confirm_sec": 35,
     "farm_freeze_min_clients": 3,
     "farm_freeze_onset_window_sec": 15,
-    "farm_freeze_max_cpu_percent": 2,
+    "farm_freeze_max_cpu_percent": 5,
     "farm_freeze_spacing_sec": 20,
     "farm_freeze_refreeze_sec": 900
   },

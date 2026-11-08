@@ -41,6 +41,25 @@ $Incidents = @(
     @{ name = '26 Oct 18:10'; onsets = @(0,0,0,1,1,2);     selfExit = @(198,197,198,197,197,197);         observedMean = 330; observedMax = 457; observedNotices = 4; reproduce = $true }
     @{ name = '27 Oct 07:38'; onsets = @(0,1,1,8,8,9);     selfExit = @(200,201,200,198,201,200);         observedMean = 338; observedMax = 436; observedNotices = 4; reproduce = $true }
 )
+# 8 Nov 00:35: a freeze while Volt was still starting a 10-client farm (one launch every
+# 9-15 s). The first three clients had answered and froze within 1 s of each other at
+# ages 18-43 s, inside the 90 s warm-up; one kept 3-4% CPU (dashboard scale) while frozen.
+# They quit by themselves 196-198 s later and Volt relaunched them within 1 s: three
+# notices and a fourth on a retry. starts/onsets are seconds from the first onset; $null
+# marks the healthy clients. observed* cover the three frozen accounts (in game again
+# at +335, +386 and +442 s). One more client quit at +190 s without freezing; Volt
+# relaunched it first, so that burst's first launch was not a frozen account's (quits).
+# reproduce: the replay of today gives 341 s / 388 s / 3 notices. The log has one more
+# notice, on a lone relaunch 43 s from any other launch, which the burst rule does not
+# model; that retry cost one account about 50 s. The replay of today is therefore
+# kinder than the log, and the improvement is measured against it.
+$StartupIncident = @{ name = '8 Nov 00:35 (startup)'
+    starts = @(-42,-30,-17,-5,10,24,33,47,60,74)
+    onsets = @(1,0,1,$null,$null,$null,$null,$null,$null,$null)
+    selfExit = @(198,198,196,$null,$null,$null,$null,$null,$null,$null)
+    frozenCpu = @(0.8,3.7,0.3,0,0,0,0,0,0,0)
+    quits = @($null,$null,$null,$null,$null,$null,$null,$null,$null,190)
+    observedMean = 388; observedMax = 442; observedNotices = 4; reproduce = $false }
 # Measured Volt relaunch latencies (client exit -> new client) for single exits, in log order.
 $RelaunchLatency = @(37,35,32,37,33,34,39,42,40,33,38,32,31,34,34,32,37,32)
 $ConnectSec = 5      # new client -> Volt socket connected (row Connected again)
@@ -81,8 +100,8 @@ function New-SimProcess([int]$ClientId) {
 }
 function New-SimClient([int]$Account, [double]$At, [bool]$Initial) {
     $id = $script:world.nextPid; $script:world.nextPid++
-    $script:world.clients[$id] = @{ pid = $id; account = $Account; startTicks = [long](1000 + $id); launchedAt = $At; initial = $Initial
-        frozen = $false; frozenAt = $null; selfExitAt = $null; noticeAt = $null; noticeDecided = $Initial; goodAt = $null
+    $script:world.clients[$id] = @{ pid = $id; account = $Account; startTicks = [long](1000 + $id); launchedAt = $At; initial = $Initial; first = $Initial
+        frozen = $false; frozenAt = $null; selfExitAt = $null; quitAt = $null; frozenCpu = 0.0; noticeAt = $null; noticeDecided = $Initial; goodAt = $null
         killed = $false; exited = $false; exitAt = $null }
     $script:world.accounts[$Account].live = $id
     if (-not $Initial) { [void]$script:world.launches.Add(@{ t = $At; account = $Account; pid = $id }) }
@@ -98,13 +117,15 @@ function Get-SimVoltStatus {
     $now = $script:simNow; $rows = @(); $unmapped = @()
     for ($i = 0; $i -lt $script:world.accounts.Count; $i++) {
         $a = $script:world.accounts[$i]; $ui = 'Unknown'; $procId = $null
-        if ($null -ne $a.live) {
+        # An account Volt has not started yet is an Idle row (mapped).
+        if ($null -ne $a.firstLaunchAt -and -not $a.firstLaunched) { $ui = 'Idle' }
+        elseif ($null -ne $a.live) {
             $c = $script:world.clients[[int]$a.live]
             if ($c.initial -or ($now - $c.launchedAt) -ge $script:ConnectSec) { $ui = 'Connected'; $procId = $c.pid }
         }
-        if ($ui -cne 'Connected') { $unmapped += $a.accountId }
+        if ($ui -cne 'Connected' -and $ui -cne 'Idle') { $unmapped += $a.accountId }
         $rows += [pscustomobject]@{ accountId = $a.accountId; username = "farm$i"; trackerId = $a.trackerId; autoRelaunch = $true; cookieAlive = $true; cookieStatus = 'alive'
-            suspensionSafe = $false; lastLaunchAtMs = 1; uiStatus = $ui; processId = $procId; rowReady = ($ui -ceq 'Connected'); controlReady = $false }
+            suspensionSafe = $false; lastLaunchAtMs = 1; uiStatus = $ui; processId = $procId; rowReady = ($ui -ceq 'Connected' -or $ui -ceq 'Idle'); controlReady = $false }
     }
     $global = ($unmapped.Count -eq 0)
     # Degraded: the adapter cannot bind a row Volt is relaunching and fails closed.
@@ -117,7 +138,7 @@ function Step-World([double]$Now) {
     foreach ($c in @($script:world.clients.Values)) {
         if ($c.exited) { continue }
         $exitAt = $null
-        if ($c.killed) { $exitAt = $c.exitAt } elseif ($c.frozen -and $null -ne $c.selfExitAt) { $exitAt = $c.selfExitAt }
+        if ($c.killed) { $exitAt = $c.exitAt } elseif ($c.frozen -and $null -ne $c.selfExitAt) { $exitAt = $c.selfExitAt } elseif ($null -ne $c.quitAt) { $exitAt = $c.quitAt }
         if ($null -ne $exitAt -and $Now -ge $exitAt) {
             $c.exited = $true; $a = $script:world.accounts[$c.account]
             if ($a.live -eq $c.pid) { $a.live = $null }
@@ -127,6 +148,13 @@ function Step-World([double]$Now) {
     }
     for ($i = 0; $i -lt $script:world.accounts.Count; $i++) {
         $a = $script:world.accounts[$i]
+        # Volt's own start of the farm: these connect (no notice in the log).
+        if ($null -ne $a.firstLaunchAt -and -not $a.firstLaunched -and $Now -ge $a.firstLaunchAt) {
+            $a.firstLaunched = $true; $c = $script:world.clients[(New-SimClient $i $Now $false)]
+            $c.first = $true; $c.noticeDecided = $true; $c.goodAt = $Now + $script:InGameSec
+            if ($null -ne $a.freeze) { $c.frozen = $true; $c.frozenAt = $a.freeze.at; $c.selfExitAt = $a.freeze.exit; $c.frozenCpu = $a.freeze.cpu }
+            $c.quitAt = $a.quitAt
+        }
         if ($null -eq $a.live -and $null -ne $a.relaunchAt -and $Now -ge $a.relaunchAt) { $a.relaunchAt = $null; [void](New-SimClient $i $Now $false) }
     }
     foreach ($c in @($script:world.clients.Values)) {
@@ -168,7 +196,7 @@ function Invoke-EnginePass([double]$Now) {
         $state = $script:tracked[$id]
         $sample = Get-SimSample $c
         $state.HealthDecision = Get-ArkuzoHealthDecision $state $sample $script:healthPolicy $Now
-        $cpuSeconds = $(if ($sample.responding) { $Now * 0.4 } else { [double]$c.frozenAt * 0.4 })
+        $cpuSeconds = $(if ($sample.responding) { $Now * 0.4 } else { [double]$c.frozenAt * 0.4 + ($Now - [double]$c.frozenAt) * [double]$c.frozenCpu * 16 / 100 })
         Update-ArkuzoHangCpu $state $cpuSeconds $Now 16
         $state.LastSnapshot = @{ pid = $id; windowPresent = $sample.windowPresent; responding = $sample.responding; launchError = $sample.launchError; privateMB = 2500.0; state = $state.HealthDecision.Status }
         $state.HealthSnapshotUtc = [datetime]::UtcNow.ToString('o')
@@ -180,7 +208,7 @@ function Invoke-EnginePass([double]$Now) {
     Update-ArkuzoFarmFreeze
     Invoke-ArkuzoRecoveryCandidates
 }
-function Invoke-Replay($Incident, [bool]$FastPath, [int]$SpacingSec = 20, [int]$ConfirmSec = 35, [int]$LatencyOffset = 0, [bool]$Degraded = $false) {
+function Invoke-Replay($Incident, [bool]$FastPath, [int]$SpacingSec = 20, [int]$ConfirmSec = 35, [int]$LatencyOffset = 0, [bool]$Degraded = $false, [int]$MaxCpu = 5) {
     $script:DegradedVolt = $Degraded
     $script:events = New-Object Collections.ArrayList; $script:warned = New-Object Collections.ArrayList; $script:kills = New-Object Collections.ArrayList
     $script:clock = @{ Elapsed = @{ TotalSeconds = 0.0 } }; $script:simNow = 0.0
@@ -189,7 +217,7 @@ function Invoke-Replay($Incident, [bool]$FastPath, [int]$SpacingSec = 20, [int]$
     # The user's configuration during the incidents (hang_timeout_sec 180, cooldown 45 s).
     $script:healthPolicy = Get-ArkuzoHealthPolicy @{ enabled = $true; private_limit_mb = 6500; pressure_percent = 88; pressure_min_private_mb = 4000; warmup_sec = 90
         hang_timeout_sec = 180; startup_error_timeout_sec = 5; disconnect_timeout_sec = 5; cooldown_sec = 45; max_recycles_per_hour = 50; trim_spacing_sec = 4
-        farm_freeze_enabled = $FastPath; farm_freeze_spacing_sec = $SpacingSec; farm_freeze_confirm_sec = $ConfirmSec }
+        farm_freeze_enabled = $FastPath; farm_freeze_spacing_sec = $SpacingSec; farm_freeze_confirm_sec = $ConfirmSec; farm_freeze_max_cpu_percent = $MaxCpu }
     $script:restorePolicy = Get-ArkuzoRestorePolicy @{ enabled = $true; restore_missing = $true; restore_wait_sec = 90; relaunch_delay_sec = 30; retry_base_sec = 90; retry_max_sec = 900; retry_max_per_hour = 200; ready_stable_sec = 30 }
     $script:systemMemory = @{ commitPercent = 20 }
     Initialize-ArkuzoRecoveryJournal
@@ -201,10 +229,14 @@ function Invoke-Replay($Incident, [bool]$FastPath, [int]$SpacingSec = 20, [int]$
         $script:world.accounts += @{ accountId = ('{0:x8}-0000-4000-8000-{1:x12}' -f (0xa0 + $i), (0xa0 + $i)); trackerId = [string](7000 + $i); live = $null; relaunchAt = $null }
     }
     # The farm runs healthy before the freeze; the freeze starts at T0 = 120 s.
+    # A startup incident instead has Volt start each client at T0 + starts[i].
     $t0 = 120
+    $measured = @(for ($i = 0; $i -lt $n; $i++) { if ($null -ne $Incident.onsets[$i]) { $i } })
     for ($i = 0; $i -lt $n; $i++) {
+        $freeze = $(if ($null -ne $Incident.onsets[$i]) { @{ at = $t0 + $Incident.onsets[$i]; exit = $t0 + $Incident.selfExit[$i]; cpu = $(if ($Incident.frozenCpu) { [double]$Incident.frozenCpu[$i] } else { 0.0 }) } } else { $null })
+        if ($Incident.starts) { $a = $script:world.accounts[$i]; $a.firstLaunchAt = $t0 + $Incident.starts[$i]; $a.firstLaunched = $false; $a.freeze = $freeze; $a.quitAt = $(if ($Incident.quits -and $null -ne $Incident.quits[$i]) { $t0 + $Incident.quits[$i] } else { $null }); continue }
         $id = New-SimClient $i 0 $true
-        $c = $script:world.clients[$id]; $c.frozen = $true; $c.frozenAt = $t0 + $Incident.onsets[$i]; $c.selfExitAt = $t0 + $Incident.selfExit[$i]
+        $c = $script:world.clients[$id]; $c.frozen = $true; $c.frozenAt = $freeze.at; $c.selfExitAt = $freeze.exit; $c.frozenCpu = $freeze.cpu
     }
     $script:voltControlStatus = Get-SimVoltStatus; $script:voltControlCheckedUtc = [datetime]::UtcNow
     $script:engineBusyUntil = 0
@@ -217,28 +249,32 @@ function Invoke-Replay($Incident, [bool]$FastPath, [int]$SpacingSec = 20, [int]$
             if ($script:killedThisPass) { $script:engineBusyUntil = $now + $IoSec }
         }
         Step-JournalClock 1
-        $back = @(for ($i = 0; $i -lt $n; $i++) { @($script:world.clients.Values | Where-Object { $_.account -eq $i -and -not $_.initial -and $null -ne $_.goodAt -and $_.goodAt -le $now }).Count -gt 0 })
+        $back = @(foreach ($i in $measured) { @($script:world.clients.Values | Where-Object { $_.account -eq $i -and -not $_.first -and $null -ne $_.goodAt -and $_.goodAt -le $now }).Count -gt 0 })
         if (@($back | Where-Object { -not $_ }).Count -eq 0) { break }
     }
-    $perAccount = @(for ($i = 0; $i -lt $n; $i++) {
-        $good = @($script:world.clients.Values | Where-Object { $_.account -eq $i -and -not $_.initial -and $null -ne $_.goodAt } | ForEach-Object { $_.goodAt } | Sort-Object)
+    $perAccount = @(foreach ($i in $measured) {
+        $good = @($script:world.clients.Values | Where-Object { $_.account -eq $i -and -not $_.first -and $null -ne $_.goodAt } | ForEach-Object { $_.goodAt } | Sort-Object)
         if ($good.Count) { $good[0] - $t0 } else { [double]::PositiveInfinity }
     })
     if ($Trace) {
         Write-Host ("--- $($Incident.name) fastPath=$FastPath")
         foreach ($k in $script:kills) { Write-Host ('  close  +{0,4}  account {1}  ({2})' -f ($k.t - $t0), $k.account, (@($script:events | Where-Object { $_.kind -eq 'RECOVERY_REQUESTED' -and $_.data.pid -eq $k.pid })[-1].data.reason)) }
         foreach ($l in $script:world.launches) { $c = $script:world.clients[[int]$l.pid]; Write-Host ('  launch +{0,4}  account {1}  {2}' -f ($l.t - $t0), $l.account, $(if ($null -ne $c.noticeAt) { 'NOTICE' } else { 'in game +' + ($c.goodAt - $t0) })) }
-        foreach ($c in @($script:world.clients.Values | Where-Object { $_.initial -and $_.exited -and -not $_.killed })) { Write-Host ('  self-exit +{0,4} account {1}' -f ($c.selfExitAt - $t0), $c.account) }
+        foreach ($c in @($script:world.clients.Values | Where-Object { $_.first -and $_.exited -and -not $_.killed })) { Write-Host ('  self-exit +{0,4} account {1}' -f ($(if ($null -ne $c.selfExitAt) { $c.selfExitAt } else { $c.quitAt }) - $t0), $c.account) }
     }
-    $launchTimes = @($script:world.launches | ForEach-Object { $_.t } | Sort-Object)
-    $gaps = @(for ($i = 1; $i -lt $launchTimes.Count; $i++) { $launchTimes[$i] - $launchTimes[$i - 1] })
+    # Closest launch to any relaunch (Volt's own start of the farm is spaced by Volt).
+    $gaps = @(foreach ($l in @($script:world.launches)) {
+        if ($script:world.clients[[int]$l.pid].first) { continue }
+        $o = @($script:world.launches | Where-Object { $_.pid -ne $l.pid } | ForEach-Object { [math]::Abs($_.t - $l.t) } | Sort-Object)
+        if ($o.Count) { $o[0] }
+    })
     return [pscustomobject]@{
         Mean = [math]::Round((($perAccount | Measure-Object -Average).Average), 0); Max = ($perAccount | Measure-Object -Maximum).Maximum
         First = ($perAccount | Measure-Object -Minimum).Minimum
         Notices = @($script:world.clients.Values | Where-Object { $null -ne $_.noticeAt }).Count
         Kills = @($script:kills); Events = @($script:events); Warned = @($script:warned)
         MinLaunchGap = $(if ($gaps.Count) { ($gaps | Measure-Object -Minimum).Minimum } else { $null })
-        SelfExits = @($script:world.clients.Values | Where-Object { $_.initial -and $_.exited -and -not $_.killed }).Count
+        SelfExits = @($script:world.clients.Values | Where-Object { $_.first -and $_.exited -and -not $_.killed }).Count
         T0 = $t0
     }
 }
@@ -298,6 +334,36 @@ try {
         $end = @($after.Events | Where-Object { $_.kind -eq 'FARM_FREEZE_EPISODE_END' })
         Assert ($end.Count -eq 1 -and $end[0].data.outcome -ceq 'Completed') "$($incident.name): the episode completes and releases its exceptions"
     }
+    # A freeze while Volt is still starting the farm (8 Nov 00:35).
+    $si = $StartupIncident
+    $before = Invoke-Replay $si $false
+    $after = Invoke-Replay $si $true
+    $oldCap = Invoke-Replay $si $true -MaxCpu 2
+    $degraded = Invoke-Replay $si $true 20 35 0 $true
+    $rows += [pscustomobject]@{ Incident = $si.name; Clients = @($si.onsets | Where-Object { $null -ne $_ }).Count
+        LoggedMean = $si.observedMean; LoggedMax = $si.observedMax; LoggedNotices = $si.observedNotices
+        BeforeMean = $before.Mean; BeforeMax = $before.Max; BeforeNotices = $before.Notices
+        AfterFirst = $after.First; AfterMean = $after.Mean; AfterMax = $after.Max; AfterNotices = $after.Notices; AfterMinLaunchGap = $after.MinLaunchGap; AfterSelfExits = $after.SelfExits
+        DegradedMean = $degraded.Mean; DegradedMax = $degraded.Max; DegradedNotices = $degraded.Notices }
+    if (-not $Trace) {
+        # Today's behaviour: nothing acts before the clients quit, then a burst of notices.
+        Assert ($before.SelfExits -eq 4 -and $before.Notices -ge 2 -and $before.Mean -le $si.observedMean) "$($si.name): replayed today ($($before.Mean) s, $($before.Notices) notices) is no worse than the log"
+        $detected = @($after.Events | Where-Object { $_.kind -eq 'FARM_FREEZE_DETECTED' })
+        Assert ($detected.Count -eq 1 -and $detected[0].data.population -eq 4 -and @($detected[0].data.planned).Count -eq 3) "$($si.name): one episode, 3 of the 4 clients running at the freeze"
+        $lastStart = $after.T0 + ($si.starts | Measure-Object -Maximum).Maximum
+        Assert ($detected[0].t -ge $lastStart + 30 -and $detected[0].t -le $lastStart + 32) "$($si.name): latched once Volt's own launch run was 30 s quiet"
+        Assert ($after.Kills.Count -eq 3 -and $after.SelfExits -eq 1) "$($si.name): all three closed before they would quit by themselves (only the client that never froze quits)"
+        foreach ($k in $after.Kills) {
+            $req = @($after.Events | Where-Object { $_.kind -eq 'RECOVERY_REQUESTED' -and $_.data.pid -eq $k.pid -and $_.t -le $k.t })
+            Assert ($req.Count -ge 1 -and $req[-1].data.reason -ceq 'FARM_FREEZE') "$($si.name): each closure was journaled and audited as FARM_FREEZE first"
+        }
+        for ($i = 1; $i -lt $after.Kills.Count; $i++) { Assert (($after.Kills[$i].t - $after.Kills[$i - 1].t) -ge 20) "$($si.name): closures at least 20 s apart" }
+        Assert ($after.Notices -eq 0 -and $after.MinLaunchGap -ge 10) "$($si.name): no relaunch within 10 s of any other launch (closest $($after.MinLaunchGap) s)"
+        # Volt's own launch run (until +74 s, then 30 s quiet) delays the latch, so the gain is smaller than mid-farm.
+        Assert ($after.Mean -le $before.Mean - 120 -and $after.Max -lt $before.Max) "$($si.name): at least 2 min less downtime per account ($($before.Mean) s -> $($after.Mean) s)"
+        Assert ($degraded.Mean -le $before.Mean -and $degraded.Notices -le $before.Notices) "$($si.name): with an unreadable countdown row no worse than today ($($degraded.Mean) s)"
+        Assert (@($oldCap.Events | Where-Object { $_.kind -eq 'FARM_FREEZE_DETECTED' }).Count -eq 0) "$($si.name): with the old 2% CPU limit the client at 3.7% hid this freeze"
+    }
     # Robustness: Volt's relaunch latency varies by up to 11 s. With the default
     # 20 s spacing no ordering of the measured latencies brings two launches within
     # 10 s of each other on the largest farm (8 clients).
@@ -321,7 +387,9 @@ try {
                 @($runs | Where-Object { $_.Notices -gt 0 }).Count, ($runs | Measure-Object Notices -Sum).Sum, ($runs | Measure-Object MinLaunchGap -Minimum).Minimum)
         }
     }
-    $b = ($rows | Measure-Object BeforeMean -Average).Average; $a = ($rows | Measure-Object AfterMean -Average).Average
+    $farm = @($rows | Select-Object -First $Incidents.Count); $st = $rows[-1]
+    $b = ($farm | Measure-Object BeforeMean -Average).Average; $a = ($farm | Measure-Object AfterMean -Average).Average
     Write-Host ('PASS: farm-freeze replay of 4 logged incidents: per-account downtime {0:N0} s -> {1:N0} s, farm maximum {2:N0} s -> {3:N0} s, Volt startup notices {4} -> {5}' -f $b, $a,
-        ($rows | Measure-Object BeforeMax -Average).Average, ($rows | Measure-Object AfterMax -Average).Average, ($rows | Measure-Object BeforeNotices -Sum).Sum, ($rows | Measure-Object AfterNotices -Sum).Sum)
+        ($farm | Measure-Object BeforeMax -Average).Average, ($farm | Measure-Object AfterMax -Average).Average, ($farm | Measure-Object BeforeNotices -Sum).Sum, ($farm | Measure-Object AfterNotices -Sum).Sum)
+    Write-Host ('PASS: freeze during startup ({0}): per-account downtime {1} s -> {2} s, last account {3} s -> {4} s, notices {5} -> {6}' -f $st.Incident, $st.BeforeMean, $st.AfterMean, $st.BeforeMax, $st.AfterMax, $st.BeforeNotices, $st.AfterNotices)
 } finally { Remove-Item -LiteralPath $script:scratch -Recurse -Force -ErrorAction SilentlyContinue }

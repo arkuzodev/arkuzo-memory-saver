@@ -40,7 +40,7 @@ The fast path waits 35 s, and checks each client again right before closing it.
 
 ## What changed
 
-**Detection.** After every pass over the clients, the saver looks for at least `farm_freeze_min_clients` (3) clients that froze within `farm_freeze_onset_window_sec` (15 s) of each other. They must also be more than half of the sampled clients and have averaged at most `farm_freeze_max_cpu_percent` (2%) CPU since they froze. When the last of them has been frozen for `farm_freeze_confirm_sec` (35 s), the saver latches an episode (`FARM_FREEZE_DETECTED`). It does so only from one fresh, fully mapped Volt snapshot. Accounts that are already pending, quarantined, excluded, suspended or beyond the hourly budget stay on the normal path.
+**Detection.** After every pass over the clients, the saver looks for at least `farm_freeze_min_clients` (3) clients that froze within `farm_freeze_onset_window_sec` (15 s) of each other. They must also be more than half of the clients already running when the last of them froze, and have averaged at most `farm_freeze_max_cpu_percent` (5%) CPU since they froze. Clients still in their 90 s warm-up count once their window has answered at least once (see [Freezes during startup](#freezes-during-startup)). When the last of them has been frozen for `farm_freeze_confirm_sec` (35 s), the saver latches an episode (`FARM_FREEZE_DETECTED`). It does so only from one fresh, fully mapped Volt snapshot. Accounts that are already pending, quarantined, excluded, suspended or beyond the hourly budget stay on the normal path.
 
 **Recovery.** Episode members get the health reason `FARM_FREEZE` and go through the unchanged `Invoke-ClientRecovery`: exact Volt account mapping, the recovery journal entry saved before the close, audit logging, the hourly budget, quarantine, the live Volt parent, and a fresh sample showing that the client is still frozen. Only three gates are scoped to the running episode:
 
@@ -79,7 +79,38 @@ Before the fast path is judged, the same replay with the fast path off must repr
 
 **Unverified: what Volt shows while it counts down a relaunch.** The speed-up depends on the adapter staying available during a countdown and reporting that row as neither Connected nor Idle. The logs fit that reading (`recovery-mapping` refusals, no adapter failures), but nothing records the row itself, and Volt's UI ships compressed inside `tauri-app.exe`. If a countdown row instead made the adapter fail closed, each close would stall until that relaunch connected. The replay covers this case too (last column). The first close still comes early, and the next close then waits for that relaunch to connect, about 45-50 s per client as today. Members not closed by then quit by themselves. It still beats today: 196-242 s per account against 330-384 s. The first real freeze answers the question: `FARM_FREEZE_DETECTED`, then closes 20 s apart in the log mean it works; closes about 45 s apart mean the adapter needs a countdown state.
 
-### Expected downtime
+## Freezes during startup
+
+On 8 Nov at 00:35, Volt was starting a 10-client farm, one client every 9-15 s. Three of the first four clients had already answered, and froze within 1 s of each other at ages 18-43 s. They never answered again and quit by themselves 196-198 s later. Volt relaunched them within 1 s of each other, so all three got the startup notice, and one got it again on its retry. Their accounts were back in game after 335, 386 and 442 s.
+
+The fast path missed it for three reasons:
+
+- **Warm-up.** The saver ignores hangs in a client's first `warmup_sec` (90 s), so no onset was recorded until each client turned 90. That spread the onsets over 21 s, more than the 15 s window.
+- **Majority.** By the time the freeze was confirmed, Volt had started 10 clients, so 3 frozen were not a majority. When they froze, only 4 clients were running.
+- **CPU.** One frozen client kept 3-4% CPU (dashboard scale) the whole time, above the old 2% limit.
+
+**What the logs say.** Counting every correlated freeze (3 or more clients within 15 s, still frozen 35 s after the last onset), 15 involved clients in warm-up and none came back; none of the 54 groups in all did. CPU does not separate recovering clients from dead ones: of the 364 single hangs that lasted at least 35 s, the 13 that answered again all averaged 3% or less, and 14 that never answered averaged more than 3%. The correlation and the 35 s wait are what make a freeze safe to act on.
+
+**What changed.**
+
+- **Onset during warm-up.** A client in warm-up gets a freeze onset once its window has answered at least once. A window that has never answered is still loading. Groups that froze at 0-3 s of age, as on 24 Oct and 26 Oct 18:12, are a different failure and are not caught. This onset feeds only the farm-freeze path: `hang_timeout_sec` and the relaunch of frozen exits still start after warm-up.
+- **Majority at onset.** The majority counts only clients that were already running when the last member froze. A client Volt launched afterwards says nothing about that freeze.
+- **Wait for Volt's own launch run.** The episode starts only once no client has started for 30 s. Volt starts a farm one client every 9-15 s, and paced relaunches landing in that run could still raise the notice.
+- **CPU limit.** `farm_freeze_max_cpu_percent` goes from 2% to 5%.
+
+**Replay.** The startup incident is in the same replay, with the launches staggered as logged, the CPU of each frozen client, and the client that quit at +190 s without freezing.
+
+| | Logged | Replayed today | With the fast path |
+| --- | --- | --- | --- |
+| Per-account mean (3 frozen accounts) | 388 s | 341 s | 177 s |
+| Last account | 442 s | 388 s | 194 s |
+| Volt startup notices | 4 | 3 | 0 |
+
+The episode starts at +104 s, 30 s after Volt's last launch, with 3 of the 4 clients running at the freeze. The three closes come at +105, +125 and +145 s, all before the clients would have quit. With the old 2% limit the 3.7% client stayed out and nothing was detected. With an unreadable countdown row the mean is 203 s and the last account 245 s, with no notices.
+
+The replay of today is kinder than the log. The log has one more notice, on a lone relaunch 43 s from any other launch, which the burst rule doesn't model, and that retry cost one account about 50 s. This incident is therefore reported but not used to validate the model.
+
+## Expected downtime
 
 | | Today (logs) | With the fast path (replay) |
 | --- | --- | --- |

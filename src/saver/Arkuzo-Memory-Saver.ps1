@@ -958,7 +958,7 @@ function Get-ArkuzoHealthPolicy($Config) {
     $defaults = @{ enabled = $false; private_limit_mb = 4096; hang_timeout_sec = 120; warmup_sec = 90; pressure_percent = 85; pressure_min_private_mb = 2048; cooldown_sec = 60; max_recycles_per_hour = 20; trim_spacing_sec = 2; startup_error_timeout_sec = 40; disconnect_timeout_sec = 5; private_limit_sustain_sec = 60
         # Farm-wide freeze fast path (see Get-ArkuzoFarmFreezeCandidate).
         farm_freeze_enabled = $true; farm_freeze_confirm_sec = 35; farm_freeze_min_clients = 3; farm_freeze_onset_window_sec = 15
-        farm_freeze_max_cpu_percent = 2; farm_freeze_spacing_sec = 20; farm_freeze_refreeze_sec = 900 }
+        farm_freeze_max_cpu_percent = 5; farm_freeze_spacing_sec = 20; farm_freeze_refreeze_sec = 900 }
     if ($null -ne $Config) {
         foreach ($key in @($defaults.Keys)) { if ($null -ne $Config.$key) { $defaults[$key] = $Config.$key } }
     }
@@ -1415,6 +1415,9 @@ function Test-ArkuzoSuspendedRowsSafe {
 # frozen 30 s after the last onset) came back; every client quit by itself after
 # 187-217 s and Volt then relaunched them all at once, which raises its
 # "Roblox started before Volt could connect" notice for launches < 10 s apart.
+# Clients that freeze together while still starting (warm-up) behave the same:
+# none of the 15 logged groups came back. CPU does not tell them apart: the 13
+# long single hangs that did come back also averaged 3% or less.
 # An episode is latched once confirmed. Its members are closed one at a time,
 # farm_freeze_spacing_sec apart, so Volt's relaunches arrive paced too. Every
 # closure still goes through Invoke-ClientRecovery with all its gates; only three
@@ -1423,9 +1426,9 @@ function Test-ArkuzoSuspendedRowsSafe {
 # old generation has verifiably exited may be unmapped; see Get-ArkuzoFarmFreezeAccount).
 # ---------------------------------------------------------------------------
 function Update-ArkuzoHangCpu($State, [double]$CpuSeconds, [double]$Now, [int]$Threads) {
-    # Average CPU (dashboard scale: percent of all logical CPUs) since hang onset.
+    # Average CPU (dashboard scale: percent of all logical CPUs) since freeze onset.
     if ($null -eq $State) { return }
-    if ($null -eq $State.HangSince -or [double]$State.HangSince -lt 0) {
+    if ($null -eq $State.FreezeSince -or [double]$State.FreezeSince -lt 0) {
         $State.HangCpuBase = $null; $State.HangCpuBaseAt = $null; $State.HangCpuPercent = $null; return
     }
     if ($null -eq $State.HangCpuBase -or $null -eq $State.HangCpuBaseAt -or $Now -lt [double]$State.HangCpuBaseAt -or $CpuSeconds -lt [double]$State.HangCpuBase) {
@@ -1436,10 +1439,11 @@ function Update-ArkuzoHangCpu($State, [double]$CpuSeconds, [double]$Now, [int]$T
     $State.HangCpuPercent = [math]::Round(100 * ($CpuSeconds - [double]$State.HangCpuBase) / ($elapsed * [math]::Max(1, $Threads)), 3)
 }
 function Test-ArkuzoFrozenSample($State, $Policy) {
-    # Unresponsive visible window, past warmup (HangSince is only set then), no
-    # startup notice or disconnect, and measured near-zero CPU since onset.
+    # Unresponsive visible window that answered before (FreezeSince; see
+    # Get-ArkuzoHealthDecision), no startup notice or disconnect, and measured
+    # low CPU since onset.
     $snap = $State.LastSnapshot
-    return ($null -ne $snap -and $null -ne $State.HangSince -and [double]$State.HangSince -ge 0 -and
+    return ($null -ne $snap -and $null -ne $State.FreezeSince -and [double]$State.FreezeSince -ge 0 -and
         $snap.windowPresent -is [bool] -and $snap.windowPresent -and $snap.responding -is [bool] -and -not $snap.responding -and
         -not $snap.launchError -and -not $State.isDisconnected -and -not $State.RecoveryRequested -and
         $null -ne $State.HangCpuPercent -and [double]$State.HangCpuPercent -le [double]$Policy.farm_freeze_max_cpu_percent)
@@ -1447,22 +1451,25 @@ function Test-ArkuzoFrozenSample($State, $Policy) {
 function Get-ArkuzoFarmFreezeCandidate($States, $Policy, [double]$Now) {
     # Pure. Finds the largest group of frozen clients whose onsets lie within
     # farm_freeze_onset_window_sec. It qualifies with at least
-    # farm_freeze_min_clients members that are a strict majority of the sampled
-    # clients, and is confirmed once its LAST member has been frozen for
-    # farm_freeze_confirm_sec.
+    # farm_freeze_min_clients members that are a strict majority of the clients
+    # already running when its last member froze (clients Volt launched afterwards,
+    # e.g. while it is still starting the farm, say nothing about that freeze),
+    # and is confirmed once its LAST member has been frozen for farm_freeze_confirm_sec.
     if ($null -eq $Policy -or -not $Policy.farm_freeze_enabled) { return $null }
     $population = @($States | Where-Object { $null -ne $_ -and $null -ne $_.LastSnapshot -and -not $_.RecoveryRequested })
-    $frozen = @($population | Where-Object { Test-ArkuzoFrozenSample $_ $Policy } | Sort-Object { [double]$_.HangSince })
+    $frozen = @($population | Where-Object { Test-ArkuzoFrozenSample $_ $Policy } | Sort-Object { [double]$_.FreezeSince })
     if ($frozen.Count -lt [int]$Policy.farm_freeze_min_clients) { return $null }
     $best = @()
     for ($i = 0; $i -lt $frozen.Count; $i++) {
-        $group = @($frozen | Where-Object { [double]$_.HangSince -ge [double]$frozen[$i].HangSince -and ([double]$_.HangSince - [double]$frozen[$i].HangSince) -le [double]$Policy.farm_freeze_onset_window_sec })
+        $group = @($frozen | Where-Object { [double]$_.FreezeSince -ge [double]$frozen[$i].FreezeSince -and ([double]$_.FreezeSince - [double]$frozen[$i].FreezeSince) -le [double]$Policy.farm_freeze_onset_window_sec })
         if ($group.Count -gt $best.Count) { $best = $group }
     }
-    if ($best.Count -lt [int]$Policy.farm_freeze_min_clients -or (2 * $best.Count) -le $population.Count) { return $null }
-    $onsets = @($best | ForEach-Object { [double]$_.HangSince })
+    if ($best.Count -lt [int]$Policy.farm_freeze_min_clients) { return $null }
+    $onsets = @($best | ForEach-Object { [double]$_.FreezeSince })
     $first = ($onsets | Measure-Object -Minimum).Minimum; $last = ($onsets | Measure-Object -Maximum).Maximum
-    return [pscustomobject]@{ Members = $best; Population = $population.Count; FirstOnset = [double]$first; LastOnset = [double]$last
+    $present = @($population | Where-Object { $null -eq $_.StartedSec -or [double]$_.StartedSec -le [double]$last })
+    if ((2 * $best.Count) -le $present.Count) { return $null }
+    return [pscustomobject]@{ Members = $best; Population = $present.Count; FirstOnset = [double]$first; LastOnset = [double]$last
         Confirmed = (($Now - [double]$last) -ge [double]$Policy.farm_freeze_confirm_sec) }
 }
 function Test-ArkuzoFarmFreezeActive {
@@ -1540,7 +1547,7 @@ function Start-ArkuzoFarmFreezeEpisode($Candidate, [double]$Now) {
     $utc = [datetime]::UtcNow
     $room = [int]$healthPolicy.max_recycles_per_hour - @($recoveryAttempts | Where-Object { ($utc - ([datetime]$_).ToUniversalTime()).TotalSeconds -lt 3600 }).Count
     $members = @{}; $order = @(); $skipped = @()
-    foreach ($state in @($Candidate.Members | Sort-Object { [double]$_.HangSince })) {
+    foreach ($state in @($Candidate.Members | Sort-Object { [double]$_.FreezeSince })) {
         $id = [int]$state.Watcher.Id
         $account = $null
         if (Test-ArkuzoClientIdentity $state.Watcher $id $state.StartTicks) { $account = Get-ArkuzoControlledAccount $state.TrackerId $id }
@@ -1552,7 +1559,7 @@ function Start-ArkuzoFarmFreezeEpisode($Candidate, [double]$Now) {
         elseif ($order.Count -ge $room) { $why = 'HOURLY_BUDGET' }
         if ($why) { $skipped += @{ pid = $id; reason = $why }; continue }
         $members[[string]$id] = @{ pid = $id; startTicks = [long]$state.StartTicks; accountId = [string]$account.accountId; trackerId = [string]$account.trackerId
-            onsetOffsetSec = [math]::Round([double]$state.HangSince - $Candidate.FirstOnset, 1); cpuPercent = $state.HangCpuPercent; status = 'Planned'; changedUtc = $null }
+            onsetOffsetSec = [math]::Round([double]$state.FreezeSince - $Candidate.FirstOnset, 1); cpuPercent = $state.HangCpuPercent; status = 'Planned'; changedUtc = $null }
         $order += $id
     }
     if ($order.Count -eq 0) {
@@ -1593,7 +1600,7 @@ function Update-ArkuzoFarmFreeze {
             if ($m.status -cne 'Planned') { continue }
             $state = $tracked[[int]$m.pid]
             # A member that answers again is never closed by this episode.
-            if ($null -ne $state -and [long]$state.StartTicks -eq [long]$m.startTicks -and ($null -eq $state.HangSince -or [double]$state.HangSince -lt 0)) {
+            if ($null -ne $state -and [long]$state.StartTicks -eq [long]$m.startTicks -and ($null -eq $state.FreezeSince -or [double]$state.FreezeSince -lt 0)) {
                 Set-ArkuzoFarmFreezeMemberStatus $state 'Recovered'
             }
         }
@@ -1611,6 +1618,10 @@ function Update-ArkuzoFarmFreeze {
         Warn-Throttled 'farm-freeze' 'Farm froze again soon after the last fast recovery. Using the normal hang timeout this time.'
         return
     }
+    # Volt starts a farm one client every 9-15 s. While that run may still be
+    # going, paced closes could relaunch into it and raise its startup notice:
+    # wait until no client has started for 30 s.
+    if ($null -ne $script:lastClientStartUtc -and ([datetime]::UtcNow - $script:lastClientStartUtc).TotalSeconds -lt 30) { return }
     if (-not $voltControlStatus.available -or $voltControlStatus.globalMappingSafe -isnot [bool] -or -not $voltControlStatus.globalMappingSafe) { return }
     [void](Start-ArkuzoFarmFreezeEpisode $candidate $now)
 }
@@ -2144,7 +2155,7 @@ function Invoke-ArkuzoRecoveryCandidates {
         ($null -eq $_.Value.LastRecoveryRefusalUtc -or (([DateTime]::UtcNow) - $_.Value.LastRecoveryRefusalUtc).TotalSeconds -ge 30)
     })
     # Episode members in the order they froze: the earliest also quits first.
-    $ordered = if ($farmFreezeActive) { @($eligible | Sort-Object { [double]$_.Value.HangSince }) } else { @($eligible | Sort-Object { $_.Value.LastSnapshot.privateMB } -Descending) }
+    $ordered = if ($farmFreezeActive) { @($eligible | Sort-Object { [double]$_.Value.FreezeSince }) } else { @($eligible | Sort-Object { $_.Value.LastSnapshot.privateMB } -Descending) }
     foreach ($candidate in $ordered) {
         $effectiveCooldown = Get-ArkuzoRecoveryCooldown ([string]$candidate.Value.HealthDecision.Reason) $healthPolicy
         if (-not (Test-ArkuzoRecoveryBudget $recoveryAttempts ([DateTime]::UtcNow) $effectiveCooldown $healthPolicy.max_recycles_per_hour)) {
@@ -2180,6 +2191,7 @@ function Reset-ArkuzoHealthSample($State) {
     $State.LastSnapshot = $null
     $State.HealthSnapshotUtc = $null
     $State.HangSince = -1.0
+    $State.FreezeSince = -1.0
     $State.StartupErrorSince = -1.0
     $State.DisconnectSince = -1.0
     $State.DisconnectReason = $null
@@ -2194,15 +2206,21 @@ function Get-ArkuzoHealthDecision($State, $Sample, $Policy, [double]$Now) {
     # continuous observation, even when both endpoint samples succeeded.
     if ($null -eq $State.LastHealthSampleTime -or $Now -lt [double]$State.LastHealthSampleTime) {
         $State.HangSince = -1.0
+        $State.FreezeSince = -1.0
         $State.StartupErrorSince = -1.0
         $State.DisconnectSince = -1.0
         $State.PrivateLimitSince = -1.0
     } elseif (($Now - [double]$State.LastHealthSampleTime) -gt 5) {
         $State.HangSince = -1.0
+        $State.FreezeSince = -1.0
         $State.PrivateLimitSince = -1.0
     }
     $State.LastHealthSampleTime = $Now
     if ($null -eq $State.HangSince) { $State.HangSince = -1.0 }
+    if ($null -eq $State.FreezeSince) { $State.FreezeSince = -1.0 }
+    # When this client started, on the same clock: a client launched after a
+    # freeze began says nothing about that freeze (see Get-ArkuzoFarmFreezeCandidate).
+    if ($null -eq $State.StartedSec -and $null -ne $Sample.ageSec) { $State.StartedSec = $Now - [double]$Sample.ageSec }
     if ($null -eq $State.StartupErrorSince) { $State.StartupErrorSince = -1.0 }
     if ($null -eq $State.DisconnectSince) { $State.DisconnectSince = -1.0 }
     if ($null -eq $State.PrivateLimitSince) { $State.PrivateLimitSince = -1.0 }
@@ -2215,6 +2233,7 @@ function Get-ArkuzoHealthDecision($State, $Sample, $Policy, [double]$Now) {
     # confirmation grace it is handed back to the verified Volt relaunch owner.
     if ($Sample.launchError) {
         $State.HangSince = -1.0
+        $State.FreezeSince = -1.0
         $State.DisconnectSince = -1.0
         if ([double]$State.StartupErrorSince -lt 0) { $State.StartupErrorSince = $Now }
         $timeout = if ($null -ne $Policy.startup_error_timeout_sec) { [double]$Policy.startup_error_timeout_sec } else { 40.0 }
@@ -2225,14 +2244,30 @@ function Get-ArkuzoHealthDecision($State, $Sample, $Policy, [double]$Now) {
     # In-game disconnect or kick detected from client log.
     if ($Sample.isDisconnected) {
         $State.HangSince = -1.0
+        $State.FreezeSince = -1.0
         if ([double]$State.DisconnectSince -lt 0) { $State.DisconnectSince = $Now }
         $timeout = if ($null -ne $Policy.disconnect_timeout_sec) { [double]$Policy.disconnect_timeout_sec } else { 5.0 }
         $retry = [bool]$Sample.eligible -and [double]$State.DisconnectSince -ge 0 -and ($Now - [double]$State.DisconnectSince) -ge $timeout
         return [pscustomobject]@{ Reason = 'IN_GAME_DISCONNECT'; Recycle = $retry; Status = 'DISCONNECTED' }
     }
     $State.DisconnectSince = -1.0
-    if ([double]$Sample.ageSec -lt [double]$Policy.warmup_sec) {
+    # Freeze onset for the farm-freeze path only, tracked through warm-up too:
+    # clients that freeze while starting quit by themselves ~197 s later like any
+    # other frozen client. A window that never answered yet is still loading and
+    # does not count; past warm-up this matches HangSince.
+    $warm = [double]$Sample.ageSec -lt [double]$Policy.warmup_sec
+    if ($Sample.windowPresent -and $Sample.responding) { $State.EverResponded = $true }
+    if ($Sample.windowPresent -and -not $Sample.responding -and ($State.EverResponded -or -not $warm)) {
+        if ([double]$State.FreezeSince -lt 0) { $State.FreezeSince = $Now }
+    } else { $State.FreezeSince = -1.0 }
+    if ($warm) {
         $State.HangSince = -1.0
+        # A latched episode member is confirmed with the rest of the farm, even
+        # while it is still in warm-up; nothing else is recycled during warm-up.
+        if ([double]$State.FreezeSince -ge 0 -and $Policy.farm_freeze_enabled -and (Test-ArkuzoFarmFreezeMember $State) -and
+            ($null -eq $State.HangCpuPercent -or [double]$State.HangCpuPercent -le [double]$Policy.farm_freeze_max_cpu_percent)) {
+            return [pscustomobject]@{ Reason = 'FARM_FREEZE'; Recycle = [bool]$Sample.eligible; Status = 'FARM FREEZE' }
+        }
         return [pscustomobject]@{ Reason = ''; Recycle = $false; Status = '' }
     }
     # Track responsiveness independently of the higher-priority memory branches.
@@ -4419,7 +4454,7 @@ try {
                         HangSince = -1.0; StartupErrorSince = -1.0; DisconnectSince = -1.0; ParentId = 0; HealthDecision = $null; RecoveryRequested = $false
                         GameReady = $false; EverGameReady = $false; StartupGameHistory = 'UNKNOWN'; GameLogScanned = $false; LogPath = $null; LogOffset = [int64]0; TrackerId = $null; isDisconnected = $false; DisconnectReason = $null
                         BoundAccountId = $null; BoundTrackerId = $null
-                        HangCpuBase = $null; HangCpuBaseAt = $null; HangCpuPercent = $null; FarmFreezeEpisode = $null; FarmFreezePid = $null
+                        HangCpuBase = $null; HangCpuBaseAt = $null; HangCpuPercent = $null; FarmFreezeEpisode = $null; FarmFreezePid = $null; FreezeSince = -1.0; StartedSec = $null; EverResponded = $false
                     }
                     $script:lastClientStartUtc = [datetime]::UtcNow
                     try {

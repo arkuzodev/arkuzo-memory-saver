@@ -35,7 +35,7 @@ function New-Farm([int]$Count = 6, [int]$Frozen = 6, [double[]]$Onsets = @(), [d
         $onset = $(if ($i -lt $Frozen) { $(if ($Onsets.Count -gt $i) { 900 + $Onsets[$i] } else { 900 + $i }) } else { -1.0 })
         $isFrozen = $i -lt $Frozen
         $script:tracked[$id] = @{ Watcher = $w; StartTicks = $w.StartTime.ToUniversalTime().Ticks; TrackerId = [string](800 + $i); ParentId = 7; RecoveryRequested = $false
-            HangSince = $onset; LastHealthSampleTime = 999.0; StartupErrorSince = -1.0; DisconnectSince = -1.0; PrivateLimitSince = -1.0; isDisconnected = $false
+            HangSince = $onset; FreezeSince = $onset; StartedSec = $null; EverResponded = $true; LastHealthSampleTime = 999.0; StartupErrorSince = -1.0; DisconnectSince = -1.0; PrivateLimitSince = -1.0; isDisconnected = $false
             HangCpuPercent = $(if ($isFrozen) { $Cpu } else { $null }); HangCpuBase = $null; HangCpuBaseAt = $null; FarmFreezeEpisode = $null; FarmFreezePid = $null; GameReady = $true; EverGameReady = $true
             LastSnapshot = @{ windowPresent = $true; responding = (-not $isFrozen); launchError = $false; privateMB = 2500 }; HealthDecision = $null; BoundAccountId = (Account $i) }
         $rows += [pscustomobject]@{ accountId = (Account $i); username = "farm$i"; trackerId = [string](800 + $i); processId = $id; uiStatus = 'Connected'; controlReady = $true; rowReady = $true
@@ -56,7 +56,7 @@ function Close-Member([int]$Id) {
 
 # ---- Policy -------------------------------------------------------------------------
 $p = Get-ArkuzoHealthPolicy @{ enabled = $true }
-Assert ($p.farm_freeze_enabled -and $p.farm_freeze_confirm_sec -eq 35 -and $p.farm_freeze_min_clients -eq 3 -and $p.farm_freeze_spacing_sec -eq 20 -and $p.farm_freeze_max_cpu_percent -eq 2) 'defaults: on, 35 s, 3 clients, 20 s spacing, 2% CPU'
+Assert ($p.farm_freeze_enabled -and $p.farm_freeze_confirm_sec -eq 35 -and $p.farm_freeze_min_clients -eq 3 -and $p.farm_freeze_spacing_sec -eq 20 -and $p.farm_freeze_max_cpu_percent -eq 5) 'defaults: on, 35 s, 3 clients, 20 s spacing, 5% CPU'
 foreach ($bad in @(@{ farm_freeze_enabled = 'yes' }, @{ farm_freeze_confirm_sec = 10 }, @{ farm_freeze_min_clients = 2 }, @{ farm_freeze_spacing_sec = 5 }, @{ farm_freeze_max_cpu_percent = 50 }, @{ farm_freeze_onset_window_sec = 600 })) {
     $threw = $false; try { [void](Get-ArkuzoHealthPolicy $bad) } catch { $threw = $true }
     Assert $threw ('invalid ' + (@($bad.Keys)[0]) + ' is refused')
@@ -64,11 +64,11 @@ foreach ($bad in @(@{ farm_freeze_enabled = 'yes' }, @{ farm_freeze_confirm_sec 
 Assert ((Get-ArkuzoHealthPolicy @{ farm_freeze_enabled = $false }).farm_freeze_enabled -eq $false) 'off switch'
 
 # ---- CPU since onset ------------------------------------------------------------------
-$s = @{ HangSince = 10.0; HangCpuBase = $null; HangCpuBaseAt = $null; HangCpuPercent = $null }
+$s = @{ FreezeSince = 10.0; HangCpuBase = $null; HangCpuBaseAt = $null; HangCpuPercent = $null }
 Update-ArkuzoHangCpu $s 50.0 10.0 16; Assert ($null -eq $s.HangCpuPercent -and $s.HangCpuBase -eq 50.0) 'first hung sample sets the baseline'
 Update-ArkuzoHangCpu $s 50.08 20.0 16; Assert ([math]::Abs($s.HangCpuPercent - 0.05) -lt 0.001) 'average CPU since onset on the dashboard scale'
-Update-ArkuzoHangCpu $s 60.0 30.0 16; Assert ($s.HangCpuPercent -gt 2) 'a busy client is not a frozen one'
-$s.HangSince = -1.0; Update-ArkuzoHangCpu $s 61.0 31.0 16; Assert ($null -eq $s.HangCpuBase -and $null -eq $s.HangCpuPercent) 'responsive again clears the measurement'
+Update-ArkuzoHangCpu $s 70.0 30.0 16; Assert ($s.HangCpuPercent -gt 5) 'a busy client is not a frozen one'
+$s.FreezeSince = -1.0; Update-ArkuzoHangCpu $s 61.0 31.0 16; Assert ($null -eq $s.HangCpuBase -and $null -eq $s.HangCpuPercent) 'responsive again clears the measurement'
 
 # ---- Detection --------------------------------------------------------------------------
 New-Farm 6 6 @(0,0,1,1,2,9)
@@ -80,7 +80,7 @@ New-Farm 6 3; Assert ($null -eq (Get-ArkuzoFarmFreezeCandidate @($tracked.Values
 New-Farm 4 3; Assert ($null -ne (Get-ArkuzoFarmFreezeCandidate @($tracked.Values) $healthPolicy 2000)) '3 of 4 is a majority'
 New-Farm 3 2; Assert ($null -eq (Get-ArkuzoFarmFreezeCandidate @($tracked.Values) $healthPolicy 2000)) 'two clients never make a farm freeze'
 New-Farm 6 6 @(0,0,0,40,40,40); Assert ($null -eq (Get-ArkuzoFarmFreezeCandidate @($tracked.Values) $healthPolicy 2000)) 'two separate groups of three in a farm of six: no correlated majority'
-New-Farm 6 6 @() 3.0; Assert ($null -eq (Get-ArkuzoFarmFreezeCandidate @($tracked.Values) $healthPolicy 2000)) 'clients still using CPU are not frozen'
+New-Farm 6 6 @() 6.0; Assert ($null -eq (Get-ArkuzoFarmFreezeCandidate @($tracked.Values) $healthPolicy 2000)) 'clients still using CPU are not frozen'
 New-Farm 6 6; foreach ($s in $tracked.Values) { $s.HangCpuPercent = $null }
 Assert ($null -eq (Get-ArkuzoFarmFreezeCandidate @($tracked.Values) $healthPolicy 2000)) 'no CPU measurement yet, no farm freeze'
 New-Farm 6 6; foreach ($s in @($tracked.Values)[0..3]) { $s.LastSnapshot.launchError = $true }
@@ -195,6 +195,42 @@ Assert ($farmFreeze.State -ceq 'Disabled') 'turning the fast path off ends a run
 New-Farm 6 6; $script:clock.Elapsed.TotalSeconds = 945.0; Update-ArkuzoFarmFreeze
 $script:clock.Elapsed.TotalSeconds = $farmFreeze.DeadlineSec; Update-ArkuzoFarmFreeze
 Assert ($farmFreeze.State -ceq 'Expired' -and @($farmFreeze.Members.Values | Where-Object { $_.status -ceq 'Released' }).Count -eq 6) 'an episode that cannot finish expires and hands members back'
+
+# ---- Freezes during startup (warm-up) ------------------------------------------------------
+# A client that answered once and then froze counts; a window that never answered is loading.
+$pol = Get-ArkuzoHealthPolicy @{ enabled = $true }
+$w = @{ LastHealthSampleTime = 99.0 }
+$ws = @{ privateMB = 1500; ageSec = 20; responding = $false; windowPresent = $true; launchError = $false; isDisconnected = $false; systemCommitPercent = 20; eligible = $true }
+$d = Get-ArkuzoHealthDecision $w $ws $pol 100.0
+Assert ([double]$w.FreezeSince -lt 0 -and -not $d.Recycle) 'a window that never answered yet is still loading, not frozen'
+Assert ($w.StartedSec -eq 80.0) 'the start time is kept on the engine clock'
+$ws.responding = $true; [void](Get-ArkuzoHealthDecision $w $ws $pol 101.0)
+$ws.responding = $false; $d = Get-ArkuzoHealthDecision $w $ws $pol 102.0
+Assert ($w.FreezeSince -eq 102.0 -and [double]$w.HangSince -lt 0 -and $d.Reason -ceq '' -and -not $d.Recycle) 'a starting client that answered and froze: onset tracked, hang timeout untouched'
+$ws.responding = $true; [void](Get-ArkuzoHealthDecision $w $ws $pol 103.0)
+Assert ([double]$w.FreezeSince -lt 0) 'answering again clears the onset'
+# Ten clients, and Volt is still starting the farm (one every 12 s) when the first three freeze.
+function Set-Starts { $i = 0; foreach ($id in 101..110) { $tracked[$id].StartedSec = 858.0 + 12 * $i; $i++ } }
+New-Farm 10 3 @(0,1,1); Set-Starts
+$c = Get-ArkuzoFarmFreezeCandidate @($tracked.Values) $healthPolicy 2000
+Assert ($null -ne $c -and $c.Population -eq 4 -and @($c.Members).Count -eq 3) '3 of the 4 clients running at the freeze are a majority; later launches do not count'
+foreach ($s in $tracked.Values) { $s.StartedSec = 0.0 }
+Assert ($null -eq (Get-ArkuzoFarmFreezeCandidate @($tracked.Values) $healthPolicy 2000)) '3 of 10 clients that were all running is not'
+New-Farm 10 3 @(0,1,1); Set-Starts; $script:clock.Elapsed.TotalSeconds = 945.0
+$script:lastClientStartUtc = [datetime]::UtcNow.AddSeconds(-12); Update-ArkuzoFarmFreeze
+Assert (-not (Test-ArkuzoFarmFreezeActive)) 'no episode while Volt may still be starting the farm'
+$script:lastClientStartUtc = [datetime]::UtcNow.AddSeconds(-31); Update-ArkuzoFarmFreeze
+Assert ((Test-ArkuzoFarmFreezeActive) -and ((@($farmFreeze.Members.Keys) | Sort-Object) -join ',') -eq '101,102,103') '30 s after the last start the frozen starting clients are latched'
+$ws = Sample; $ws.ageSec = 60
+$tracked[101].HangSince = -1.0
+$d = Get-ArkuzoHealthDecision $tracked[101] $ws $healthPolicy 946.0
+Assert ($d.Reason -ceq 'FARM_FREEZE' -and $d.Recycle -and [double]$tracked[101].HangSince -lt 0) 'a latched member still in warm-up is recycled with the farm; its hang timeout never started'
+Update-ArkuzoFarmFreeze
+Assert ($farmFreeze.Members['101'].status -ceq 'Planned') 'a frozen warm-up member is not mistaken for one that answered again'
+$d = Get-ArkuzoHealthDecision $tracked[104] $ws $healthPolicy 946.0
+Assert (-not $d.Recycle -and $d.Reason -ceq '') 'a frozen client in warm-up outside the episode is never recycled'
+$ws.responding = $true; [void](Get-ArkuzoHealthDecision $tracked[102] $ws $healthPolicy 947.0); Update-ArkuzoFarmFreeze
+Assert ($farmFreeze.Members['102'].status -ceq 'Recovered') 'a warm-up member that answers again leaves the episode'
 
 # ---- Launch pacing -----------------------------------------------------------------------
 New-Farm 6 0; $now = [datetime]::UtcNow

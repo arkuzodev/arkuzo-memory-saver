@@ -95,6 +95,8 @@ SCHEMA = {
         'farm_freeze_enabled': ('bool',), 'farm_freeze_confirm_sec': ('int', 20, 120), 'farm_freeze_min_clients': ('int', 3, 50),
         'farm_freeze_onset_window_sec': ('int', 5, 60), 'farm_freeze_max_cpu_percent': ('int', 1, 10),
         'farm_freeze_spacing_sec': ('int', 10, 60), 'farm_freeze_refreeze_sec': ('int', 0, 86400),
+        'farm_freeze_remote_confirm_sec': ('int', 10, 120), 'farm_freeze_remote_window_sec': ('int', 10, 300),
+        'remote_hold_max_sec': ('int', 0, 3600), 'keep_display_awake': ('bool',),
     },
     'recovery': {
         'enabled': ('bool',), 'restore_missing': ('bool',), 'restore_wait_sec': ('int', 90, 900),
@@ -125,6 +127,7 @@ EVENT_KINDS = {
     'ORPHAN_CRASH_HANDLER_CLOSED': 'client', 'SYSTEM_RESOURCE_EXHAUSTION': 'error',
     'NATIVE_LAUNCH_REQUEST': 'recovery', 'NATIVE_LAUNCH_RESULT': 'recovery', 'NATIVE_CLIENT_CLOSED': 'client',
     'NATIVE_COOKIE_DEAD': 'recovery', 'ACCOUNT_PROVIDER': 'saver', 'NATIVE_LAUNCH_BLOCKED': 'warning',
+    'REMOTE_SESSION_CHANGED': 'saver', 'KEEP_AWAKE': 'saver',
 }  # Individual trims would flood the feed; the heartbeat carries their count.
 
 
@@ -1362,6 +1365,10 @@ def summarize_event(record: dict, names: dict) -> dict | None:
         text = f"Closed orphaned crash handler PID {data.get('pid')}"
     elif kind == 'SYSTEM_RESOURCE_EXHAUSTION':
         text = 'Windows reported resource exhaustion (event 2004)'
+    elif kind == 'REMOTE_SESSION_CHANGED':
+        level, text = remote_change_summary(data)
+    elif kind == 'KEEP_AWAKE':
+        text = 'Keeping the display awake while clients run' if data.get('on') else 'Display may sleep again (no clients running)'
     if not text:
         return None
     return {'t': parse_utc(record.get('time')) or time.time(), 'kind': kind, 'category': category, 'level': level, 'text': text[:240]}
@@ -1711,12 +1718,116 @@ def derive_issues(hb, age, supervisor_state) -> list:
             continue  # Expired; the engine retries this account normally.
         add('warning', f"{q.get('username') or 'An account'} is quarantined",
             f"{q.get('retryCount')} failed recoveries; retried automatically after the quarantine ends.")
+    for level, title, detail in remote_issues(hb.get('remoteSession'), len(hb.get('clients') or [])):
+        add(level, title, detail)
     dead = hb.get('suspendedAccounts') or []
     if dead:
         add('warning', f'{len(dead)} account(s) paused with a dead cookie',
             'Add them again on the Accounts page (cookie or browser sign-in); they resume automatically.' if arkuzo
             else 'Log those accounts in again in Volt; they resume automatically.')
     return issues
+
+
+# ------------------------------------------------------------- remote sessions
+REMOTE_CHANGE_TEXT = {
+    'CRD_CONNECTED': 'Chrome Remote Desktop connected', 'CRD_DISCONNECTED': 'Chrome Remote Desktop disconnected',
+    'SESSION_DISCONNECTED': 'Remote Desktop session disconnected', 'SESSION_RECONNECTED': 'Remote Desktop session reconnected',
+    'SESSION_ON_CONSOLE': 'Session moved to the console', 'SESSION_LEFT_CONSOLE': 'Session left the console',
+    'SESSION_LOCKED': 'Windows locked', 'SESSION_UNLOCKED': 'Windows unlocked',
+    'INPUT_DESKTOP_CHANGED': 'Input desktop switched', 'DISPLAY_MODE_CHANGED': 'Display mode changed',
+    'MONITOR_COUNT_CHANGED': 'Monitor count changed', 'PROTOCOL_CHANGED': 'Session protocol changed',
+    'SESSION_STATE_CHANGED': 'Session state changed',
+}
+
+
+def remote_change_summary(data: dict) -> tuple:
+    changes = [c for c in data.get('changes') or [] if isinstance(c, str)]
+    current = data.get('current') if isinstance(data.get('current'), dict) else {}
+    parts = [REMOTE_CHANGE_TEXT.get(c, c.replace('_', ' ').lower()) for c in changes]
+    if 'DISPLAY_MODE_CHANGED' in changes and current.get('display'):
+        parts[changes.index('DISPLAY_MODE_CHANGED')] += f" to {current['display']}"
+    clients = int(data.get('clients') or 0)
+    risky = clients > 0 and ('CRD_DISCONNECTED' in changes or 'SESSION_DISCONNECTED' in changes)
+    text = '; '.join(parts) or 'Remote session changed'
+    if clients:
+        text += f' ({clients} clients running)'
+    return ('warning' if risky else 'info'), text
+
+
+def remote_issues(remote, clients: int) -> list:
+    """Dashboard notices. Logged so far: every Chrome Remote Desktop disconnect with
+    clients running froze all of them; connected periods never did."""
+    if not isinstance(remote, dict):
+        return []
+    out = []
+    crd = remote.get('chromeRemoteDesktop') if isinstance(remote.get('chromeRemoteDesktop'), dict) else {}
+    if remote.get('hold'):
+        left = remote.get('holdLeftSec')
+        out.append(('warning', 'Remote Desktop session is disconnected: recovery is paused',
+                    'Clients cannot draw in a disconnected session, and relaunched ones could not either. Reconnect, or next time use '
+                    '"Leave Remote Desktop safely".' + (f' Recovery resumes by itself in {int(left)} s.' if isinstance(left, (int, float)) else '')))
+    if crd.get('connected') and clients > 0:
+        out.append(('warning', 'Chrome Remote Desktop is connected: minimise it, do not disconnect',
+                    'So far every disconnect froze all clients within seconds (Roblox closes frozen clients about 3 minutes later). '
+                    'Minimise the Chrome Remote Desktop tab or window instead. If you do disconnect, the saver restarts the clients one at a time right away.'))
+    if remote.get('protocol') == 'rdp' and remote.get('sessionState') == 'active' and clients > 0:
+        out.append(('warning', 'You are on Remote Desktop: leave it with "Leave Remote Desktop safely"',
+                    'Closing the Remote Desktop window disconnects the session and the clients stop drawing. The button on the Settings page '
+                    "moves this session to the PC's own screen first (tscon, needs administrator rights). The PC is then unlocked on its monitor."))
+    return out
+
+
+RDP_PROTOCOL = 2
+
+
+def own_session() -> dict:
+    """This process's Windows session: id, protocol (0 console, 2 RDP) and whether it is on the console."""
+    info = {'sessionId': -1, 'protocol': -1, 'onConsole': False}
+    if os.name != 'nt':
+        return info
+    try:
+        k32, wts = ctypes.windll.kernel32, ctypes.windll.wtsapi32
+        sid = wintypes.DWORD()
+        if not k32.ProcessIdToSessionId(os.getpid(), ctypes.byref(sid)):
+            return info
+        info['sessionId'] = int(sid.value)
+        info['onConsole'] = int(sid.value) == int(k32.WTSGetActiveConsoleSessionId())
+        buf, size = ctypes.c_void_p(), wintypes.DWORD()
+        if wts.WTSQuerySessionInformationW(None, sid, 16, ctypes.byref(buf), ctypes.byref(size)):  # WTSClientProtocolType
+            try:
+                if size.value >= 2:
+                    info['protocol'] = ctypes.c_ushort.from_address(buf.value).value
+            finally:
+                wts.WTSFreeMemory(buf)
+    except (OSError, AttributeError):
+        pass
+    return info
+
+
+def tscon_path() -> Path:
+    root = Path(os.environ.get('SystemRoot') or r'C:\Windows')
+    native = root / 'Sysnative' / 'tscon.exe'  # A 32-bit Python sees the 64-bit System32 here.
+    return native if native.exists() else root / 'System32' / 'tscon.exe'
+
+
+def leave_remote_desktop(session=None, runner=subprocess.run) -> str:
+    """Moves this RDP session to the physical console (tscon <id> /dest:console), so the
+    Remote Desktop window closes while every client keeps drawing. Only for RDP: Chrome
+    Remote Desktop already shows the console session. Runs once, on request; nothing persists."""
+    info = own_session() if session is None else session
+    if info.get('protocol') != RDP_PROTOCOL or int(info.get('sessionId', -1)) < 0:
+        raise ConfigError('This Control Center is not running in a Remote Desktop (RDP) session.')
+    sid = int(info['sessionId'])
+    command = [str(tscon_path()), str(sid), '/dest:console']
+    try:
+        result = runner(command, capture_output=True, text=True, timeout=20, creationflags=0x08000000)  # CREATE_NO_WINDOW
+    except subprocess.TimeoutExpired:
+        raise ConfigError('tscon did not finish in time.') from None
+    if result.returncode != 0:
+        detail = ((result.stderr or '') + ' ' + (result.stdout or '')).strip()[:200]
+        raise ConfigError('tscon failed' + (f': {detail}' if detail else '') + '. It needs administrator rights: run '
+                          f'"tscon {sid} /dest:console" in an administrator Command Prompt instead.')
+    return 'moved to console'
 
 
 # ------------------------------------------------------------- application
@@ -1876,7 +1987,7 @@ class App:
                 'version', 'pid', 'uptimeSec', 'trims', 'totals', 'settings', 'systemMemory', 'totalPhysicalMB', 'clients',
                 'accounts', 'pending', 'quarantined', 'suspendedAccounts', 'alerts', 'voltControlAvailable',
                 'recoveryJournalHealthy', 'missingRecoveryBlocked', 'expectedAccounts', 'missingAccounts', 'pendingRecoveries',
-                'health', 'recovery', 'logFailed', 'updateAvailable', 'accountProvider', 'accountProviderNotice')}
+                'health', 'recovery', 'logFailed', 'updateAvailable', 'accountProvider', 'accountProviderNotice', 'remoteSession')}
             view['pagefile'] = {k: (hb.get('pagefile') or {}).get(k) for k in ('status', 'reason', 'pendingReboot')}
         return {
             'app': APP_ID, 'version': self.version, 'instance': self.instance, 'windows': sum(1 for seen in list(self.pages.values()) if now - seen <= PAGE_STALE_SEC),
@@ -2029,6 +2140,10 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/saver/restart':
                 app.supervisor.stop()
                 return self._send(200, {'result': app.supervisor.start()})
+            if path == '/api/remote/leave':
+                return self._send(200, {'result': leave_remote_desktop()})
+            if path == '/api/remote/session':
+                return self._send(200, {'result': own_session()})
             if path == '/api/trim-now':
                 (app.data / 'trim-now.signal').write_text('trim', encoding='ascii')
                 return self._send(200, {'result': 'requested'})

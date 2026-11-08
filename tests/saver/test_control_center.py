@@ -378,6 +378,78 @@ class IssueTests(unittest.TestCase):
         self.assertFalse(any('Volt' in t for t in titles))
 
 
+class RemoteSessionTests(unittest.TestCase):
+    BASE = {'recoveryJournalHealthy': True, 'recovery': {'enabled': True}, 'accountProvider': 'arkuzo', 'clients': [{}, {}, {}]}
+
+    def titles(self, remote, **extra):
+        return [i['title'] for i in cc.derive_issues(dict(self.BASE, remoteSession=remote, **extra), 3, {'state': 'running'})]
+
+    def test_chrome_remote_desktop_connected_warns_not_to_disconnect(self):
+        crd = {'protocol': 'console', 'sessionState': 'active', 'chromeRemoteDesktop': {'connected': True}}
+        self.assertTrue(any('do not disconnect' in t for t in self.titles(crd)))
+        # No clients, nothing to lose; not connected, nothing to say.
+        self.assertFalse(any('Chrome Remote Desktop' in t for t in self.titles(crd, clients=[])))
+        self.assertFalse(any('Chrome Remote Desktop' in t for t in self.titles(dict(crd, chromeRemoteDesktop={'connected': False}))))
+        self.assertFalse(any('Remote' in t for t in self.titles(None)))
+
+    def test_rdp_notices(self):
+        active = {'protocol': 'rdp', 'sessionState': 'active'}
+        self.assertTrue(any('Leave Remote Desktop safely' in t for t in self.titles(active)))
+        held = self.titles({'protocol': 'rdp', 'sessionState': 'disconnected', 'hold': True, 'holdLeftSec': 300})
+        self.assertTrue(any('recovery is paused' in t for t in held))
+
+    def test_feed_summary(self):
+        record = {'event': 'REMOTE_SESSION_CHANGED', 'time': '2026-11-08T16:19:46+01:00',
+                  'data': {'changes': ['CRD_DISCONNECTED'], 'clients': 11, 'current': {'display': '1920x1080x144x32'}}}
+        row = cc.summarize_event(record, {})
+        self.assertEqual(row['level'], 'warning')
+        self.assertIn('Chrome Remote Desktop disconnected', row['text'])
+        self.assertIn('11 clients', row['text'])
+        quiet = cc.summarize_event(dict(record, data={'changes': ['DISPLAY_MODE_CHANGED'], 'clients': 0, 'current': {'display': '1280x720x60x32'}}), {})
+        self.assertEqual(quiet['level'], 'info')
+        self.assertIn('1280x720', quiet['text'])
+        self.assertIsNotNone(cc.summarize_event({'event': 'KEEP_AWAKE', 'data': {'on': True}}, {}))
+
+    def test_leave_remote_desktop_runs_tscon_only_for_rdp(self):
+        calls = []
+
+        class Done:
+            returncode, stdout, stderr = 0, '', ''
+
+        def runner(command, **kwargs):
+            calls.append(command)
+            return Done()
+
+        with self.assertRaises(cc.ConfigError):
+            cc.leave_remote_desktop({'sessionId': 1, 'protocol': 0}, runner)  # Console (Chrome Remote Desktop): nothing to move.
+        self.assertEqual(calls, [])
+        self.assertEqual(cc.leave_remote_desktop({'sessionId': 3, 'protocol': 2}, runner), 'moved to console')
+        self.assertEqual(calls[0][1:], ['3', '/dest:console'])
+        self.assertTrue(calls[0][0].lower().endswith('tscon.exe'))
+
+        class Denied:
+            returncode, stdout, stderr = 1, '', 'Access is denied.'
+
+        with self.assertRaises(cc.ConfigError) as ctx:
+            cc.leave_remote_desktop({'sessionId': 3, 'protocol': 2}, lambda *a, **k: Denied())
+        self.assertIn('administrator', str(ctx.exception))
+        self.assertIn('tscon 3 /dest:console', str(ctx.exception))
+
+    def test_own_session_reads_this_process(self):
+        info = cc.own_session()
+        self.assertIn('protocol', info)
+        if sys.platform == 'win32':
+            self.assertGreaterEqual(info['sessionId'], 0)
+
+    def test_settings_page_lists_the_remote_settings(self):
+        html = (ROOT / 'src' / 'saver' / 'Arkuzo-Control-Center.html').read_text(encoding='utf-8')
+        for key in ('farm_freeze_remote_confirm_sec', 'keep_display_awake', 'remote_hold_max_sec'):
+            self.assertIn(key, cc.SCHEMA['health'])
+            self.assertIn(f"'health', '{key}'", html)
+        defaults = json.loads((ROOT / 'config' / 'defaults.json').read_text(encoding='utf-8'))['health']
+        self.assertEqual((defaults['farm_freeze_remote_confirm_sec'], defaults['keep_display_awake']), (20, True))
+
+
 class HttpTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

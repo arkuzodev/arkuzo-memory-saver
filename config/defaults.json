@@ -33,7 +33,11 @@
     "farm_freeze_onset_window_sec": 15,
     "farm_freeze_max_cpu_percent": 5,
     "farm_freeze_spacing_sec": 20,
-    "farm_freeze_refreeze_sec": 900
+    "farm_freeze_refreeze_sec": 900,
+    "farm_freeze_remote_confirm_sec": 20,
+    "farm_freeze_remote_window_sec": 60,
+    "remote_hold_max_sec": 600,
+    "keep_display_awake": true
   },
   "recovery": {
     "enabled": true,

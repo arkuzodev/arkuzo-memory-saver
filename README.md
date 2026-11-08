@@ -156,6 +156,7 @@ flowchart LR
 - **With Volt, its relaunch delay stays at 30 s or more;** a larger delay you set is kept. Missing-account retries back off for 90–900 s, with cooldowns and hourly budgets that survive saver restarts.
 - **A restore must prove itself:** a new, exactly mapped process, a connected launcher socket, a responsive window without errors and matching server-join evidence, held for a continuous confirmation window.
 - **Farm-wide freezes** (in the logs, Chrome Remote Desktop disconnects and display events) are handled as one event, with closes paced so Volt doesn't show its "Roblox started before Volt could connect" notice. Switch it off with `health.farm_freeze_enabled`.
+- **Remote desktop:** a Chrome Remote Desktop disconnect freezes every client. The saver recognises it and recycles the farm sooner, warns you in the Control Center while a session is connected, and has a "Leave Remote Desktop safely" button for RDP. See [docs/remote-desktop.md](docs/remote-desktop.md).
 
 <details>
 <summary><b>Cookie-dead accounts</b></summary>

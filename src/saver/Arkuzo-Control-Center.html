@@ -626,6 +626,13 @@ details.fold:not([open]) > summary + .divider { display: none; }
         </article>
         <form id="settingsForm" class="set-grid" novalidate></form>
         <article class="card">
+          <div class="card-h"><span class="cap">Remote desktop</span><span class="card-s" id="remoteState">No remote session seen yet.</span></div>
+          <div class="card-b">
+            <p class="t2" style="margin:0 0 10px">Chrome Remote Desktop: minimise its tab or window instead of disconnecting. Every disconnect so far froze all clients; the saver then restarts them one at a time. Remote Desktop (RDP): leave with the button below, which moves your session to the PC’s own screen so the clients keep drawing (needs administrator rights; the PC stays unlocked on its monitor).</p>
+            <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" id="btnLeaveRdp" disabled title="Only in a Remote Desktop (RDP) session"><span data-icon="enter"></span>Leave Remote Desktop safely</button></div>
+          </div>
+        </article>
+        <article class="card">
           <div class="card-h"><span class="cap">Application</span><span class="card-s">Closing this window stops the saver and quits, like Stop farm &amp; quit.</span></div>
           <div class="card-b" style="display:flex;gap:8px;flex-wrap:wrap">
             <button class="btn" id="btnQuit" title="Close the Control Center; the saver keeps running"><span data-icon="x"></span>Quit Control Center</button>
@@ -1390,7 +1397,7 @@ document.querySelectorAll('.chip').forEach((c) => c.addEventListener('click', ()
 // ---------- render & poll ----------
 function renderAll() {
   const st = S.state; if (!st) return;
-  renderSaver(st); renderIssues(st); renderKpis(st); renderClients(st); renderAccounts(st); renderFeed(); redrawCharts(); syncPrefs(st.prefs);
+  renderSaver(st); renderIssues(st); renderRemote(st); renderKpis(st); renderClients(st); renderAccounts(st); renderFeed(); redrawCharts(); syncPrefs(st.prefs);
   const stale = isStale(st);
   for (const id of ['kpis', 'ovClientsCard', 'clientsCard', 'accountsCard']) $(id).classList.toggle('stale', stale);
   renderVault();
@@ -1479,6 +1486,9 @@ const FIELDS = [
     ['health', 'farm_freeze_enabled', 'Farm freeze fast path', '', 'When most clients freeze together, recycle them early, one at a time.'],
     ['health', 'farm_freeze_confirm_sec', 'Farm freeze confirmation', 's', 'How long a farm-wide freeze must last before recycling.'],
     ['health', 'farm_freeze_spacing_sec', 'Farm freeze spacing', 's', 'Gap between recycles, so Volt relaunches one at a time.'],
+    ['health', 'farm_freeze_remote_confirm_sec', 'Remote disconnect confirmation', 's', 'Shorter wait when the freeze began right after a remote-desktop disconnect.'],
+    ['health', 'keep_display_awake', 'Keep display awake', '', 'Stops the display and PC from sleeping while clients run. The power plan is not changed.'],
+    ['health', 'remote_hold_max_sec', 'RDP disconnect hold', 's', 'While an RDP session is disconnected, pause recovery this long at most. 0 turns it off.'],
     ['health', 'disconnect_timeout_sec', 'Disconnect grace', 's', 'Wait after a kick or disconnect.'],
     ['health', 'warmup_sec', 'Warmup', 's', 'Startup grace for each new client.'],
     ['health', 'pressure_percent', 'Commit pressure', '%', 'OS commit level that recycles the largest clients.'],
@@ -1582,6 +1592,23 @@ $('btnSave').onclick = async () => {
 };
 function syncPrefs(p) { if (!p) return; for (const [id, key] of [['pAutopilot', 'autopilot'], ['pLaunch', 'startSaverOnLaunch'], ['pWindows', 'startWithWindows']]) if (document.activeElement !== $(id)) $(id).checked = !!p[key]; }
 for (const [id, key] of [['pAutopilot', 'autopilot'], ['pLaunch', 'startSaverOnLaunch'], ['pWindows', 'startWithWindows']]) $(id).addEventListener('change', () => act('/api/prefs', 'Saved', { [key]: $(id).checked }, 'good'));
+function renderRemote(st) {
+  const r = st.heartbeat && st.heartbeat.remoteSession;
+  if (!r) return;
+  const crd = r.chromeRemoteDesktop, parts = [];
+  if (crd) parts.push(crd.connected ? 'Chrome Remote Desktop connected' : 'Chrome Remote Desktop not connected');
+  parts.push(r.protocol === 'rdp' ? `RDP session ${r.sessionState}` : r.onConsole ? 'console session' : `session ${r.sessionState}`);
+  if (r.locked) parts.push('locked');
+  if (r.display) parts.push(r.display.split('x').slice(0, 2).join('×') + (r.display.split('x')[2] ? ` @ ${r.display.split('x')[2]} Hz` : ''));
+  if (r.keepAwake) parts.push('display kept awake');
+  if (r.hold) parts.push('recovery paused');
+  $('remoteState').textContent = parts.join(' · ');
+  $('btnLeaveRdp').disabled = !(r.protocol === 'rdp' && r.sessionState === 'active');
+}
+$('btnLeaveRdp').onclick = () => {
+  if (!confirm('Move this Remote Desktop session to the PC’s own screen? The Remote Desktop window closes and the PC stays signed in and unlocked on its monitor until you lock it there.')) return;
+  act('/api/remote/leave', 'Session moved to the console', {}, 'good');
+};
 const goodbye = (text) => document.body.replaceChildren(el('div', { style: 'height:100vh;display:grid;place-items:center;color:#7e879a;font-weight:600', text }));
 $('btnQuit').onclick = async () => { await post('/api/quit', {}).catch(() => {}); goodbye('Control Center closed. The saver keeps running; you can close this window.'); };
 $('btnQuitAll').onclick = async () => { if (!confirm('Stop the saver and quit? Clients keep running but are no longer managed.')) return; await post('/api/quit', { stopSaver: true }).catch(() => {}); goodbye('Saver stopped and Control Center closed. You can close this window.'); };

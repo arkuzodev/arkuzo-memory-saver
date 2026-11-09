@@ -39,6 +39,13 @@ try {
     [IO.File]::WriteAllText($head, ((1..500 | ForEach-Object { "line $_" }) -join "`r`n"))
     $lines = @(Read-ArkuzoLogHeadLines $head 350)
     Assert ($lines.Count -eq 350 -and $lines[0] -ceq 'line 1' -and $lines[349] -ceq 'line 350') 'head lines like Get-Content -TotalCount'
+    # A 12-hour client log is ~2 MB: its head must still be its start (9 Nov restart).
+    $big = Join-Path $scratch 'big.log'
+    [IO.File]::WriteAllText($big, "websiteBTId is 223456789012`r`n" + ((1..60000 | ForEach-Object { "filler line $_" }) -join "`r`n"))
+    $lines = @(Read-ArkuzoLogHeadLines $big 100 131072)
+    Assert ((Get-Item $big).Length -gt 500000 -and $lines[0] -ceq 'websiteBTId is 223456789012' -and $lines[1] -ceq 'filler line 1') 'the head of a log larger than MaxBytes is its first lines, not its end'
+    $r = Read-ArkuzoBoundedFile $big 0 4096
+    Assert ($r.Ok -and $r.Start -eq 0 -and $r.Text.StartsWith('websiteBTId')) 'offset 0 reads from the start'
 
     # ---- A log whose open blocks ---------------------------------------------------------------
     $blocked = Join-Path $scratch '0.1_20261108T152449Z_Player_57F12_last.log'
@@ -83,18 +90,18 @@ Start-Sleep -Seconds 600
         Assert ($null -eq $text -and $offset.Value -eq 0) 'a log that cannot be opened returns nothing and keeps its offset'
         Assert ($first -ge 1.5 -and $first -lt 6) ("the read gives up after about 2 s ($([math]::Round($first,1)) s)")
         Assert ($warned -contains 'roblox-log-blocked') 'and says so'
-        Assert ([Arkuzo.BoundedReadV1]::Stuck() -eq 1) 'one worker waits on the file'
+        Assert ([Arkuzo.BoundedReadV2]::Stuck() -eq 1) 'one worker waits on the file'
         $sw.Restart()
         Assert ($null -eq (Read-RobloxLogTail $blocked $offset) -and $sw.ElapsedMilliseconds -lt 500) 'while it waits, the file is skipped at once'
         $sw.Restart()
         $found = Find-RobloxProcessLog -TargetProcessId 77 -TrackerId '123456789' -StartTimeUtc ([datetime]'2026-11-08T15:24:49Z') -LogsDir $scratch
         Assert ($null -eq $found -and $sw.Elapsed.TotalSeconds -lt 3) 'finding the log of that client does not hang either'
-        Assert ([Arkuzo.BoundedReadV1]::Stuck() -eq 1) 'and starts no second worker on the same file'
+        Assert ([Arkuzo.BoundedReadV2]::Stuck() -eq 1) 'and starts no second worker on the same file'
         # The holder goes away (the frozen client exits): the file is read again.
         Stop-Process -Id $holder.Id -Force; $holder = $null
         $sw.Restart(); $text = $null
         while ($sw.Elapsed.TotalSeconds -lt 15 -and $null -eq $text) { $text = Read-RobloxLogTail $blocked $offset; if ($null -eq $text) { Start-Sleep -Milliseconds 200 } }
-        Assert ($text -ceq 'websiteBTId is 123456789' -and [Arkuzo.BoundedReadV1]::Stuck() -eq 0) 'once the holder is gone the log reads normally again'
+        Assert ($text -ceq 'websiteBTId is 123456789' -and [Arkuzo.BoundedReadV2]::Stuck() -eq 0) 'once the holder is gone the log reads normally again'
         Assert ((Find-RobloxProcessLog -TargetProcessId 77 -TrackerId '123456789' -StartTimeUtc ([datetime]'2026-11-08T15:24:49Z') -LogsDir $scratch) -eq $blocked) 'and binds to its client again'
     }
 } finally {

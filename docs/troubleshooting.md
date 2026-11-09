@@ -57,7 +57,7 @@ A displayed countdown reaching zero is not proof that every other gate has passe
 
 ### Private memory exceeds 6,000 MB, but there is no immediate restart
 
-The ordinary private-memory policy requires **60 seconds of continuous observation** above the threshold, with startup grace and recovery safety gates. Observation gaps reset sustained-fault timers. System commit pressure has separate selection paths, but it still does not waive account verification, logging, journal, or budget requirements.
+The ordinary private-memory policy requires **60 seconds of continuous observation** above the threshold, with startup grace and recovery safety gates. Observation gaps longer than 30 s reset sustained-fault timers (a slow pass of 2-8 s on a farm deep in the pagefile does not). System commit pressure has separate selection paths, but it still does not waive account verification, logging, journal, or budget requirements.
 
 The **82% OS commit threshold** selects candidates; it is not a hard ceiling, a physical-RAM percentage, or a guarantee that a safe candidate can be recovered in time.
 

@@ -45,7 +45,8 @@ function Get-ArkuzoVoltRecoveryStatus {
     $child=[pscustomobject]@{Remaining=[double]$script:delay;Waits=0}
     $child|Add-Member ScriptMethod WaitForExit {
         param($ms)
-        $this.Waits++;$dt=[math]::Min($this.Remaining,$ms/1000.0)
+        # silentIO: one blocking probe hides the whole delay from observation.
+        $this.Waits++;$dt=if ($script:mode -eq 'silentIO') {$this.Remaining} else {[math]::Min($this.Remaining,$ms/1000.0)}
         $script:clock.Elapsed.TotalSeconds+=$dt;$this.Remaining-=$dt
         return ($this.Remaining -le 0.000001)
     }
@@ -162,11 +163,11 @@ if ($Case -in @('Hang','All')) {
     $healthPolicy.private_limit_sustain_sec=120
     foreach($n in 0..60) {$decision=Get-ArkuzoHealthDecision $s $sample $healthPolicy $n}
     Assert ($decision.Recycle -and $decision.Reason -eq 'SUSTAINED_HANG') 'Mature hang must not be masked by oversized memory grace'
-    foreach($step in @(0.35,0.5,1.1,5.0,5.5)) {
+    foreach($step in @(0.35,0.5,1.1,5.0,5.5,8.0,30.0,30.5)) {
         $s=@{}
         foreach($n in 0..([int][math]::Ceiling(60/$step))) {$decision=Get-ArkuzoHealthDecision $s $sample $healthPolicy ($n*$step)}
-        if ($step -le 5) {Assert ($decision.Recycle -and $decision.Reason -eq 'SUSTAINED_HANG') ("Mature oversized hang at interval $step")}
-        else {Assert (-not $decision.Recycle) '5.5-second hang samples never bridge missing observation'}
+        if ($step -le 30) {Assert ($decision.Recycle -and $decision.Reason -eq 'SUSTAINED_HANG') ("Mature oversized hang at interval $step")}
+        else {Assert (-not $decision.Recycle) '30.5-second hang samples never bridge missing observation'}
     }
     $critical=$sample.Clone();$critical.systemCommitPercent=95
     Assert ((Get-ArkuzoHealthDecision @{} $critical $healthPolicy 0).Reason -eq 'SYSTEM_COMMIT_PRESSURE') 'Critical pressure keeps priority over hang'
@@ -192,18 +193,29 @@ Assert ($events.Contains('RECOVERY_REQUESTED') -and $events.Contains('CLIENT_CLO
 Assert ($recoveryAttempts.Count -eq 1 -and $recoveryPending.Count -eq 1) 'Verified closure retains budget and handoff'
 foreach($m in @('healthy','generation','ownership','parent','sampleFailure','audit','journal','collateral','silentIO')) {
     Initialize-Fixture;$script:mode=$m
+    if ($m -eq 'silentIO') {$script:delay=16.0}  # two unobserved probes: 32 s > the 30 s gap limit
     Invoke-ClientRecovery 101 $state
     Assert ($watcher.Kills -eq 0 -and -not $events.Contains('CLIENT_CLOSED_FOR_RECOVERY')) ("Fail closed: $m")
-    if ($m -eq 'silentIO') {Write-Output ("TRACE unobserved-6s: samples=$samples kills=$($watcher.Kills) attempts=$($recoveryAttempts.Count) pending=$($recoveryPending.Count)")}
+    if ($m -eq 'silentIO') {Write-Output ("TRACE unobserved-32s: samples=$samples kills=$($watcher.Kills) attempts=$($recoveryAttempts.Count) pending=$($recoveryPending.Count)")}
     if ($m -notin @('generation','journal')) {Assert ($recoveryAttempts.Count -eq 0 -and $recoveryPending.Count -eq 0) ("Reservation rollback: $m")}
 }
-# Endpoint-only silence is never bridged, including fractional >5s and rollback.
-foreach($gap in @(5.5,6.0,-1.0)) {
+# Long endpoint-only silence is never bridged, including fractional >30s and rollback.
+foreach($gap in @(30.5,45.0,-1.0)) {
     Initialize-Fixture;$clock.Elapsed.TotalSeconds+= $gap
     $fresh=Get-ArkuzoRecoveryHealthSample $watcher '' $state
     $d=Get-ArkuzoHealthDecision $state $fresh $healthPolicy $clock.Elapsed.TotalSeconds
     Assert (-not $d.Recycle) ("Actual missing interval/rollback resets sustain: $gap")
 }
+# A slow loop (6-8 s per pass on a paging farm, 9 Nov) still matures both timers.
+$slowPolicy=Get-ArkuzoHealthPolicy @{enabled=$true;warmup_sec=60;hang_timeout_sec=180;private_limit_mb=6500;private_limit_sustain_sec=60}
+$hung=@{privateMB=5000;ageSec=40000;responding=$false;windowPresent=$true;launchError=$false;isDisconnected=$false;systemCommitPercent=45;eligible=$true}
+$s=@{};$t=1000.0;$d=$null;$steps=@(6.0,8.2,7.7,2.1,7.9)
+for($i=0;$i -lt 40 -and -not ($d -and $d.Recycle);$i++){$d=Get-ArkuzoHealthDecision $s $hung $slowPolicy $t;$t+=$steps[$i % $steps.Count]}
+Assert ($d.Recycle -and $d.Reason -ceq 'SUSTAINED_HANG' -and ($t-1000.0) -le 200) 'A client frozen through 6-8 s passes is recycled after the hang timeout'
+$leak=@{privateMB=6600;ageSec=40000;responding=$true;windowPresent=$true;launchError=$false;isDisconnected=$false;systemCommitPercent=45;eligible=$true}
+$s=@{};$t=1000.0;$d=$null
+for($i=0;$i -lt 20 -and -not ($d -and $d.Recycle);$i++){$d=Get-ArkuzoHealthDecision $s $leak $slowPolicy $t;$t+=$steps[$i % $steps.Count]}
+Assert ($d.Recycle -and $d.Reason -ceq 'PRIVATE_COMMIT_LIMIT' -and ($t-1000.0) -le 80) 'A client over the memory limit through 6-8 s passes is recycled after the sustain time'
 Write-Output 'PASS: delayed production recovery, healthy rebound, generation/ownership/parent, failure/audit/journal/collateral, rollback, real gaps'
 # Exercise the scheduling service itself with nine retained fixture generations:
 # 9 serial 0.8s IO operations would otherwise starve a complete monitor pass.

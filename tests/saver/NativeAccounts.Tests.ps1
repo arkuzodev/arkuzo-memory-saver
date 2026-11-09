@@ -183,6 +183,30 @@ try {
     Update-ArkuzoRecoveryOutcomes
     Assert ($script:recoveryPending.Count -eq 0) 'stopping the farm cancels queued launches'
 
+    # --- A launched client that never opens its window is closed for a fresh launch (9 Nov).
+    function New-StalledClient([int]$AgeSec, [bool]$Window) {
+        $p = [pscustomobject]@{ Id = 700; StartTime = [datetime]::UtcNow.AddSeconds(-$AgeSec); HasExited = $false; ProcessName = 'RobloxPlayerBeta'; Kills = 0 }
+        $p | Add-Member ScriptMethod Refresh { }
+        $p | Add-Member ScriptMethod Kill { $this.Kills++; $this.HasExited = $true }
+        $script:clients = @([pscustomobject]@{ processId = 700; trackerId = $TB; path = '' })
+        $script:tracked = @{ 700 = @{ Watcher = $p; TrackerId = $TB; StartTicks = $p.StartTime.ToUniversalTime().Ticks; GameReady = $false; isDisconnected = $false
+            HealthSnapshotUtc = [datetime]::UtcNow.ToString('o'); LastSnapshot = @{ windowPresent = $Window; responding = $Window; launchError = $false } } }
+        $entry = New-ArkuzoPendingEntry $B $TB; $entry.createdUtc = [datetime]::UtcNow.AddSeconds(-$AgeSec - 20).ToString('o')
+        $script:recoveryPending = @{ $B = $entry }; $script:sessionObservedAccounts = @{ $B = $true }
+        $script:voltControlStatus = Get-ArkuzoNativeStatus; $script:voltControlCheckedUtc = [datetime]::UtcNow
+        return $p
+    }
+    Reset-Engine; New-Vault; $script:roblox[(Fake-Cookie 'b')] = @{ }
+    $p = New-StalledClient 600 $false; Update-ArkuzoRecoveryOutcomes
+    Assert ($p.Kills -eq 1 -and @($script:events | Where-Object { $_.kind -eq 'NATIVE_LAUNCH_STALLED' }).Count -eq 1) 'a launch with no window after launchTimeoutSec is closed'
+    Assert ($script:recoveryPending.ContainsKey($B)) 'the account stays queued for a fresh launch'
+    Reset-Engine; New-Vault; $script:roblox[(Fake-Cookie 'b')] = @{ }
+    $p = New-StalledClient 60 $false; Update-ArkuzoRecoveryOutcomes
+    Assert ($p.Kills -eq 0) 'a launch still inside launchTimeoutSec is left loading'
+    Reset-Engine; New-Vault; $script:roblox[(Fake-Cookie 'b')] = @{ }
+    $p = New-StalledClient 600 $true; Update-ArkuzoRecoveryOutcomes
+    Assert ($p.Kills -eq 0) 'a launch with a window is left to the health checks'
+
     # --- Nothing secret anywhere it could be shown or logged.
     $all = ($script:events | ConvertTo-Json -Depth 8) + ($script:warned -join "`n") + ((Get-ArkuzoNativeStatus) | ConvertTo-Json -Depth 8)
     Assert ($all -notmatch 'WARNING:-DO-NOT|LinkCode123|dpapi:|TICKET-') 'no cookie, ticket or link code in diagnostics, warnings or status'

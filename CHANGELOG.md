@@ -2,6 +2,12 @@
 
 Changes for **Arkuzo Memory Saver with Volt Integration** are recorded here.
 
+## v2.2.1 — Recovery on a slow, paging farm (hotfix)
+
+- **Frozen clients and leaking clients are recovered again on a slow, paging farm.** The hang (180 s) and memory-limit (60 s) timers restarted whenever two checks of a client were more than 5 s apart. With 11 clients deep in the pagefile a pass takes 2-8 s, so neither timer could run out: on 9 Nov two clients stayed frozen for 55 and 37 minutes and one sat over the memory limit, none recovered. Only a gap over 30 s (or a clock jump back) restarts them now.
+- **A launch that never opens its window is retried.** A client Arkuzo launched that still has no window after the launch timeout (120 s) is closed and the account launched again. One such client had waited 14 minutes at 0% CPU, holding up every other recovery behind it.
+- **Clients adopted after a saver restart are matched to their logs again.** Since v2.2.0 the first-lines read of a log larger than 128 KB returned its end instead, so after a restart no older client was matched: they showed as not in game, and a kick written to their log went unnoticed.
+
 ## v2.2.0 — Account manager integration
 
 - **Arkuzo has its own account manager.** The Accounts page keeps your Roblox accounts: add one by pasting its cookie or with **Sign in with browser**: a plain Microsoft Edge window with a throwaway profile (no automation, no sync prompt), brought to the front and closed by itself once you are signed in. Each cookie is checked with Roblox (Alive, Dead or Unchecked, with a check button per account, Check all, and a check every 60 minutes), and Roblox's re-issued cookies replace the stored ones, so accounts stay signed in. Cookies and private-server link codes are stored encrypted with Windows DPAPI for your Windows user and never appear in a page, log or command line.

@@ -48,7 +48,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$ArkuzoRuntimeVersion = '2.2.0'
+$ArkuzoRuntimeVersion = '2.2.1'
 # Explicit CLI values win over config, including later hot reloads.
 $cliBoundParameters = @($PSBoundParameters.Keys)
 # Resolve persistent data independently of the versioned program files.
@@ -355,8 +355,10 @@ function Read-ArkuzoBoundedFile([string]$Path, [long]$Offset, [int]$MaxBytes, [i
     # (8 Nov 16:28-17:21). The open and read run on a worker thread; a read that
     # outlasts TimeoutMs reports TimedOut, and until it finishes that file is
     # skipped at once, so at most one worker per file can be stuck.
-    # Offset < 0 reads the last MaxBytes; a gap larger than MaxBytes is skipped.
-    if (-not ('Arkuzo.BoundedReadV1' -as [type])) {
+    # Offset < 0 reads the last MaxBytes, 0 the first MaxBytes; from Offset > 0 a gap
+    # larger than MaxBytes is skipped. (V1 skipped from 0 too, so a log over 128 KB
+    # was read from its end: no client adopted after a restart was ever matched.)
+    if (-not ('Arkuzo.BoundedReadV2' -as [type])) {
         Add-Type -TypeDefinition @'
 using System;
 using System.Collections.Generic;
@@ -365,7 +367,7 @@ using System.Text;
 using System.Threading.Tasks;
 namespace Arkuzo {
  public sealed class BoundedReadResult { public bool Ok; public bool TimedOut; public long Length; public long Start; public int Count; public string Text = ""; }
- public static class BoundedReadV1 {
+ public static class BoundedReadV2 {
   static readonly object Gate = new object();
   static readonly Dictionary<string, Task<BoundedReadResult>> Pending = new Dictionary<string, Task<BoundedReadResult>>(StringComparer.OrdinalIgnoreCase);
   public static BoundedReadResult Read(string path, long offset, int maxBytes, int timeoutMs) {
@@ -387,7 +389,8 @@ namespace Arkuzo {
      long len = fs.Length;
      long start = offset < 0 ? Math.Max(0L, len - maxBytes) : offset;
      if (start > len) return new BoundedReadResult { Ok = true, Length = len, Start = start };
-     if (offset >= 0 && len - start > maxBytes) start = len - maxBytes;
+     // Only a continuing tail read (offset > 0) skips a gap; offset 0 is a head read.
+     if (offset > 0 && len - start > maxBytes) start = len - maxBytes;
      int want = (int)Math.Min((long)maxBytes, len - start);
      var buffer = new byte[want];
      fs.Seek(start, SeekOrigin.Begin);
@@ -401,7 +404,7 @@ namespace Arkuzo {
 }
 '@
     }
-    $result = [Arkuzo.BoundedReadV1]::Read($Path, $Offset, $MaxBytes, $TimeoutMs)
+    $result = [Arkuzo.BoundedReadV2]::Read($Path, $Offset, $MaxBytes, $TimeoutMs)
     if ($result.TimedOut) {
         Warn-Throttled 'roblox-log-blocked' 'A Roblox log file did not open within 2 s (a frozen client can hold it); it is skipped until it opens again.'
     }
@@ -2720,9 +2723,11 @@ function Update-ArkuzoRecoveryOutcomes {
                 $script:recoveryPending.Remove($key);continue
             }
             $sample=@{available=$true;accountId=$key;controlReady=[bool]$a.controlReady;autoRelaunch=[bool]$a.autoRelaunch;cookieAlive=[bool]$a.cookieAlive;uiStatus=$a.uiStatus;processId=$a.processId;trackerId=$a.trackerId;startTicks=0;windowPresent=$false;responding=$false;launchError=$false;isDisconnected=$false;gameReady=$false}
+            $replacementState=$null
             if ($a.processId -and $tracked.ContainsKey([int]$a.processId)) {
                 $state=$tracked[[int]$a.processId]
                 if ($state.TrackerId -eq $a.trackerId -and (Test-ArkuzoClientIdentity $state.Watcher ([int]$a.processId) $state.StartTicks) -and $state.LastSnapshot) {
+                    $replacementState=$state
                     $sample.sampleUtc=$state.HealthSnapshotUtc
                     $sample.startTicks=$state.StartTicks;$sample.windowPresent=$state.LastSnapshot.windowPresent;$sample.responding=$state.LastSnapshot.responding
                     $sample.launchError=$state.LastSnapshot.launchError;$sample.isDisconnected=[bool]$state.isDisconnected;$sample.gameReady=[bool]$state.GameReady
@@ -2737,6 +2742,22 @@ function Update-ArkuzoRecoveryOutcomes {
                 Write-Diagnostic 'ACCOUNT_RESTORED_VERIFIED' @{accountId=$key;username=$a.username;pid=$sample.processId;startTicks=$sample.startTicks;note='Exact account + new generation + connected socket + responsive window + server acceptance + stable confirmation. Not an endurance guarantee.'}
                 if ($logFailed) { throw 'Recovery requires audit logging' }
                 $script:recoveryPending.Remove($key);continue
+            }
+            if ($native -and $decision -eq 'Observing' -and $null -ne $replacementState -and -not $sample.windowPresent -and
+                [long]$replacementState.StartTicks -gt 0 -and
+                (($utc.ToUniversalTime().Ticks - [long]$replacementState.StartTicks) / 1e7) -ge [double](Get-ArkuzoVaultSetting $script:nativeVault 'launchTimeoutSec' 120 30 600)) {
+                # A client Arkuzo launched that never opened its window (9 Nov: 12 min,
+                # 0% CPU, under memory pressure) is never healthy, and the hang check
+                # only covers windows: close exactly that process so the next pass
+                # launches the account again (retry count and quarantine still apply).
+                $stalledPid=[int]$a.processId
+                Write-Diagnostic 'NATIVE_LAUNCH_STALLED' @{accountId=$key;username=$a.username;pid=$stalledPid;startTicks=[long]$replacementState.StartTicks;note='No window after the launch timeout; closing it for a fresh launch.'}
+                if ($logFailed) { throw 'Recovery requires audit logging' }
+                try {
+                    if (Test-ArkuzoClientIdentity $replacementState.Watcher $stalledPid $replacementState.StartTicks) { $replacementState.Watcher.Kill() }
+                } catch { Warn-Throttled ('stalled-'+$key) ((Get-ArkuzoAccountDisplayLabel -AccountId $key)+': a launch without a window could not be closed: '+$_.Exception.Message) }
+                $entry.readySinceUtc=$null;$entry.lastObservedUtc=$null
+                continue
             }
             if ($decision -eq 'LaunchMissing') {
                 if ($a.cookieStatus -ceq 'dead' -or $a.cookieStatus -cne 'alive' -or -not $a.cookieAlive -or
@@ -3176,15 +3197,19 @@ function Reset-ArkuzoHealthSample($State) {
 }
 function Get-ArkuzoHealthDecision($State, $Sample, $Policy, [double]$Now) {
     $reason = ''; $status = ''
-    # Normal polling is sub-second. A >5s gap (or clock rollback) breaks
-    # continuous observation, even when both endpoint samples succeeded.
+    # A >30s gap (or clock rollback) breaks continuous observation, even when
+    # both endpoint samples succeeded. Polling is sub-second on a quiet PC, but
+    # a farm deep in the pagefile takes 2-8 s per pass. The old 5 s cut-off reset
+    # every timer on those passes, so a frozen client (9 Nov 05:13-06:10) and one
+    # over the memory limit were never recovered. A truly stuck loop is the
+    # stall watchdog's job.
     if ($null -eq $State.LastHealthSampleTime -or $Now -lt [double]$State.LastHealthSampleTime) {
         $State.HangSince = -1.0
         $State.FreezeSince = -1.0
         $State.StartupErrorSince = -1.0
         $State.DisconnectSince = -1.0
         $State.PrivateLimitSince = -1.0
-    } elseif (($Now - [double]$State.LastHealthSampleTime) -gt 5) {
+    } elseif (($Now - [double]$State.LastHealthSampleTime) -gt 30) {
         $State.HangSince = -1.0
         $State.FreezeSince = -1.0
         $State.PrivateLimitSince = -1.0
@@ -5649,15 +5674,23 @@ try {
                 [Arkuzo.LoopWatchdogV1]::Mark('client ' + $id + ': game log')
                 if ($null -eq $state.LogPath) {
                     $state.LogPath = Find-RobloxProcessLog -TargetProcessId $id -TrackerId $state.TrackerId -StartTimeUtc $client.StartTime.ToUniversalTime()
-                    if ($null -ne $state.LogPath) {
-                        try {
-                            $headLines = @(Read-ArkuzoLogHeadLines $state.LogPath 350)
-                            $headText = $headLines -join "`n"
+                }
+                # The head says whether an adopted client already joined. Under memory
+                # pressure the read can time out (9 Nov restart: 8 of 11 clients stayed
+                # "not in game"), so retry it every 15 s until it is read once.
+                if ($null -ne $state.LogPath -and -not $state.LogHeadRead -and -not $state.GameReady -and
+                    ($null -eq $state.LogHeadTriedSec -or ($sampleTime - [double]$state.LogHeadTriedSec) -ge 15)) {
+                    $state.LogHeadTriedSec = $sampleTime
+                    try {
+                        $head = Read-ArkuzoBoundedFile $state.LogPath 0 262144
+                        if ($head.Ok) {
+                            $state.LogHeadRead = $true
+                            $headText = (@($head.Text -split "`r?`n" | Select-Object -First 350)) -join "`n"
                             if ($headText -match '(?i)\[DFLog::NetworkClient\] Connection accepted from') {
                                 $state.GameReady = $true; $state.EverGameReady = $true
                             }
-                        } catch { }
-                    }
+                        }
+                    } catch { }
                 }
                 if ($null -ne $state.LogPath) {
                     $logOffsetRef = [ref]$state.LogOffset

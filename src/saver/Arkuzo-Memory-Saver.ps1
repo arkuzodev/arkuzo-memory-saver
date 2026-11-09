@@ -48,7 +48,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$ArkuzoRuntimeVersion = '2.2.1'
+$ArkuzoRuntimeVersion = '2.3.0'
 # Explicit CLI values win over config, including later hot reloads.
 $cliBoundParameters = @($PSBoundParameters.Keys)
 # Resolve persistent data independently of the versioned program files.
@@ -1573,7 +1573,7 @@ function Get-ArkuzoNativeStatus($Clients = $null) {
             if ($live.Count -gt 0 -or ($utc - $script:nativeLaunches[$id]).TotalSeconds -ge $launchTimeout) { $script:nativeLaunches.Remove($id) }
             else { $inFlight = $true }
         }
-        $cookieStatus = if ([string]$a.cookieStatus -ceq 'alive' -or [string]$a.cookieStatus -ceq 'dead') { [string]$a.cookieStatus } else { 'unknown' }
+        $cookieStatus = if (@('alive', 'dead', 'moderated') -ccontains [string]$a.cookieStatus) { [string]$a.cookieStatus } else { 'unknown' }
         $uiStatus = if ($live.Count -eq 1) { 'Connected' } elseif ($live.Count -gt 1) { 'Unknown' } elseif ($inFlight) { 'Launching' } else { 'Idle' }
         $blocked = $conflicts -contains [string]$a.userId
         $ready = $cookieStatus -ceq 'alive' -and -not $blocked -and $live.Count -le 1
@@ -1622,7 +1622,13 @@ function Invoke-ArkuzoRobloxPost([string]$Url, [string]$Cookie, [string]$Csrf = 
         $setCookie = [string]$resp.Headers['Set-Cookie']
         $m = [regex]::Match($setCookie, '(?:^|[,\s])\.ROBLOSECURITY=([^;,\s]+)')
         if ($m.Success) { $rotated = $m.Groups[1].Value }
-        return @{ status = [int]$resp.StatusCode; ticket = [string]$resp.Headers['rbx-authentication-ticket']; csrf = [string]$resp.Headers['x-csrf-token']; rotated = $rotated }
+        # A moderated (banned or warned) account answers 403 "User is moderated".
+        $text = ''
+        if ([int]$resp.StatusCode -eq 403) {
+            try { $reader = New-Object IO.StreamReader($resp.GetResponseStream()); $buffer = New-Object char[] 4096; $text = New-Object string($buffer, 0, $reader.Read($buffer, 0, 4096)) } catch { }
+        }
+        return @{ status = [int]$resp.StatusCode; ticket = [string]$resp.Headers['rbx-authentication-ticket']; csrf = [string]$resp.Headers['x-csrf-token']; rotated = $rotated
+            moderated = ($text -match 'User is moderated') }
     } catch { return @{ status = 0 } }
     finally { if ($null -ne $resp) { $resp.Dispose() } }
 }
@@ -1634,9 +1640,9 @@ function Get-ArkuzoAuthTicket([string]$Cookie) {
     if ($first.status -eq 403 -and $first.csrf) {
         $second = Invoke-ArkuzoRobloxPost $url $cookieInUse $first.csrf
         if ($second.rotated) { $cookieInUse = $second.rotated }
-        return @{ status = $second.status; ticket = $second.ticket; cookie = $cookieInUse; rotated = ($cookieInUse -cne $Cookie) }
+        return @{ status = $second.status; ticket = $second.ticket; cookie = $cookieInUse; rotated = ($cookieInUse -cne $Cookie); moderated = [bool]$second.moderated }
     }
-    return @{ status = $first.status; ticket = $first.ticket; cookie = $cookieInUse; rotated = ($cookieInUse -cne $Cookie) }
+    return @{ status = $first.status; ticket = $first.ticket; cookie = $cookieInUse; rotated = ($cookieInUse -cne $Cookie); moderated = [bool]$first.moderated }
 }
 
 function Get-ArkuzoNativeJoinUrl($Vault, $Account) {
@@ -1717,6 +1723,13 @@ function Invoke-ArkuzoNativeLaunch([string]$AccountId, [string]$TrackerId, [swit
             [void](Update-ArkuzoVaultAccount $AccountId @{ cookieStatus = 'dead'; lastError = 'Roblox rejected the cookie at launch (signed out or expired)'; lastCheckAtMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() })
             Write-Diagnostic 'NATIVE_COOKIE_DEAD' @{ accountId = $AccountId; username = [string]$a.username; note = 'Roblox answered 401 to the launch ticket request; sign the account in again.' }
             throw 'Cookie rejected by Roblox'
+        }
+        if ($ticket.status -eq 403 -and $ticket.moderated) {
+            # Retrying cannot help (9 Nov: 93 refused launches, the recovery queue held for 2 h).
+            # The account waits until a cookie check finds it alive again.
+            [void](Update-ArkuzoVaultAccount $AccountId @{ cookieStatus = 'moderated'; lastError = 'Roblox has moderated this account: sign in on roblox.com to see why'; lastCheckAtMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() })
+            Write-Diagnostic 'NATIVE_ACCOUNT_MODERATED' @{ accountId = $AccountId; username = [string]$a.username; note = 'Roblox answered "User is moderated" to the launch ticket request; not launched again until a cookie check finds it alive.' }
+            throw 'Account moderated by Roblox'
         }
         if ($ticket.status -ne 200 -or [string]::IsNullOrEmpty($ticket.ticket)) { throw $(if ($ticket.status -eq 0) { 'Roblox unreachable' } else { 'Roblox refused a launch ticket (' + $ticket.status + ')' }) }
         $method = [string](Get-ArkuzoVaultSetting $vault 'launchMethod' 'direct')
@@ -2717,6 +2730,11 @@ function Update-ArkuzoRecoveryOutcomes {
             }
             $entry.missingSinceUtc = $null
             $a=$candidates[0]
+            if ($a.cookieStatus -ceq 'moderated') {
+                # Never hold the recovery queue for an account Roblox will not launch.
+                Write-Diagnostic 'RECOVERY_CANCELLED_BY_POLICY' @{accountId=$key;note='Account moderated by Roblox'}
+                $script:recoveryPending.Remove($key);continue
+            }
             if ($a.cookieStatus -cne 'alive') { $entry.readySinceUtc=$null;$entry.lastObservedUtc=$null;$entry.status='Blocked';continue }
             if (-not $a.autoRelaunch) {
                 Write-Diagnostic 'RECOVERY_CANCELLED_BY_POLICY' @{accountId=$key;note='Account no longer opted in'}
@@ -5733,7 +5751,7 @@ try {
                 if ($clientIssues.Count -gt 0 -and -not $state.HealthDecision.Status) { $status = 'CHECK NOTICE' }
                 $accountName = Resolve-ArkuzoAccountName -ProcessId $id -TrackerId $state.TrackerId -LogPath $state.LogPath
                 $state.LastSnapshot = [ordered]@{
-                    pid = $id; cpuPercent = [Math]::Round($cpu, 2); residentMB = [Math]::Round($client.WorkingSet64 / 1MB, 1)
+                    pid = $id; startTicks = [long]$state.StartTicks; cpuPercent = [Math]::Round($cpu, 2); residentMB = [Math]::Round($client.WorkingSet64 / 1MB, 1)
                     privateMB = [Math]::Round($client.PrivateMemorySize64 / 1MB, 1)
                     responding = $isResponding; windowPresent = ($window -ne [IntPtr]::Zero); launchError = $launchError
                     state = $status; sampleTime = (Get-Date).ToString('o')

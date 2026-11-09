@@ -2,6 +2,13 @@
 
 Changes for **Arkuzo Memory Saver with Volt Integration** are recorded here.
 
+## v2.3.0 — Instant close, Close all and moderated accounts
+
+- **Stop farm closes every client.** Stopping the farm now also closes every Arkuzo client, so the separate *Stop & close clients* button is gone.
+- **Close is instant and keeps relaunch on.** *Close* on an account closes its client at once: the Control Center closes the exact process the saver reported (same process ID and start time), instead of waiting for the saver's next pass. It no longer switches the account's relaunch off, so while the farm runs the account is launched again after the relaunch delay.
+- **Close all** on the Accounts page closes every client at once; a running farm launches them again.
+- **Moderated accounts are shown and no longer retried.** When Roblox moderates (bans or warns) an account, it answers "User is moderated". The cookie check used to keep such an account *Alive*, and the saver retried its launch as if the refusal were temporary. On 9 Nov that meant 93 refused launches for 10 moderated accounts, and the recovery queue was held for almost 2 hours. Both now mark the account *Moderated*: it is not launched, any queued relaunch is dropped, and the Accounts page and Activity feed say so. A later cookie check finds it *Alive* again once the moderation ends, and the farm picks it up.
+
 ## v2.2.1 — Recovery on a slow, paging farm (hotfix)
 
 - **Frozen clients and leaking clients are recovered again on a slow, paging farm.** The hang (180 s) and memory-limit (60 s) timers restarted whenever two checks of a client were more than 5 s apart. With 11 clients deep in the pagefile a pass takes 2-8 s, so neither timer could run out: on 9 Nov two clients stayed frozen for 55 and 37 minutes and one sat over the memory limit, none recovered. Only a gap over 30 s (or a clock jump back) restarts them now.

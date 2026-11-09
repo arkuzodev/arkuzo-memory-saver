@@ -4,7 +4,7 @@
 
 <br>
 
-[![Version](https://img.shields.io/badge/version-2.2.1-38bdf8?style=for-the-badge&labelColor=12141b)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-2.3.0-38bdf8?style=for-the-badge&labelColor=12141b)](CHANGELOG.md)
 [![Windows x64](https://img.shields.io/badge/Windows-x64-818cf8?style=for-the-badge&labelColor=12141b)](#requirements)
 [![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-a78bfa?style=for-the-badge&labelColor=12141b)](#requirements)
 [![Volt optional](https://img.shields.io/badge/Volt-optional-34d399?style=for-the-badge&labelColor=12141b)](docs/accounts.md)
@@ -45,14 +45,14 @@
 <td valign="top">
 <img src="docs/images/readme/feature-relaunch.svg" width="44" align="left" hspace="10" alt="">
 <b>Own account manager</b><br>
-<sub>Add accounts by cookie or browser sign-in, check whether each is still signed in, start the farm and relaunch every client yourself, with no Volt needed. A relaunch counts once the new client is in game.</sub>
+<sub>Add accounts by cookie or browser sign-in, check whether each is still signed in, start the farm and relaunch every client yourself, with no Volt needed. A relaunch counts once the new client is in game. <b>Close</b>, <b>Close all</b> and <b>Stop farm</b> close clients instantly.</sub>
 </td>
 </tr>
 <tr>
 <td valign="top">
 <img src="docs/images/readme/feature-cookie.svg" width="44" align="left" hspace="10" alt="">
-<b>Cookie-dead isolation</b><br>
-<sub>Dead sessions show in a red <code>COOKIE DEAD</code> section. Only that account pauses, and only when it is verified idle.</sub>
+<b>Dead and moderated accounts set aside</b><br>
+<sub>Signed-out cookies and accounts Roblox has moderated are marked in red and never retried, so they don't hold up the healthy accounts. A later cookie check brings them back.</sub>
 </td>
 <td valign="top">
 <img src="docs/images/readme/feature-updates.svg" width="44" align="left" hspace="10" alt="">
@@ -152,19 +152,22 @@ flowchart LR
 ```
 
 - **Only opted-in, uniquely mapped accounts.** Unknown mappings, loading screens, unavailable logging or an unhealthy journal block every destructive step. Arkuzo maps each client by the account's own tracker id on its command line; clients it didn't launch are left alone.
-- **Arkuzo relaunches by itself** after the relaunch delay (8 s), launches spaced 12 s apart, and retries only a launch that produced no client.
+- **Arkuzo relaunches by itself** after the relaunch delay (8 s), launches spaced 12 s apart, and retries only a launch that produced no client. An account Roblox has moderated is never retried.
+- **You stay in control of the clients:** **Stop farm** stops relaunching and closes every client; **Close all** closes them all and, while the farm runs, brings them back (a quick restart); **Close** on one account closes that client and leaves its relaunch on. The Control Center closes only the exact process the saver reported for the account.
 - **With Volt, its relaunch delay stays at 30 s or more;** a larger delay you set is kept. Missing-account retries back off for 90–900 s, with cooldowns and hourly budgets that survive saver restarts.
 - **A restore must prove itself:** a new, exactly mapped process, a connected launcher socket, a responsive window without errors and matching server-join evidence, held for a continuous confirmation window.
 - **Farm-wide freezes** (in the logs, Chrome Remote Desktop disconnects and display events) are handled as one event, with closes paced so Volt doesn't show its "Roblox started before Volt could connect" notice. Switch it off with `health.farm_freeze_enabled`.
 - **Remote desktop:** in the logs, 12 of 14 Chrome Remote Desktop disconnects with clients running froze them. The saver recognises a disconnect and recycles the farm sooner, never hangs on a frozen client's log, warns you in the Control Center while a session is connected (minimise it instead of disconnecting), and has a "Leave Remote Desktop safely" button for RDP. See [remote desktop disconnects](docs/remote-desktop.md).
 
 <details>
-<summary><b>Cookie-dead accounts</b></summary>
+<summary><b>Cookie-dead and moderated accounts</b></summary>
 <br>
 
 A cookie Roblox rejects (Arkuzo's cookie check, or Volt's red cross) means a dead account session. The saver shows these accounts in red as **`COOKIE DEAD`**. A dead session can come from expiry, revocation, a challenge or another sign-in problem; it is not proof of a ban.
 
 A verified idle dead account is paused and left out of launch requests. Its recovery history is kept separately so it doesn't hold the handoff gate for healthy accounts. If a process, launch or identity is uncertain, the gate stays closed. Sign the account in again yourself, on the Accounts page or in Volt; the saver resumes once it checks out again. Newly imported accounts with no launch history are shown but never activated automatically.
+
+An account Roblox has **moderated** (banned or warned) keeps a valid cookie but cannot launch: Roblox answers "User is moderated". Arkuzo shows it as **Moderated**, doesn't launch or retry it, and drops any relaunch queued for it, so it never holds up the others. Sign in to it on roblox.com to read Roblox's notice. The hourly cookie check (or **Check**) finds it **Alive** again once the moderation ends, and the farm picks it up.
 
 </details>
 
@@ -216,14 +219,14 @@ Arkuzo started as a memory saver bolted onto Volt. The roadmap turns it into a f
 
 ## Integrity and antivirus
 
-v2.2.1 ships a rebuilt executable and runtime archive (the Control Center add-on is unchanged from v2.2.0); all 1.x releases are deprecated. VirusTotal results for these files are not recorded yet, so compare the checksums with the release before running anything.
+v2.3.0 ships a rebuilt executable, runtime and Control Center add-on; all 1.x releases are deprecated. VirusTotal results for these files are not recorded yet, so compare the checksums with the release before running anything.
 
 | File | SHA-256 | VirusTotal |
 | :--- | :--- | :--- |
-| **`ArkuzoMemorySaver.exe`** | `1e20d2fc07d1dc5925b3aef4af4f0fcada7ec03973a20887a554eb41e9fd864e` | Not yet scanned |
-| **`ArkuzoMemorySaver-runtime.zip`** | `bbee8455213fff31370331780862a163d9b77cd3c6e476f1965ddefeef91d1b9` | Not yet scanned |
-| **`ArkuzoMemorySaver-controlcenter.zip`** | `304c62d8251cc3e393b05ea12b14a31c87bce19871602f18a834f10f8f9a214f` | Not yet scanned |
-| **`ArkuzoMemorySaver-v2.2.1-win-x64.zip`** | `d9e775014f29ac104213a0d308e563047658480c9b0e67372ea116dc3a25817c` | Not yet scanned |
+| **`ArkuzoMemorySaver.exe`** | `717e84bd7b0399f2c9b03fddc40e22f857d18eef278083832e53ef7da1afa06d` | Not yet scanned |
+| **`ArkuzoMemorySaver-runtime.zip`** | `343c710d31c9223295657ea37cf14d6ba2cd72cb927086d70e36ccd7487c1ca4` | Not yet scanned |
+| **`ArkuzoMemorySaver-controlcenter.zip`** | `f2c54820a4f33c0cb9eda1c9787410497e5373d1a8571c4c2d5347d638f952e0` | Not yet scanned |
+| **`ArkuzoMemorySaver-v2.3.0-win-x64.zip`** | `48e1039b580dc88bc2073dc1693e2ebaaab49e1b7da91069b9151243ba4eb822` | Not yet scanned |
 
 Each release also publishes **`SHA256SUMS.txt`**, plus **`ArkuzoMemorySaver-runtime.sha256`** and **`ArkuzoMemorySaver-controlcenter.sha256`** for the updater. The launcher checks downloaded bytes and GitHub's asset digests. A checksum detects a mismatch; it is not a code signature. See [security and privacy](SECURITY.md).
 

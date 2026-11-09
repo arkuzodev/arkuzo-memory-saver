@@ -126,7 +126,7 @@ EVENT_KINDS = {
     'WARNING': 'warning', 'CONFIG_RELOADED': 'saver', 'SETTINGS_APPLIED_LIVE': 'saver', 'TRIM_NOW_REQUESTED': 'memory',
     'ORPHAN_CRASH_HANDLER_CLOSED': 'client', 'SYSTEM_RESOURCE_EXHAUSTION': 'error',
     'NATIVE_LAUNCH_REQUEST': 'recovery', 'NATIVE_LAUNCH_RESULT': 'recovery', 'NATIVE_CLIENT_CLOSED': 'client',
-    'NATIVE_COOKIE_DEAD': 'recovery', 'ACCOUNT_PROVIDER': 'saver', 'NATIVE_LAUNCH_BLOCKED': 'warning',
+    'NATIVE_COOKIE_DEAD': 'recovery', 'NATIVE_ACCOUNT_MODERATED': 'recovery','ACCOUNT_PROVIDER': 'saver', 'NATIVE_LAUNCH_BLOCKED': 'warning',
     'REMOTE_SESSION_CHANGED': 'saver', 'KEEP_AWAKE': 'saver',
 }  # Individual trims would flood the feed; the heartbeat carries their count.
 
@@ -254,10 +254,10 @@ class _Win32:
         finally:
             self.k.CloseHandle(h)
 
-    def terminate(self, pid: int, start_ticks: int) -> bool:
+    def terminate(self, pid: int, start_ticks: int, images=('powershell.exe', 'pwsh.exe')) -> bool:
         """Terminate only the exact process generation the heartbeat named."""
         ident = self.identity(pid)
-        if not ident or ident[0] != start_ticks or ident[1] not in ('powershell.exe', 'pwsh.exe'):
+        if not ident or not start_ticks or ident[0] != start_ticks or ident[1] not in images:
             return False
         h = self.k.OpenProcess(self.PROCESS_TERMINATE, False, int(pid))
         if not h:
@@ -535,7 +535,7 @@ def normalize_vault(raw) -> dict:
             vault['unreadable'].append(a)
             continue
         seen_ids.add(aid.lower()); seen_trackers.add(tracker); seen_users.add(uid)
-        status = a.get('cookieStatus') if a.get('cookieStatus') in ('alive', 'dead', 'unknown') else 'unknown'
+        status = a.get('cookieStatus') if a.get('cookieStatus') in COOKIE_STATES else 'unknown'
         entry = {'id': aid, 'userId': uid, 'username': str(a.get('username') or '')[:40], 'displayName': str(a.get('displayName') or '')[:40],
                  'cookie': a['cookie'], 'cookieStatus': status, 'browserTrackerId': tracker,
                  'autoRelaunch': a.get('autoRelaunch') is True, 'privateServerId': a.get('privateServerId') if a.get('privateServerId') in server_ids else None,
@@ -673,8 +673,16 @@ def roblox_post(url: str, cookie: str, body) -> tuple[RobloxResponse, str]:
     return first, cookie
 
 
+COOKIE_STATES = ('alive', 'dead', 'moderated', 'unknown')
+MODERATED_REASON = 'Roblox has moderated this account: sign in on roblox.com to see why'
+
+
 def check_cookie(cookie: str) -> dict:
-    """alive / dead / unknown (network or Roblox trouble: never treated as dead)."""
+    """alive / dead / moderated / unknown (network or Roblox trouble: never treated as dead).
+
+    moderated: the cookie is valid but Roblox banned or warned the account, so it
+    cannot launch ("User is moderated"). A later check finds it alive again once
+    the moderation ends or is acknowledged on roblox.com."""
     if not isinstance(cookie, str) or len(cookie) < 50 or any(c in cookie for c in '\r\n;'):
         return {'status': 'dead', 'reason': 'Not a Roblox login cookie'}
     resp = HTTP['request']('https://users.roblox.com/v1/users/authenticated', cookie)
@@ -687,6 +695,8 @@ def check_cookie(cookie: str) -> dict:
         return {'status': 'unknown', 'reason': 'Unexpected Roblox reply'}
     if resp.status == 401:
         return {'status': 'dead', 'reason': 'Roblox rejected the cookie (signed out or expired)'}
+    if resp.status == 403 and b'User is moderated' in (resp.body or b''):
+        return {'status': 'moderated', 'reason': MODERATED_REASON, 'rotated': resp.rotated_cookie()}
     return {'status': 'unknown', 'reason': 'Roblox unreachable' if resp.status == 0 else f'Roblox answered {resp.status}'}
 
 
@@ -742,11 +752,11 @@ def check_account(data: Path, account_id: str) -> dict:
         a.pop('lastError', None)
         if result['status'] == 'alive':
             a.update(username=result['username'] or a['username'], displayName=result['displayName'] or a['displayName'])
-            # Store a rotated cookie only if nobody replaced the one we used meanwhile.
-            if result.get('rotated') and a['cookie'] == secret:
-                a['cookie'] = protect_secret(result['rotated'])
         else:
             a['lastError'] = result.get('reason', '')
+        # Store a rotated cookie (moderated accounts get one too) only if nobody replaced the one we used meanwhile.
+        if result.get('rotated') and a['cookie'] == secret:
+            a['cookie'] = protect_secret(result['rotated'])
         a['updatedAtMs'] = stamp
         return a['cookieStatus']
     return {'id': account_id, 'status': update_vault(data, change), 'reason': result.get('reason')}
@@ -848,6 +858,44 @@ def update_account(data: Path, account_id: str, fields: dict) -> dict:
     return update_vault(data, change)
 
 
+def close_live_clients(data: Path, account_ids=None) -> int:
+    """Close the clients of these accounts (None: every account) right away.
+
+    Only an exact client the saver's heartbeat maps to an Arkuzo account is
+    closed: same PID, same start time, RobloxPlayerBeta.exe. The close request
+    stamps stay set, so the saver still closes anything missed here (a client
+    that started after the last heartbeat)."""
+    heartbeat = read_json(data / 'runtime-status.json')
+    if not isinstance(heartbeat, dict) or heartbeat.get('accountProvider') != 'arkuzo':
+        return 0
+    ticks = {}
+    for c in heartbeat.get('clients') or []:
+        if isinstance(c, dict) and isinstance(c.get('pid'), int) and isinstance(c.get('startTicks'), int):
+            ticks[c['pid']] = c['startTicks']
+    closed = 0
+    for a in heartbeat.get('accounts') or []:
+        if not isinstance(a, dict) or (account_ids is not None and a.get('accountId') not in account_ids):
+            continue
+        pid = a.get('processId')
+        if isinstance(pid, int) and pid in ticks and WIN32.terminate(pid, ticks[pid], ('robloxplayerbeta.exe',)):
+            closed += 1
+    return closed
+
+
+def _stamp_close(accounts) -> None:
+    stamp = now_ms()
+    for a in accounts:
+        a['closeRequestedAtMs'], a['launchRequestedAtMs'] = stamp, 0
+
+
+def close_all_clients(data: Path) -> dict:
+    """Close every Arkuzo client now. The farm keeps its state: running, it relaunches them."""
+    def change(vault):
+        _stamp_close(vault['accounts'])
+        return dict(vault['settings'])
+    return dict(update_vault(data, change), closed=close_live_clients(data))
+
+
 def request_account_action(data: Path, account_id: str, action: str) -> dict:
     """Launch / close one account. The engine carries it out and clears the request."""
     def change(vault):
@@ -855,14 +903,19 @@ def request_account_action(data: Path, account_id: str, action: str) -> dict:
         if action == 'launch':
             if a['cookieStatus'] == 'dead':
                 raise VaultError('This account\'s cookie is dead: sign in again first')
+            if a['cookieStatus'] == 'moderated':
+                raise VaultError(MODERATED_REASON + ', then check its cookie again')
             a['launchRequestedAtMs'], a['closeRequestedAtMs'] = now_ms(), 0
         elif action == 'close':
-            # Closing one account also stops relaunching it until it is switched back on.
-            a['closeRequestedAtMs'], a['launchRequestedAtMs'], a['autoRelaunch'] = now_ms(), 0, False
+            # Relaunch stays as it is: with the farm running the account is launched again.
+            _stamp_close([a])
         else:
             raise VaultError('Unknown action')
         return public_account(a)
-    return update_vault(data, change)
+    result = update_vault(data, change)
+    if action == 'close':
+        result['closed'] = close_live_clients(data, {account_id})
+    return result
 
 
 def remove_account(data: Path, account_id: str):
@@ -885,18 +938,21 @@ def update_vault_settings(data: Path, changes: dict) -> dict:
     return update_vault(data, change)
 
 
-def set_farm_running(data: Path, running: bool, close_clients=False) -> dict:
+def set_farm_running(data: Path, running: bool) -> dict:
+    """Start or stop the farm. Stopping also closes every Arkuzo client."""
     def change(vault):
         vault['settings']['farmRunning'] = bool(running)
         if running and not vault['settings']['defaultPlaceId'] and vault['settings']['privateServerMode'] == 'none' \
                 and not any(a['placeId'] or a['privateServerId'] for a in vault['accounts']):
             raise VaultError('Set a default place (game) to farm first')
-        if not running and close_clients:
-            stamp = now_ms()
-            for a in vault['accounts']:
-                a['closeRequestedAtMs'], a['launchRequestedAtMs'] = stamp, 0
+        if not running:
+            _stamp_close(vault['accounts'])
         return dict(vault['settings'])
-    return update_vault(data, change)
+    settings = update_vault(data, change)
+    if not running:
+        # farmRunning is saved first, so the saver never relaunches what is closed here.
+        settings = dict(settings, closed=close_live_clients(data))
+    return settings
 
 
 # ---------------------------------------------------- browser sign-in window
@@ -1327,6 +1383,8 @@ def summarize_event(record: dict, names: dict) -> dict | None:
             level, text = 'warning', f"{who()} not launched: {data.get('reason') or 'unknown reason'}"
     elif kind == 'NATIVE_COOKIE_DEAD':
         level, text = 'critical', f"{who()} is signed out (Roblox rejected its cookie); sign it in again"
+    elif kind == 'NATIVE_ACCOUNT_MODERATED':
+        level, text = 'critical', f"{who()} is moderated by Roblox; it is not launched until a cookie check finds it alive again"
     elif kind == 'NATIVE_CLIENT_CLOSED':
         text = f"Closed {who()} from the Control Center"
     elif kind == 'ACCOUNT_PROVIDER':
@@ -2222,7 +2280,9 @@ def vault_action(app: App, path: str, body: dict):
             app.supervisor.start()  # The saver does the launching.
         return settings
     if path == '/api/farm/stop':
-        return set_farm_running(data, False, close_clients=bool(body.get('closeClients')))
+        return set_farm_running(data, False)
+    if path == '/api/farm/close-all':
+        return close_all_clients(data)
     raise VaultError('Unknown account action')
 
 

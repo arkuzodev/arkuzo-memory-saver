@@ -530,8 +530,8 @@ details.fold:not([open]) > summary + .divider { display: none; }
             <div class="farm-t"><div class="ttl" id="farmTitle">Farm stopped</div><div class="st" id="farmSub">Start the farm to launch every account that has relaunch on.</div></div>
             <div class="farm-stats" id="farmStats"></div>
             <div class="spacer"></div>
-            <button class="btn" id="btnFarmStopClose" hidden title="Stop relaunching and close every Arkuzo client"><span data-icon="x"></span>Stop &amp; close clients</button>
-            <button class="btn danger" id="btnFarmStop" hidden><span data-icon="power"></span>Stop farm</button>
+            <button class="btn" id="btnCloseAll" title="Close every Arkuzo client now. While the farm runs, they are launched again."><span data-icon="x"></span>Close all</button>
+            <button class="btn danger" id="btnFarmStop" hidden title="Stop relaunching and close every Arkuzo client"><span data-icon="power"></span>Stop farm</button>
             <button class="btn accent" id="btnFarmStart"><span data-icon="play"></span>Start farm</button>
           </div>
           <div class="farm-join">
@@ -1127,6 +1127,7 @@ async function vaultAct(path, body, done, level) {
 function accountStatus(a, hb, farmRunning) {
   if (a.cookieStatus === 'dead') return ['critical', 'Signed out'];
   const live = a.live || {}, pid = live.processId;
+  if (a.cookieStatus === 'moderated' && !pid) return ['critical', 'Moderated'];
   const q = ((hb && hb.quarantined) || []).find((x) => x.accountId === a.id), until = q && Date.parse(q.untilUtc);
   if (q && (!until || until > Date.now())) return ['serious', 'Quarantined'];
   if (pid) {
@@ -1145,17 +1146,18 @@ function renderVault() {
   const st = S.state || {}, hb = st.heartbeat, active = v.activeProvider || (hb && hb.accountProvider), native = active === 'arkuzo';
   const accounts = (v.accounts || []).slice().sort((a, b) => acctName(a).localeCompare(acctName(b)));
   const farm = !!v.settings.farmRunning, inGame = accounts.filter((a) => (a.live || {}).processId).length;
-  const relaunch = accounts.filter((a) => a.autoRelaunch && a.cookieStatus !== 'dead').length, dead = accounts.filter((a) => a.cookieStatus === 'dead').length;
+  const relaunch = accounts.filter((a) => a.autoRelaunch && a.cookieStatus !== 'dead' && a.cookieStatus !== 'moderated').length, dead = accounts.filter((a) => a.cookieStatus === 'dead').length;
+  const moderated = accounts.filter((a) => a.cookieStatus === 'moderated').length;
   $('navAccounts').textContent = String(accounts.length || ((hb && hb.accounts) || []).length);
-  $('navAccounts').className = 'badge num' + (dead ? ' alert' : accounts.length ? '' : ' quiet');
+  $('navAccounts').className = 'badge num' + (dead || moderated ? ' alert' : accounts.length ? '' : ' quiet');
   // Farm card.
   $('farmTile').style.setProperty('--c', farm ? '#34d399' : '#7e879a');
   $('farmTitle').textContent = !native && accounts.length ? 'Volt is launching clients' : farm ? 'Farm running' : 'Farm stopped';
   $('farmSub').textContent = !native && accounts.length ? 'Switch "Who launches clients" below to Arkuzo to farm without Volt.'
     : farm ? `Keeping ${relaunch} account${relaunch === 1 ? '' : 's'} in game; relaunching ${v.settings.relaunchDelaySec}s after a close, launches ${v.settings.launchDelaySec}s apart.`
     : 'Start the farm to launch every account that has relaunch on.';
-  $('farmStats').replaceChildren(...[['In game', `${inGame}/${accounts.length}`], ['Relaunch on', relaunch], ['Signed out', dead]].map(([k, n]) => el('div', {}, el('b', { text: String(n) }), el('span', { text: k }))));
-  $('btnFarmStart').hidden = farm; $('btnFarmStop').hidden = !farm; $('btnFarmStopClose').hidden = !farm;
+  $('farmStats').replaceChildren(...[['In game', `${inGame}/${accounts.length}`], ['Relaunch on', relaunch], ['Signed out', dead], ...(moderated ? [['Moderated', moderated]] : [])].map(([k, n]) => el('div', {}, el('b', { text: String(n) }), el('span', { text: k }))));
+  $('btnFarmStart').hidden = farm; $('btnFarmStop').hidden = !farm; $('btnCloseAll').disabled = !inGame || !native;
   $('btnFarmStart').disabled = !accounts.length;
   const notice = v.error || v.providerNotice || (hb && hb.accountProviderNotice) ||
     (v.unreadableCount ? `${v.unreadableCount} account row${v.unreadableCount === 1 ? '' : 's'} in data/accounts.json could not be read and ${v.unreadableCount === 1 ? 'is' : 'are'} kept untouched there.` : '');
@@ -1182,7 +1184,7 @@ function renderVault() {
     const sw = el('input', { type: 'checkbox', 'aria-label': `Relaunch ${acctName(a)}` });
     sw.checked = !!a.autoRelaunch;
     sw.addEventListener('change', () => vaultAct('/api/vault/update', { id: a.id, fields: { autoRelaunch: sw.checked } }, `${acctName(a)}: relaunch ${sw.checked ? 'on' : 'off'}`, sw.checked ? 'good' : 'neutral'));
-    const ck = a.checking ? pill('info', 'Checking…', true) : a.cookieStatus === 'alive' ? pill('good', 'Alive', true) : a.cookieStatus === 'dead' ? pill('critical', 'Dead', true) : pill('neutral', 'Unchecked', true);
+    const ck = a.checking ? pill('info', 'Checking…', true) : a.cookieStatus === 'alive' ? pill('good', 'Alive', true) : a.cookieStatus === 'dead' ? pill('critical', 'Dead', true) : a.cookieStatus === 'moderated' ? pill('critical', 'Moderated', true) : pill('neutral', 'Unchecked', true);
     const live = !!(a.live || {}).processId || (a.live || {}).uiStatus === 'Launching';
     const sub = el('div', { class: 'sb', style: 'display:flex;gap:6px;align-items:center' }, el('span', { text: '@' + a.username }), a.group ? el('span', { class: 'grp', text: a.group }) : null,
       a.lastError && a.cookieStatus !== 'alive' ? el('span', { title: a.lastError, text: '· ' + a.lastError }) : null);
@@ -1194,8 +1196,8 @@ function renderVault() {
         el('button', { class: 'btn ghost sm icon', title: 'Check this cookie with Roblox', disabled: a.checking, onclick: () => vaultAct('/api/vault/check', { ids: [a.id] }, `Checking ${acctName(a)}…`, 'info') }, icon('refresh'))),
       el('label', { class: 'sw hide-sm', title: 'Keep this account in game while the farm runs' }, sw, el('span', { class: 'track' })),
       el('div', { class: 'row-actions' },
-        live ? el('button', { class: 'btn sm', title: 'Close this client and stop relaunching it', onclick: () => vaultAct('/api/vault/close', { id: a.id }, `Closing ${acctName(a)}`, 'neutral') }, icon('x'), 'Close')
-             : el('button', { class: 'btn sm', disabled: a.cookieStatus === 'dead' || !native, title: native ? 'Launch this account now' : 'Arkuzo launches only when it is the launcher (Farm settings)',
+        live ? el('button', { class: 'btn sm', title: 'Close this client now. While the farm runs and relaunch is on, it is launched again.', onclick: () => vaultAct('/api/vault/close', { id: a.id }, `${acctName(a)} closed${S.vault && S.vault.settings.farmRunning && a.autoRelaunch ? '; relaunching' : ''}`, 'neutral') }, icon('x'), 'Close')
+             : el('button', { class: 'btn sm', disabled: a.cookieStatus === 'dead' || a.cookieStatus === 'moderated' || !native, title: a.cookieStatus === 'moderated' ? 'Roblox has moderated this account: sign in on roblox.com to see why, then check its cookie again' : native ? 'Launch this account now' : 'Arkuzo launches only when it is the launcher (Farm settings)',
                  onclick: () => vaultAct('/api/vault/launch', { id: a.id }, `Launching ${acctName(a)}…`, 'info') }, icon('play'), 'Launch'),
         el('button', { class: 'btn ghost sm icon', title: 'Edit', 'aria-expanded': String(S.vaultEdit === a.id), onclick: () => { S.vaultEdit = S.vaultEdit === a.id ? null : a.id; renderVault(); } }, icon('pencil')))));
     if (S.vaultEdit === a.id) rows.push(accountEditor(a, servers, v.settings));
@@ -1368,8 +1370,12 @@ $('addPanel').addEventListener('submit', async (e) => {
 $('btnSignIn').onclick = () => vaultAct('/api/vault/login', {}, 'Sign in to Roblox in the Edge window that opened', 'info');
 $('btnCheckAll').onclick = () => vaultAct('/api/vault/check', {}, 'Checking every cookie with Roblox…', 'info');
 $('btnFarmStart').onclick = () => vaultAct('/api/farm/start', {}, 'Farm started: launching accounts one by one', 'good');
-$('btnFarmStop').onclick = () => vaultAct('/api/farm/stop', {}, 'Farm stopped: clients keep running, nothing is relaunched', 'warning');
-$('btnFarmStopClose').onclick = () => { if (confirm('Stop the farm and close every Arkuzo client?')) vaultAct('/api/farm/stop', { closeClients: true }, 'Farm stopped; closing clients', 'warning'); };
+$('btnFarmStop').onclick = () => vaultAct('/api/farm/stop', {}, 'Farm stopped: every client closed, nothing is relaunched', 'warning');
+$('btnCloseAll').onclick = () => {
+  const farm = !!(S.vault && S.vault.settings.farmRunning);
+  if (confirm(farm ? 'Close every client? The farm keeps running and launches them again.' : 'Close every client?'))
+    vaultAct('/api/farm/close-all', {}, farm ? 'Closing every client; the farm launches them again' : 'Closing every client', 'warning');
+};
 
 // ---------- activity ----------
 function feedItems(filter) {

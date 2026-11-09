@@ -74,6 +74,7 @@ function Invoke-ArkuzoRobloxPost([string]$Url, [string]$Cookie, [string]$Csrf = 
     $rotated = if ($null -ne $known -and $known.rotate) { $known.rotate } else { $null }
     if ($null -eq $known) { return @{ status = 401; rotated = $null } }
     if (-not $Csrf) { return @{ status = 403; csrf = 'tok-1'; rotated = $rotated } }
+    if ($known.moderated) { return @{ status = 403; rotated = $rotated; moderated = $true } }  # "User is moderated"
     return @{ status = 200; ticket = 'TICKET-' + $Cookie.Length; rotated = $rotated }
 }
 function Start-ArkuzoRobloxClient([string]$Ticket, [string]$JoinUrl, [string]$TrackerId, [string]$Method, $Clients) {
@@ -142,6 +143,30 @@ try {
     $r = Invoke-ArkuzoNativeLaunch $A $TA
     Assert (-not $r.requestAccepted -and (Row $A).cookieStatus -eq 'dead' -and $script:starts.Count -eq 0) '401 at launch marks the cookie dead'
     Assert (@($script:events | Where-Object { $_.kind -eq 'NATIVE_COOKIE_DEAD' }).Count -eq 1) 'dead cookie reported'
+    # --- A moderated account (9 Nov: 10 accounts, 93 refused launches): marked once, never retried.
+    Reset-Engine; New-Vault
+    $script:roblox[(Fake-Cookie 'b')] = @{ moderated = $true }
+    $r = Invoke-ArkuzoNativeLaunch $B $TB
+    Assert (-not $r.requestAccepted -and (Row $B).cookieStatus -eq 'moderated' -and $script:starts.Count -eq 0) '"User is moderated" at launch marks the account moderated; nothing starts'
+    Assert (@($script:events | Where-Object { $_.kind -eq 'NATIVE_ACCOUNT_MODERATED' }).Count -eq 1 -and (Row $B).lastError -match 'moderated') 'moderation reported with a reason'
+    $sb = @((Get-ArkuzoNativeStatus).accounts | Where-Object { $_.accountId -eq $B })[0]
+    Assert ($sb.cookieStatus -eq 'moderated' -and -not $sb.cookieAlive -and -not $sb.controlReady -and -not $sb.suspensionSafe) 'status shows it moderated, never launch-ready'
+    Assert ((Invoke-Py "from pathlib import Path`nv=cc.load_vault(Path(r'$DataDirectory'))`nprint([a['cookieStatus'] for a in v['accounts'] if a['id']=='$B'][0])") -ceq 'moderated') 'Control Center keeps the moderated status'
+    $postCount = $script:posts.Count
+    Assert (-not (Invoke-ArkuzoNativeLaunch $B $TB).requestAccepted -and $script:posts.Count -eq $postCount)'a moderated account is not even asked for a ticket again'
+    # A queued relaunch for it is dropped, so it never holds the recovery queue.
+    $script:recoveryPending = @{ $B = (New-ArkuzoPendingEntry $B $TB) }; $script:sessionObservedAccounts = @{ $B = $true }
+    $script:voltControlStatus = Get-ArkuzoNativeStatus; $script:voltControlCheckedUtc = [datetime]::UtcNow
+    Update-ArkuzoRecoveryOutcomes
+    Assert (-not $script:recoveryPending.ContainsKey($B) -and $script:recoveryPending.ContainsKey($A)) 'its queued relaunch is cancelled; the other accounts stay queued'
+    Assert (@($script:events | Where-Object { $_.kind -eq 'RECOVERY_CANCELLED_BY_POLICY' -and $_.data.note -eq 'Account moderated by Roblox' }).Count -eq 1) 'cancellation logged'
+    Update-ArkuzoRecoveryOutcomes
+    Assert (-not $script:recoveryPending.ContainsKey($B)) 'and it is not queued again while moderated'
+    # Once a cookie check finds it alive again it farms again.
+    $vault = Vault; @($vault.accounts | Where-Object { $_.id -eq $B })[0].cookieStatus = 'alive'; Save-ArkuzoAtomicJson (Get-ArkuzoVaultPath) $vault
+    $script:voltControlStatus = Get-ArkuzoNativeStatus; $script:voltControlCheckedUtc = [datetime]::UtcNow
+    Update-ArkuzoRecoveryOutcomes
+    Assert ($script:recoveryPending.ContainsKey($B)) 'alive again: queued for launch'
     # Dead, stopped farm, Volt conflict and a running client all refuse.
     Reset-Engine; New-Vault
     $script:roblox[(Fake-Cookie 'c')] = @{ }

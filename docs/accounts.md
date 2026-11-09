@@ -32,12 +32,15 @@ Roblox re-issues login cookies from time to time and later stops accepting the o
 | Several accounts need launching | Launches are spaced by **Launch spacing** (12 s). There is no growing backoff between normal relaunches. |
 | A launch produces no client | It is retried after the **Launch timeout** (120 s). After 8 launches in a row without a client, the account is quarantined so it doesn't block the others; the quarantine ends by itself. |
 | A cookie is dead | The account is paused (shown as *Signed out*) until you add it again. |
+| Roblox has moderated the account (banned or warned) | Roblox refuses to launch it ("User is moderated"). The account is shown as *Moderated* and is not launched or retried, so it never holds up the other accounts' relaunches. Sign in to it on roblox.com to see Roblox's notice. The cookie check (every 60 minutes, or **Check**) finds it *Alive* again once the moderation ends, and the farm launches it again. |
 
 The usual safety rules still apply. The saver only closes a client it can map to exactly one account. A relaunch only counts once the new client is in game. The recovery journal, budgets and farm-freeze handling work exactly as before.
 
-- **Stop farm:** nothing is relaunched any more; running clients keep running.
-- **Stop & close clients:** also closes every client of these accounts.
-- **Launch** / **Close** on a row act on that one account right away. *Close* also switches its relaunch off.
+- **Stop farm:** nothing is relaunched any more, and every client of these accounts is closed.
+- **Close all:** closes every client of these accounts right away. The farm keeps its state: while it runs, the accounts are launched again (a quick way to restart them all).
+- **Launch** / **Close** on a row act on that one account right away. *Close* leaves its relaunch on, so while the farm runs the account is launched again after the relaunch delay; switch *Relaunch* off to keep it closed.
+
+The Control Center closes a client itself, at once, but only the exact process the saver reported for that account (same process ID and start time, `RobloxPlayerBeta.exe`). The saver also handles the request on its next pass, so a client that started in between is closed too.
 
 ### Where accounts join
 

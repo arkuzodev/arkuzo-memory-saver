@@ -40,6 +40,7 @@ class FakeRoblox:
         self.rotate = {}      # cookie -> replacement issued via Set-Cookie
         self.calls = []
         self.offline = False
+        self.moderated = set()  # cookies of accounts Roblox has moderated
 
     def __call__(self, url, cookie=None, method='GET', body=None, csrf=None, timeout=15.0):
         self.calls.append((url, method, csrf))
@@ -49,6 +50,8 @@ class FakeRoblox:
         if cookie in self.rotate:
             extra['Set_Cookie'] = f'.ROBLOSECURITY={self.rotate[cookie]}; domain=.roblox.com; path=/; secure; HttpOnly'
         if url.endswith('/v1/users/authenticated'):
+            if cookie in self.moderated:
+                return cc.RobloxResponse(403, headers(**extra), b'{"errors":[{"code":0,"message":"User is moderated"}]}')
             if cookie in self.users:
                 uid, name, display = self.users[cookie]
                 return cc.RobloxResponse(200, headers(**extra), json.dumps({'id': uid, 'name': name, 'displayName': display}).encode())
@@ -130,6 +133,32 @@ class VaultTests(unittest.TestCase):
         self.assertEqual(vault['accounts'][0]['cookieStatus'], 'alive')
         self.assert_no_secrets()
 
+    def test_moderated_account(self):
+        # 9 Nov: Roblox moderated 10 accounts and the check kept showing them Alive.
+        c1 = fake_cookie('m')
+        self.roblox.users[c1] = (150, 'FarmMod', 'Mod')
+        account = cc.add_account(self.data, c1)
+        c2 = fake_cookie('n')
+        self.roblox.moderated.add(c1)
+        self.roblox.rotate[c1] = c2  # Roblox re-issues the cookie even with this answer.
+        result = cc.check_account(self.data, account['id'])
+        row = cc.load_vault(self.data)['accounts'][0]
+        self.assertEqual((result['status'], row['cookieStatus']), ('moderated', 'moderated'))
+        self.assertIn('moderated', row['lastError'])
+        self.assertEqual(cc.unprotect_secret(row['cookie']), c2, 'the re-issued cookie is kept')
+        with self.assertRaises(cc.VaultError) as err:
+            cc.request_account_action(self.data, account['id'], 'launch')
+        self.assertIn('moderated', str(err.exception))
+        with self.assertRaises(cc.VaultError):
+            cc.add_account(self.data, c1)  # Adding a moderated account says why it cannot.
+        # The moderation ends (or is acknowledged on roblox.com): the next check finds it alive.
+        self.roblox.moderated.discard(c1)
+        self.roblox.users.pop(c1)
+        self.roblox.users[c2] = (150, 'FarmMod', 'Mod')
+        self.assertEqual(cc.check_account(self.data, account['id'])['status'], 'alive', 'moderation over: alive again')
+        self.assertNotIn('lastError', cc.load_vault(self.data)['accounts'][0])
+        self.assert_no_secrets()
+
     def test_dead_or_malformed_cookie_is_refused(self):
         with self.assertRaises(cc.VaultError):
             cc.add_account(self.data, fake_cookie('e'))  # Roblox says 401.
@@ -164,12 +193,56 @@ class VaultTests(unittest.TestCase):
         self.assertTrue(cc.set_farm_running(self.data, True)['farmRunning'])
         cc.request_account_action(self.data, aid, 'launch')
         self.assertGreater(cc.load_vault(self.data)['accounts'][0]['launchRequestedAtMs'], 0)
-        stopped = cc.set_farm_running(self.data, False, close_clients=True)
+        # Close on one row: closed now, relaunch left on.
+        closed = cc.request_account_action(self.data, aid, 'close')
+        row = cc.load_vault(self.data)['accounts'][0]
+        self.assertGreater(row['closeRequestedAtMs'], 0)
+        self.assertEqual((row['launchRequestedAtMs'], row['autoRelaunch'], closed['closed']), (0, False, 0))  # autoRelaunch was switched off above.
+        cc.update_account(self.data, aid, {'autoRelaunch': True})
+        cc.request_account_action(self.data, aid, 'close')
+        self.assertTrue(cc.load_vault(self.data)['accounts'][0]['autoRelaunch'], 'Close never switches relaunch off')
+        # Close all: every account, farm keeps running.
+        everything = cc.close_all_clients(self.data)
+        self.assertTrue(everything['farmRunning'])
+        self.assertTrue(all(a['closeRequestedAtMs'] > 0 for a in cc.load_vault(self.data)['accounts']))
+        # Stop farm always closes every client.
+        for a in cc.load_vault(self.data)['accounts']:
+            cc.request_account_action(self.data, a['id'], 'launch')
+        stopped = cc.set_farm_running(self.data, False)
         self.assertFalse(stopped['farmRunning'])
         self.assertTrue(all(a['closeRequestedAtMs'] > 0 and a['launchRequestedAtMs'] == 0 for a in cc.load_vault(self.data)['accounts']))
         cc.remove_account(self.data, aid)
         self.assertEqual(len(cc.load_vault(self.data)['accounts']), 4)
         self.assert_no_secrets()
+
+    def test_close_live_clients_targets_exact_processes(self):
+        calls = []
+        saved = cc.WIN32.terminate
+        cc.WIN32.terminate = lambda pid, ticks, images=('powershell.exe', 'pwsh.exe'): calls.append((pid, ticks, images)) or True
+        try:
+            heartbeat = {'accountProvider': 'arkuzo',
+                         'clients': [{'pid': 11, 'startTicks': 639298013041126614}, {'pid': 22, 'startTicks': 639298013041126999},
+                                     {'pid': 33}],  # No start time reported: never closed from here.
+                         'accounts': [{'accountId': 'a', 'processId': 11}, {'accountId': 'b', 'processId': 22},
+                                      {'accountId': 'c', 'processId': 33}, {'accountId': 'd', 'processId': None},
+                                      {'accountId': 'e', 'processId': 44}]}  # PID not among the saver's clients.
+            (self.data / 'runtime-status.json').write_text(json.dumps(heartbeat), encoding='utf-8')
+            self.assertEqual(cc.close_live_clients(self.data, {'b'}), 1)
+            self.assertEqual(calls, [(22, 639298013041126999, ('robloxplayerbeta.exe',))])
+            calls.clear()
+            self.assertEqual(cc.close_live_clients(self.data), 2)
+            self.assertEqual([c[0] for c in calls], [11, 22])
+            calls.clear()
+            heartbeat['accountProvider'] = 'volt'  # Volt's clients are Volt's.
+            (self.data / 'runtime-status.json').write_text(json.dumps(heartbeat), encoding='utf-8')
+            self.assertEqual(cc.close_live_clients(self.data), 0)
+            (self.data / 'runtime-status.json').unlink()
+            self.assertEqual(cc.close_live_clients(self.data), 0)
+            self.assertEqual(calls, [])
+        finally:
+            cc.WIN32.terminate = saved
+        # The real helper refuses anything but the exact process generation.
+        self.assertFalse(cc.WIN32.terminate(0, 0, ('robloxplayerbeta.exe',)))
 
     def test_private_server_links(self):
         legacy = cc.parse_private_server_link('https://www.roblox.com/games/920587237/Adopt-Me?privateServerLinkCode=12345678901234567890')

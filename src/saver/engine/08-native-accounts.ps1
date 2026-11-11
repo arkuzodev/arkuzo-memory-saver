@@ -408,10 +408,22 @@ function Get-ArkuzoRobloxPlayerPath($Clients, $Vault = $null) {
     if ($running.Count -gt 0) { return (Select-ArkuzoNewestRobloxBuild $running) }
     return (Select-ArkuzoNewestRobloxBuild @(Get-ArkuzoRobloxInstalls (Get-ArkuzoManagedVersionsRoot $Vault)))
 }
-function Resolve-ArkuzoRobloxPlayer($Clients, $Vault, [string]$Method = 'direct') {
+function Get-ArkuzoProtocolPlayerPath([string]$Key = 'Registry::HKEY_CLASSES_ROOT\roblox-player\shell\open\command') {
+    # The exe a roblox-player: link starts (HKCU wins over HKLM in HKEY_CLASSES_ROOT). The Control
+    # Center's Roblox tab can point it at the pinned build ("Roblox links use this build").
+    try {
+        $command = [string](Get-Item -LiteralPath $Key -ErrorAction Stop).GetValue('')
+        if ($command -match '\A\s*"([^"]+)"') { return $Matches[1] }
+        if ($command -match '\A\s*(\S+)') { return $Matches[1] }
+    } catch { }
+    return $null
+}
+function Resolve-ArkuzoRobloxPlayer($Clients, $Vault, [string]$Method = 'direct', [string]$ProtocolKey = 'Registry::HKEY_CLASSES_ROOT\roblox-player\shell\open\command') {
     # Which player a launch starts (docs/roblox-versions.md). Auto keeps the launch method and the
-    # running-build preference. A pinned build (vault robloxVersion) always launches directly: the
-    # protocol method goes through Roblox's launcher, which updates Roblox and ignores the pin.
+    # running-build preference. A pinned build (vault robloxVersion) launches with the protocol
+    # method only while roblox-player: starts exactly that build (the Roblox tab's "Roblox links use
+    # this build"); otherwise it launches directly, because Roblox's own launcher would update Roblox
+    # and ignore the pin.
     # A pinned build that is missing or incomplete is never replaced silently: path stays $null with
     # a problem, unless robloxVersionFallback allows the Auto choice.
     $pin = [string](Get-ArkuzoVaultSetting $Vault 'robloxVersion' 'auto')
@@ -423,9 +435,15 @@ function Resolve-ArkuzoRobloxPlayer($Clients, $Vault, [string]$Method = 'direct'
         if ($r.method -ceq 'direct') { $r.path = Get-ArkuzoRobloxPlayerPath $Clients $Vault }
         return $r
     }
-    $r.mode = 'pinned'; $r.pinned = $pin; $r.method = 'direct'
+    $r.mode = 'pinned'; $r.pinned = $pin; $wantProtocol = $r.method -ceq 'protocol'; $r.method = 'direct'
     $r.path = @(Get-ArkuzoRobloxInstalls $managed | Where-Object { [IO.Path]::GetFileName([IO.Path]::GetDirectoryName($_)) -ceq $pin -and (Test-ArkuzoRobloxBuildComplete $_) }) | Select-Object -First 1
-    if ($r.path) { return $r }
+    if ($r.path) {
+        if ($wantProtocol) {
+            $handler = Get-ArkuzoProtocolPlayerPath $ProtocolKey
+            if ($handler -and [string]::Equals([IO.Path]::GetFullPath($handler), [IO.Path]::GetFullPath([string]$r.path), [StringComparison]::OrdinalIgnoreCase)) { $r.method = 'protocol' }
+        }
+        return $r
+    }
     $r.problem = 'Pinned Roblox ' + $pin + ' is not installed (or incomplete): install it on the Roblox tab, or choose Auto'
     if ($allowFallback) { $r.fallback = $true; $r.path = Get-ArkuzoRobloxPlayerPath $Clients $Vault }
     return $r
@@ -442,9 +460,9 @@ function Update-ArkuzoRobloxVersionStatus($Player, [string]$RequestedMethod = 'd
         Write-Diagnostic 'ROBLOX_VERSION_PIN_MISSING' @{ pinned = $Player.pinned; fallback = [bool]$Player.fallback; usedVersion = $version
             note = $(if ($Player.fallback) { 'The pinned build is missing; "fall back to newest" is on, so the newest installed build is launched.' } else { 'The pinned build is missing; launches wait until it is installed or Auto is chosen.' }) }
     }
-    if ($Player.mode -ceq 'pinned' -and $RequestedMethod -ceq 'protocol' -and -not $script:robloxProtocolOverrideLogged) {
+    if ($Player.mode -ceq 'pinned' -and $RequestedMethod -ceq 'protocol' -and $Player.method -ceq 'direct' -and -not $script:robloxProtocolOverrideLogged) {
         $script:robloxProtocolOverrideLogged = $true
-        Write-Diagnostic 'ROBLOX_VERSION_PROTOCOL_OVERRIDDEN' @{ pinned = $Player.pinned; note = 'A pinned Roblox build launches directly: the protocol method would let Roblox''s launcher update Roblox and ignore the pin.' }
+        Write-Diagnostic 'ROBLOX_VERSION_PROTOCOL_OVERRIDDEN' @{ pinned = $Player.pinned; note = 'A pinned Roblox build launches directly while roblox-player: links start another build (turn on "Roblox links use this build" on the Roblox tab): the protocol method would let Roblox''s launcher update Roblox and ignore the pin.' }
     }
 }
 function Get-ArkuzoRobloxVersionPreflight($Vault) {
@@ -484,7 +502,7 @@ function Start-ArkuzoRobloxClient([string]$Ticket, [string]$JoinUrl, [string]$Tr
     # $Player (Resolve-ArkuzoRobloxPlayer) decides the exe and the method; without it, the Auto choice.
     $launchMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     $exe = if ($null -ne $Player) { $(if ($Player.method -ceq 'protocol') { $null } else { $Player.path }) } elseif ($Method -ceq 'protocol') { $null } else { Get-ArkuzoRobloxPlayerPath $Clients }
-    if ($null -ne $Player -and $Player.mode -ceq 'pinned' -and -not $exe) { throw 'Pinned Roblox build missing' } # Never Roblox's launcher instead of a pin.
+    if ($null -ne $Player -and $Player.mode -ceq 'pinned' -and -not $Player.path) { throw 'Pinned Roblox build missing' } # Never Roblox's launcher instead of a pin.
     $info = New-Object Diagnostics.ProcessStartInfo
     if ($exe) {
         $info.FileName = $exe; $info.WorkingDirectory = Split-Path -Parent $exe; $info.UseShellExecute = $false

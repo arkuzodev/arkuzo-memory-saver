@@ -133,8 +133,20 @@
             <span class="hint">Checked with Roblox, then stored on this PC encrypted for your Windows account. It never leaves this PC except to Roblox.</span>
           </form>
           <div class="login-line well" id="loginLine" hidden></div>
-          <div class="colhead vrow"><span></span><span>Account</span><span>Status</span><span class="hide-sm">Cookie</span><span class="hide-sm">Relaunch</span><span></span></div>
+          <div class="acct-head" id="acctHead">
+            <div class="acct-tools">
+              <input class="inp acct-search" id="acctSearch" type="search" spellcheck="false" autocomplete="off" placeholder="Search name, @user, group, notes" aria-label="Search accounts" title="Search accounts (/)">
+              <div class="chips" id="acctStatus" role="group" aria-label="Filter by status"></div>
+              <select id="acctGroup" aria-label="Filter by group" title="Filter by group"></select>
+              <select id="acctSort" aria-label="Sort accounts" title="Sort">
+                <option value="name">Sort: name</option><option value="status">Sort: status</option><option value="group">Sort: group</option><option value="seen">Sort: last launched</option>
+              </select>
+            </div>
+            <div class="bulk-bar well" id="bulkBar" hidden></div>
+            <div class="colhead vrow"><span class="selcell"><input type="checkbox" id="selAll" aria-label="Select every account shown"></span><span></span><span>Account</span><span>Status</span><span class="hide-sm">Cookie</span><span class="hide-sm">Relaunch</span><span></span></div>
+          </div>
           <div class="rows" id="vaultRows"></div>
+          <div class="empty-state" id="vaultNoMatch" hidden><strong>No account matches</strong>Change the search or the filters above.</div>
           <div class="empty-state" id="vaultEmpty" hidden><strong>No accounts yet</strong>Add a Roblox account by pasting its cookie or signing in with the browser. Arkuzo then launches, watches and relaunches it without Volt.</div>
         </article>
         <div class="folds">

@@ -7,7 +7,7 @@ $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $source = Join-Path $root 'src/saver/Arkuzo-Memory-Saver.ps1'
 $t = $null; $e = $null; $ast = [Management.Automation.Language.Parser]::ParseFile($source, [ref]$t, [ref]$e)
 if ($e.Count) { throw 'Production parse failed' }
-$wanted = @('Get-ArkuzoVaultSetting', 'Get-ArkuzoArrangeSettings', 'Get-ArkuzoRobloxMinWindow', 'Get-ArkuzoWindowSlots', 'Test-ArkuzoSlotsOverlap')
+$wanted = @('Get-ArkuzoVaultSetting', 'Get-ArkuzoArrangeSettings', 'Get-ArkuzoRobloxMinWindow', 'Get-ArkuzoWindowSlots', 'Test-ArkuzoSlotsOverlap', 'Test-ArkuzoSlotMinimized')
 foreach ($f in $ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
     if ($wanted -contains $f.Name) { . ([scriptblock]::Create($f.Extent.Text)) }
 }

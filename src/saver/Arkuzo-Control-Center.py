@@ -435,9 +435,13 @@ VAULT_SETTINGS = {
     'robloxVersion': (('robloxversion',), 'auto'),
     'robloxVersionFallback': (('bool',), False),
     'robloxVersionsDir': (('folder',), ''),
+    'robloxVersionFollow': (('robloxfollow',), ''),
+    'robloxFollowRestart': (('bool',), False),
+    'robloxProtocol': (('bool',), False),
     'cookieCheckMinutes': (('int', 0, 1440), 60),
     'arrangeWindows': (('bool',), True),
     'arrangeLayout': (('enum', ('auto', 'grid', 'cascade')), 'auto'),
+    'arrangeOverflow': (('enum', ('minimize', 'overlap')), 'minimize'),
     'arrangePerRow': (('int', 1, 12), 2),
     'arrangeWidth': (('int', 160, 1920), 800),
     'arrangeHeight': (('int', 120, 1440), 622),
@@ -551,7 +555,7 @@ def new_tracker_id(taken) -> str:
 
 
 def empty_vault() -> dict:
-    return {'schemaVersion': 1, 'settings': {k: v[1] for k, v in VAULT_SETTINGS.items()}, 'accounts': [], 'privateServers': []}
+    return {'schemaVersion': 1, 'settings': {k: v[1] for k, v in VAULT_SETTINGS.items()}, 'accounts': [], 'privateServers': [], 'trash': []}
 
 
 def _validate_setting(name, value, vault):
@@ -573,6 +577,8 @@ def _validate_setting(name, value, vault):
         raise VaultError('Roblox version must be "auto" or version- followed by 16 hex digits')
     if rule[0] == 'folder':
         return validate_versions_dir(value)
+    if rule[0] == 'robloxfollow':
+        return validate_follow(value)
     try:
         return validate_value(rule, value, name)
     except ConfigError as exc:
@@ -594,6 +600,9 @@ def normalize_vault(raw) -> dict:
     seen_ids, seen_trackers, seen_users = set(), set(), set()
     # Rows that can't be used are kept as they are, never dropped: they may hold the only copy of a cookie.
     vault['unreadable'] = [r for r in raw.get('unreadable') or [] if isinstance(r, dict)][:200]
+    # Deleted accounts wait here for UNDO_SEC (encrypted, like every row), then are gone for good.
+    vault['trash'] = [t for t in raw.get('trash') or [] if isinstance(t, dict) and isinstance(t.get('account'), dict)
+                      and isinstance(t.get('batch'), str) and isinstance(t.get('deletedAtMs'), int)][:500]
     for s in raw.get('privateServers') or []:
         if isinstance(s, dict) and GUID.match(str(s.get('id') or '')) and DIGITS.match(str(s.get('placeId') or '')) and str(s.get('linkCode') or '').startswith(SECRET_PREFIX):
             vault['privateServers'].append({'id': s['id'], 'name': str(s.get('name') or '')[:60], 'placeId': str(s['placeId']),
@@ -995,6 +1004,116 @@ def remove_account(data: Path, account_id: str):
         a = find_account(vault, account_id)
         vault['accounts'].remove(a)
     update_vault(data, change)
+
+
+# ---------------------------------------------------------------- several accounts at once
+UNDO_SEC = 10  # A deleted account can be brought back this long (the page's Undo), then it is gone.
+BULK_MAX = 1000
+BULK_ACTIONS = ('delete', 'restore', 'group', 'relaunch', 'launch', 'close', 'check')
+
+
+def bulk_ids(vault: dict, ids) -> list:
+    """The accounts named by ids, all of them or an error: a bulk action never half-applies."""
+    if not isinstance(ids, list) or not ids or len(ids) > BULK_MAX:
+        raise VaultError('Select at least one account')
+    chosen, seen = [], set()
+    for ident in ids:
+        if not isinstance(ident, str) or not GUID.match(ident):
+            raise VaultError('Invalid account id')
+        if ident.lower() in seen:
+            continue
+        seen.add(ident.lower())
+        chosen.append(find_account(vault, ident))
+    return chosen
+
+
+def purge_trash(data: Path, now=None) -> int:
+    """Delete for good what waited longer than UNDO_SEC. Returns how many rows went."""
+    cutoff = (now if now is not None else now_ms()) - UNDO_SEC * 1000
+
+    def change(vault):
+        before = len(vault['trash'])
+        vault['trash'] = [t for t in vault['trash'] if t['deletedAtMs'] > cutoff]
+        return before - len(vault['trash'])
+    try:
+        if not (read_json(data / VAULT_FILE) or {}).get('trash'):
+            return 0  # Nothing waiting: no write.
+    except (OSError, ValueError, AttributeError):
+        return 0
+    return update_vault(data, change)
+
+
+def bulk_accounts(data: Path, action: str, ids=None, value=None, batch=None) -> dict:
+    """One change to several accounts, in one locked, atomic vault write."""
+    if action not in BULK_ACTIONS or action == 'check':
+        raise VaultError('Unknown bulk action')
+    if action == 'group':
+        if not isinstance(value, str) or len(value.strip()) > ACCOUNT_FIELDS['group'] or re.search(r'[\x00-\x1f\x7f]', value):
+            raise VaultError(f"A group name is text of at most {ACCOUNT_FIELDS['group']} characters")
+        value = value.strip()
+    if action == 'relaunch' and not isinstance(value, bool):
+        raise VaultError('Relaunch must be true or false')
+
+    def change(vault):
+        cutoff = now_ms() - UNDO_SEC * 1000
+        vault['trash'] = [t for t in vault['trash'] if t['deletedAtMs'] > cutoff]
+        if action == 'restore':
+            if not isinstance(batch, str) or not re.match(r'\A[0-9a-f]{16}\Z', batch):
+                raise VaultError('Nothing to undo')
+            rows = [t for t in vault['trash'] if t['batch'] == batch]
+            if not rows:
+                raise VaultError('Too late to undo: the accounts are deleted')
+            ids_now = {a['id'].lower() for a in vault['accounts']}
+            users = {a['userId'] for a in vault['accounts']}
+            restored, skipped = 0, 0
+            for t in rows:
+                a = t['account']
+                if str(a.get('id') or '').lower() in ids_now or a.get('userId') in users:
+                    skipped += 1  # Added again meanwhile: the newer row stays.
+                    continue
+                vault['accounts'].append(a)
+                restored += 1
+            vault['trash'] = [t for t in vault['trash'] if t['batch'] != batch]
+            return {'restored': restored, 'skipped': skipped}
+        chosen = bulk_ids(vault, ids)
+        stamp = now_ms()
+        if action == 'delete':
+            token = secrets.token_hex(8)
+            for a in chosen:
+                vault['accounts'].remove(a)
+                vault['trash'].append({'batch': token, 'deletedAtMs': stamp, 'account': a})
+            return {'batch': token, 'count': len(chosen), 'undoSec': UNDO_SEC}
+        skipped = []
+        for a in chosen:
+            if action == 'group':
+                a['group'] = value
+            elif action == 'relaunch':
+                a['autoRelaunch'] = value
+            elif action == 'launch':
+                if a['cookieStatus'] in ('dead', 'moderated'):
+                    skipped.append(a['id'])  # Never launched: signed out or moderated.
+                    continue
+                a['launchRequestedAtMs'], a['closeRequestedAtMs'] = stamp, 0
+            elif action == 'close':
+                _stamp_close([a])
+            a['updatedAtMs'] = stamp
+        return {'count': len(chosen) - len(skipped), 'skipped': skipped, 'ids': [a['id'] for a in chosen if a['id'] not in skipped]}
+
+    result = update_vault(data, change)
+    if action == 'close':
+        result['closed'] = close_live_clients(data, set(result['ids']))
+    if action == 'delete':
+        timer = threading.Timer(UNDO_SEC + 1, lambda: _purge_quietly(data))
+        timer.daemon = True
+        timer.start()
+    return result
+
+
+def _purge_quietly(data: Path):
+    try:
+        purge_trash(data)
+    except (OSError, VaultError):
+        pass  # The next delete, or the next start, purges.
 
 
 def update_vault_settings(data: Path, changes: dict) -> dict:
@@ -2012,6 +2131,11 @@ ROBLOX_STAGING_STALE_SEC = 1800  # A staging folder untouched this long belongs 
 WEAO_CACHE_SEC = 300
 WEAO_REFRESH_MIN_SEC = 15
 EXPLOIT_ID = re.compile(r'\A[0-9A-Za-z_-]{1,64}\Z')
+ROBLOX_FOLLOW_SEC = 600  # Follow mode re-checks weao.gg / Roblox every 10 minutes (5 requests; weao.gg allows 120 a minute).
+PROTOCOL_SCHEMES = ('roblox-player', 'roblox')
+PROTOCOL_BASE = r'Software\Classes'  # HKCU only; HKLM is never written. Tests use another base.
+PROTOCOL_BACKUP = 'roblox-protocol-backup.json'
+PROTOCOL_MARK = 'ArkuzoManaged'
 BUILD_NUMBER = re.compile(r'\A[0-9]{1,6}(?:\.[0-9]{1,9}){1,3}\Z')
 
 
@@ -2587,6 +2711,184 @@ def fetch_roblox_catalog() -> dict:
     return out
 
 
+def validate_follow(value) -> str:
+    """robloxVersionFollow: '' (the build chosen by hand), 'latest' (Roblox's current build) or
+    'exploit:<weao.gg id>' (the build that exploit supports)."""
+    if value in (None, ''):
+        return ''
+    if value == 'latest':
+        return value
+    if isinstance(value, str) and value.startswith('exploit:') and EXPLOIT_ID.match(value[8:]):
+        return value
+    raise VaultError('Follow must be empty, "latest" or "exploit:" followed by a weao.gg exploit id')
+
+
+def follow_target(catalog, follow: str) -> dict:
+    """The build a follow setting wants right now: {'version', 'label', 'reason'}. weao.gg rows were
+    validated by parse_weao_exploits; Roblox's own answer wins for 'latest'."""
+    if not follow:
+        return {'version': None, 'label': '', 'reason': ''}
+    if not catalog:
+        return {'version': None, 'label': '', 'reason': 'Roblox and weao.gg have not answered yet'}
+    if follow == 'latest':
+        version = RobloxVersions.current_version(catalog)
+        return {'version': version, 'label': 'Roblox\'s current build', 'reason': '' if version else 'Could not find Roblox\'s current build'}
+    ident = follow[8:]
+    row = next((e for e in catalog.get('exploits') or [] if e.get('id') == ident), None)
+    if row is None:
+        reason = 'weao.gg\'s exploit list did not load' if not catalog.get('exploits') else 'This exploit is no longer listed on weao.gg'
+        return {'version': None, 'label': '', 'reason': reason}
+    if not row.get('usable'):
+        return {'version': None, 'label': row['title'], 'reason': f"{row['title']}: {row.get('reason') or 'not usable'}"}
+    return {'version': row['robloxVersion'], 'label': row['title'], 'reason': ''}
+
+
+# ------------------------------------------------------------- roblox-player: protocol
+# Roblox registers roblox-player: and roblox: in HKCU\Software\Classes; links on roblox.com and the
+# Protocol launch method start whatever exe those keys name. Arkuzo can point them at the selected
+# build. The keys as they were are saved to the data folder first and restored exactly when this is
+# turned off or the pin goes back to Auto. Only HKCU is ever written.
+def _winreg():
+    import winreg  # Windows only; imported late so the module still loads elsewhere.
+    return winreg
+
+
+def _reg_subkeys(winreg, handle) -> list:
+    subs, i = [], 0
+    while True:
+        try:
+            subs.append(winreg.EnumKey(handle, i))
+        except OSError:
+            return subs
+        i += 1
+
+
+def protocol_snapshot(base: str, scheme: str) -> dict:
+    """Every value under HKCU\\<base>\\<scheme> by relative key path: {'exists', 'keys': {path: {name: [type, data]}}}."""
+    winreg = _winreg()
+    keys = {}
+
+    def walk(path):
+        full = base + '\\' + scheme + ('\\' + path if path else '')
+        try:
+            handle = winreg.OpenKey(winreg.HKEY_CURRENT_USER, full)
+        except OSError:
+            return False
+        with handle:
+            values, i = {}, 0
+            while True:
+                try:
+                    name, data, kind = winreg.EnumValue(handle, i)
+                except OSError:
+                    break
+                if kind in (winreg.REG_SZ, winreg.REG_EXPAND_SZ, winreg.REG_DWORD) and len(values) < 50:
+                    values[name] = [kind, data]
+                i += 1
+            keys[path] = values
+            subs = _reg_subkeys(winreg, handle)
+        for sub in subs[:50]:
+            walk((path + '\\' if path else '') + sub)
+        return True
+
+    exists = walk('')
+    return {'exists': exists, 'keys': keys if exists else {}}
+
+
+def _protocol_delete(base: str, scheme: str):
+    winreg = _winreg()
+
+    def delete(full):
+        try:
+            handle = winreg.OpenKey(winreg.HKEY_CURRENT_USER, full)
+        except OSError:
+            return
+        with handle:
+            subs = _reg_subkeys(winreg, handle)
+        for sub in subs:
+            delete(full + '\\' + sub)
+        try:
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, full)
+        except OSError:
+            pass
+    delete(base + '\\' + scheme)
+
+
+def _protocol_write_snapshot(base: str, scheme: str, snap: dict):
+    winreg = _winreg()
+    _protocol_delete(base, scheme)
+    if not snap.get('exists'):
+        return
+    for path in sorted(snap.get('keys') or {}, key=lambda p: p.count('\\') + 1 if p else 0):
+        full = base + '\\' + scheme + ('\\' + path if path else '')
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, full) as handle:
+            for name, (kind, data) in (snap['keys'][path] or {}).items():
+                winreg.SetValueEx(handle, name, 0, kind, data)
+
+
+def protocol_command_exe(command) -> str | None:
+    """The exe a shell\\open\\command value starts: '"C:\\...\\RobloxPlayerBeta.exe" %1' -> the path."""
+    if not isinstance(command, str):
+        return None
+    match = re.match(r'\A\s*"([^"]+)"', command) or re.match(r'\A\s*(\S+)', command)
+    return match.group(1) if match else None
+
+
+def protocol_state(base: str = PROTOCOL_BASE) -> dict:
+    """What roblox-player: starts now (HKCU), and whether Arkuzo wrote it."""
+    try:
+        snap = protocol_snapshot(base, 'roblox-player')
+    except (ImportError, OSError):
+        return {'exe': None, 'managed': False}
+    command = ((snap['keys'].get('shell\\open\\command') or {}).get('') or [None, None])[1]
+    return {'exe': protocol_command_exe(command), 'managed': PROTOCOL_MARK in (snap['keys'].get('') or {})}
+
+
+def protocol_apply(data: Path, exe: str, base: str = PROTOCOL_BASE) -> dict:
+    """Point roblox-player: and roblox: at exe. The keys as they were are saved first. A saved copy is
+    replaced only when the keys are no longer Arkuzo's (Roblox's installer rewrote them since)."""
+    exe = str(exe)
+    if '"' in exe or not exe.lower().endswith('\\robloxplayerbeta.exe') or not re.match(r'\A[A-Za-z]:\\', exe):
+        raise VaultError('Not a Roblox player path')
+    winreg = _winreg()
+    backup_path = data / PROTOCOL_BACKUP
+    snaps = {scheme: protocol_snapshot(base, scheme) for scheme in PROTOCOL_SCHEMES}
+    ours = all(PROTOCOL_MARK in (snaps[s]['keys'].get('') or {}) for s in PROTOCOL_SCHEMES)
+    if not ours:
+        write_json_atomic(backup_path, {'savedAt': time.time(), 'base': base, 'schemes': snaps})
+    elif not backup_path.exists():
+        # Arkuzo's keys but no saved copy (the file was deleted): restoring can only remove them.
+        write_json_atomic(backup_path, {'savedAt': time.time(), 'base': base, 'schemes': {s: {'exists': False, 'keys': {}} for s in PROTOCOL_SCHEMES}})
+    command = f'"{exe}" %1'
+    for scheme in PROTOCOL_SCHEMES:
+        root = base + '\\' + scheme
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, root) as handle:
+            winreg.SetValueEx(handle, '', 0, winreg.REG_SZ, 'URL: Roblox Protocol')
+            winreg.SetValueEx(handle, 'URL Protocol', 0, winreg.REG_SZ, '')
+            winreg.SetValueEx(handle, PROTOCOL_MARK, 0, winreg.REG_SZ, '1')
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, root + '\\DefaultIcon') as handle:
+            winreg.SetValueEx(handle, '', 0, winreg.REG_SZ, exe)
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, root + '\\shell\\open\\command') as handle:
+            winreg.SetValueEx(handle, '', 0, winreg.REG_SZ, command)
+    return protocol_state(base)
+
+
+def protocol_restore(data: Path, base: str = PROTOCOL_BASE) -> bool:
+    """Put the keys back exactly as they were before Arkuzo changed them. False when nothing was saved."""
+    backup_path = data / PROTOCOL_BACKUP
+    backup = read_json(backup_path)
+    if not isinstance(backup, dict) or not isinstance(backup.get('schemes'), dict) or backup.get('base', base) != base:
+        return False
+    for scheme in PROTOCOL_SCHEMES:
+        snap = backup['schemes'].get(scheme)
+        if isinstance(snap, dict) and PROTOCOL_MARK in (protocol_snapshot(base, scheme)['keys'].get('') or {}):
+            _protocol_write_snapshot(base, scheme, snap)  # Only Arkuzo's own keys are replaced.
+    try:
+        backup_path.unlink()
+    except OSError:
+        pass
+    return True
+
+
 class RobloxVersions:
     """The Roblox tab: catalog (cached), installed builds, the one install that may run, the pin."""
 
@@ -2597,6 +2899,13 @@ class RobloxVersions:
         self.catalog_data, self.catalog_at = None, 0.0
         self.thread, self.cancel_event = None, threading.Event()
         self.status = {'state': 'idle'}
+        # Follow mode (robloxVersionFollow) and the roblox-player: protocol.
+        self.follow_lock = threading.RLock()
+        self.follow_state = {'follow': '', 'state': 'off'}
+        self.protocol_base, self.protocol_error = PROTOCOL_BASE, ''
+        self.on_switch = None  # Close all (App sets it): "apply now" relaunches the farm's clients on the new build.
+        self.restart_on_pin = False
+        self.stop_event = threading.Event()
 
     def settings(self) -> dict:
         try:
@@ -2648,9 +2957,21 @@ class RobloxVersions:
             build.update(current=build['version'] == current, pinned=build['version'] == pinned, build=numbers.get(build['version']),
                          removable=build['managed'] and build['version'] != pinned and not build['clients'])
         hb = heartbeat if isinstance(heartbeat, dict) else {}
+        follow = settings.get('robloxVersionFollow') or ''
+        with self.follow_lock:
+            follow_state = dict(self.follow_state)
+        if follow_state.get('follow') != follow:
+            follow_state = {'follow': follow, 'state': 'checking' if follow else 'off'}
+        if follow and catalog:  # What the followed source wants now, from the cached catalog.
+            target = follow_target(catalog, follow)
+            follow_state.update(wanted=target['version'], label=target['label'], reason=target['reason'])
+        protocol = dict(protocol_state(self.protocol_base), enabled=bool(settings.get('robloxProtocol')),
+                        saved=(self.data / PROTOCOL_BACKUP).exists(), error=self.protocol_error)
         return {'catalog': catalog, 'current': current, 'builds': builds, 'install': self.progress(), 'root': str(root),
                 'defaultRoot': str(default_roblox_root()), 'selection': {'version': pinned, 'fallback': bool(settings.get('robloxVersionFallback')),
-                'dir': settings.get('robloxVersionsDir') or '', 'launchMethod': settings.get('launchMethod')},
+                'dir': settings.get('robloxVersionsDir') or '', 'launchMethod': settings.get('launchMethod'), 'follow': follow,
+                'followRestart': bool(settings.get('robloxFollowRestart'))},
+                'follow': follow_state, 'protocol': protocol,
                 'engine': hb.get('robloxVersion'), 'provider': hb.get('accountProvider'), 'clientsListed': images is not None}
 
     def start_install(self, version) -> dict:
@@ -2691,6 +3012,8 @@ class RobloxVersions:
             install_roblox_build(version, root, self._set, cancel)
             self._set(state='done', phase='Installed', message=f'{version} installed', finishedAt=time.time())
             self._note(f'Roblox {version} installed in {root / "Versions"}', 'info')
+            if self.settings().get('robloxVersionFollow'):
+                self.follow_tick(network=False, from_install=True)  # Following: the new build becomes the pin now.
         except InstallCancelled:
             self._set(state='cancelled', phase='Cancelled', message='Install cancelled; nothing was installed', finishedAt=time.time())
         except VaultError as exc:
@@ -2709,7 +3032,7 @@ class RobloxVersions:
         self._note(f'Roblox {version} removed', 'info')
         return {'removed': version}
 
-    def select(self, version, fallback=None) -> dict:
+    def select(self, version, fallback=None, keep_follow=False) -> dict:
         if version != 'auto':
             if not isinstance(version, str) or not ROBLOX_VERSION.match(version):
                 raise VaultError('Roblox version must be "auto" or version- followed by 16 hex digits')
@@ -2717,9 +3040,139 @@ class RobloxVersions:
             if not any(b['version'] == version and b['complete'] for b in self.builds.list(self.root(settings), [])):
                 raise VaultError(f'{version} is not installed: install it first')
         changes = {'robloxVersion': version}
+        if not keep_follow:
+            changes['robloxVersionFollow'] = ''  # A build chosen by hand ends following.
         if isinstance(fallback, bool):
             changes['robloxVersionFallback'] = fallback
-        return update_vault_settings(self.data, changes)
+        result = update_vault_settings(self.data, changes)
+        self.sync_protocol(result)
+        return result
+
+    def _pinned_exe(self, settings) -> str | None:
+        pin = settings.get('robloxVersion') or 'auto'
+        if pin == 'auto':
+            return None
+        for build in self.builds.list(self.root(settings), []):  # Arkuzo's folder first.
+            if build['version'] == pin and build['complete']:
+                return str(Path(build['path']) / 'RobloxPlayerBeta.exe')
+        return None
+
+    def sync_protocol(self, settings=None) -> dict:
+        """roblox-player: names the pinned build while robloxProtocol is on and a build is pinned;
+        otherwise the keys Arkuzo replaced are put back. Never raises."""
+        settings = settings or self.settings()
+        try:
+            wanted = settings.get('robloxProtocol') and (settings.get('robloxVersion') or 'auto') != 'auto'
+            exe = self._pinned_exe(settings) if wanted else None
+            if exe:
+                now = protocol_state(self.protocol_base)
+                if not now['managed'] or os.path.normcase(now['exe'] or '') != os.path.normcase(exe) or not (self.data / PROTOCOL_BACKUP).exists():
+                    protocol_apply(self.data, exe, self.protocol_base)
+                    self._note(f'roblox-player: links now start Roblox {Path(exe).parent.name}', 'info')
+            elif not wanted and protocol_restore(self.data, self.protocol_base):
+                self._note('roblox-player: links start Roblox\'s own build again (keys restored)', 'info')
+            self.protocol_error = ''
+        except (ImportError, OSError, VaultError) as exc:
+            self.protocol_error = f'Could not change the roblox-player: link ({type(exc).__name__})'
+        return protocol_state(self.protocol_base)
+
+    def set_protocol(self, enabled) -> dict:
+        if not isinstance(enabled, bool):
+            raise VaultError('enabled must be true or false')
+        settings = update_vault_settings(self.data, {'robloxProtocol': enabled})
+        state = self.sync_protocol(settings)
+        if self.protocol_error:
+            raise VaultError(self.protocol_error)
+        return state
+
+    def set_mode(self, mode, version=None, apply=None, restart=None) -> dict:
+        """One switch for the tab: 'auto', 'pinned' (+ version), 'latest' or 'exploit:<id>' (follow).
+        apply 'now' closes the farm's clients so they relaunch on the new build at once (Close all);
+        anything else lets them switch as they relaunch. Returns the previous choice for Undo."""
+        settings = self.settings()
+        previous = {'version': settings.get('robloxVersion') or 'auto', 'follow': settings.get('robloxVersionFollow') or ''}
+        now = apply == 'now'
+        if mode in ('auto', 'pinned'):
+            self.select('auto' if mode == 'auto' else version)
+            if isinstance(restart, bool):
+                update_vault_settings(self.data, {'robloxFollowRestart': restart})
+            after = self.settings().get('robloxVersion') or 'auto'
+            closed = self.on_switch() if now and after != previous['version'] and self.on_switch else None
+            return {'previous': previous, 'version': after, 'follow': '', 'closed': closed}
+        follow = validate_follow(mode)
+        if not follow:
+            raise VaultError('Unknown mode')
+        changes = {'robloxVersionFollow': follow}
+        if isinstance(restart, bool):
+            changes['robloxFollowRestart'] = restart
+        update_vault_settings(self.data, changes)
+        with self.follow_lock:
+            self.follow_state = {'follow': follow, 'state': 'checking'}
+        self.restart_on_pin = now
+        threading.Thread(target=self._follow_safe, kwargs={'network': True}, daemon=True, name='roblox-follow-now').start()
+        return {'previous': previous, 'version': previous['version'], 'follow': follow, 'closed': None}
+
+    def _follow_safe(self, **kwargs):
+        try:
+            self.follow_tick(**kwargs)
+        except Exception as exc:  # The follower must never die; the type only.
+            with self.follow_lock:
+                self.follow_state = dict(self.follow_state, state='error', message=f'Check failed ({type(exc).__name__})')
+
+    def follow_tick(self, network=True, from_install=False) -> dict:
+        """Follow mode: install the build the followed source wants (from Roblox's CDN) and pin it."""
+        # The network fetch happens outside the lock: the page's polling reads follow_state under it.
+        catalog = None
+        if self.settings().get('robloxVersionFollow'):
+            catalog = self.catalog(refresh=True) if network else self.catalog(cached_only=True)
+        with self.follow_lock:
+            settings = self.settings()
+            follow = settings.get('robloxVersionFollow') or ''
+            if not follow:
+                self.follow_state = {'follow': '', 'state': 'off'}
+                self.sync_protocol(settings)
+                return dict(self.follow_state)
+            target = follow_target(catalog, follow)
+            state = {'follow': follow, 'checkedAt': time.time(), 'target': target['version'], 'label': target['label'],
+                     'state': 'waiting', 'message': target['reason']}
+            version = target['version']
+            if version:
+                # Only Arkuzo's own folder counts: Roblox's updater deletes the builds in its folders.
+                installed = any(b['version'] == version and b['complete'] and b['managed'] for b in self.builds.list(self.root(settings), []))
+                progress = self.progress()
+                if installed:
+                    state['state'] = 'pinned'
+                    if (settings.get('robloxVersion') or 'auto') != version:
+                        self.select(version, keep_follow=True)
+                        state['message'] = f'Switched to {version}'
+                        self._note(f'Following {target["label"]}: the saver now launches Roblox {version}', 'info')
+                        if (self.restart_on_pin or settings.get('robloxFollowRestart')) and self.on_switch:
+                            self.on_switch()
+                    self.restart_on_pin = False
+                elif progress.get('state') == 'running':
+                    mine = progress.get('version') == version
+                    state.update(state='installing' if mine else 'waiting', message='' if mine else 'Another install is running')
+                elif progress.get('state') == 'failed' and progress.get('version') == version and not from_install \
+                        and time.time() - (progress.get('finishedAt') or 0) < ROBLOX_FOLLOW_SEC - 30:
+                    state.update(state='error', message=progress.get('message') or 'Install failed; tried again at the next check')
+                else:
+                    self.start_install(version)
+                    state['state'] = 'installing'
+                    self._note(f'Following {target["label"]}: installing Roblox {version} from Roblox\'s CDN', 'info')
+            self.follow_state = state
+            self.sync_protocol()
+            return dict(state)
+
+    def start_follower(self):
+        """Re-checks every ROBLOX_FOLLOW_SEC while following; puts the protocol keys right at start."""
+        def loop():
+            self.sync_protocol()
+            if self.settings().get('robloxVersionFollow'):
+                self._follow_safe(network=True)
+            while not self.stop_event.wait(ROBLOX_FOLLOW_SEC):
+                if self.settings().get('robloxVersionFollow'):
+                    self._follow_safe(network=True)
+        threading.Thread(target=loop, daemon=True, name='roblox-follow').start()
 
     def exploits(self, ids) -> dict:
         catalog = self.catalog()
@@ -2752,6 +3205,8 @@ class App:
         self.pages_lock = threading.Lock()
         self.cookies = CookieChecker(data)
         self.roblox = RobloxVersions(data, self.feed)
+        self.roblox.on_switch = lambda: close_all_clients(self.data).get('closed')
+        _purge_quietly(data)  # Deleted accounts a previous Control Center held for Undo are gone now.
         self.login = BrowserLogin(data, find_edge())
         # A sign-in window cut off by a crash leaves a signed-in throwaway profile behind.
         shutil.rmtree(data / 'browser-login', ignore_errors=True)
@@ -3209,6 +3664,14 @@ def vault_server_remove(app, body):
     return 'removed'
 
 
+def vault_bulk(app, body):
+    action = body.get('action')
+    if action == 'check':
+        chosen = bulk_ids(load_vault(app.data), body.get('ids'))
+        return {'checking': app.cookies.check([a['id'] for a in chosen]), 'count': len(chosen)}
+    return bulk_accounts(app.data, action, body.get('ids'), body.get('value'), body.get('batch'))
+
+
 def vault_farm_start(app, body):
     settings = set_farm_running(app.data, True)
     if app.supervisor.state not in ('running', 'starting', 'restarting', 'external'):
@@ -3224,6 +3687,7 @@ VAULT_ROUTES = {
     '/api/vault/check': vault_check,
     '/api/vault/update': lambda app, body: update_account(app.data, str(body.get('id') or ''), body.get('fields')),
     '/api/vault/remove': vault_remove,
+    '/api/vault/bulk': vault_bulk,
     '/api/vault/launch': lambda app, body: request_account_action(app.data, str(body.get('id') or ''), 'launch'),
     '/api/vault/close': lambda app, body: request_account_action(app.data, str(body.get('id') or ''), 'close'),
     '/api/vault/settings': lambda app, body: update_vault_settings(app.data, body.get('changes')),
@@ -3261,6 +3725,8 @@ ROBLOX_ROUTES = {
     '/api/roblox/install/cancel': lambda app, body: app.roblox.cancel(),
     '/api/roblox/remove': lambda app, body: app.roblox.remove(body.get('version')),
     '/api/roblox/select': lambda app, body: app.roblox.select(body.get('version'), body.get('fallback')),
+    '/api/roblox/mode': lambda app, body: app.roblox.set_mode(body.get('mode'), body.get('version'), body.get('apply'), body.get('restart')),
+    '/api/roblox/protocol': lambda app, body: app.roblox.set_protocol(body.get('enabled')),
     '/api/roblox/exploits': lambda app, body: app.roblox.exploits(body.get('ids')),
 }
 POST_ROUTES = {
@@ -3456,6 +3922,7 @@ def main(argv=None):
                 open_window(url)
             return 0
     app = App(data, args.port)
+    app.roblox.start_follower()
     if handover:
         # Keep the saver as it was: running stays running (now on this engine), stopped stays stopped.
         app.supervisor.initial_start = handover['saverWasRunning']

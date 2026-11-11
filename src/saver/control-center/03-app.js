@@ -75,12 +75,23 @@ const initials = (name) => (String(name || '?').replace(/[^\p{L}\p{N}]/gu, '').s
 const store = { get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* unavailable */ } } };
 const tile = (iconName, color, size) => el('span', { class: 'tile' + (size ? ' ' + size : ''), style: `--c:${color}` }, icon(iconName));
 function pill(level, label, small) { const [c, ic] = LEVEL[level] || LEVEL.neutral; return el('span', { class: 'pill' + (small ? ' sm' : ''), style: `--c:${c}` }, icon(ic), label); }
-function toast(text, level) {
-  const [c, ic] = LEVEL[level || 'info'];
-  const t = el('div', { class: 'toast' }, tile(ic, c, 'sm'), el('span', { text }));
+// opts: { action: { label, run }, ms }. A toast with an action (Undo) stays longer and takes clicks.
+function toast(text, level, opts) {
+  const [c, ic] = LEVEL[level || 'info'], o = opts || {};
+  let gone = false;
+  const close = () => { if (gone) return; gone = true; t.classList.add('out'); setTimeout(() => t.remove(), 260); };
+  const act = o.action ? el('button', { class: 'btn sm toast-act', type: 'button', onclick: () => { close(); o.action.run(); } }, o.action.label) : null;
+  const t = el('div', { class: 'toast' + (act ? ' has-act' : ''), role: act ? 'alert' : null }, tile(ic, c, 'sm'), el('span', { text }), act);
   $('toasts').append(t);
   while ($('toasts').children.length > 4) $('toasts').firstChild.remove();
-  setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 260); }, 3200);
+  setTimeout(close, o.ms || (act ? 10000 : 3200));
+  return { close };
+}
+// A destructive step that waits ms before it happens; Undo cancels it. Nothing is lost if the page closes first.
+function deferred(text, run, ms = 8000) {
+  let undone = false;
+  const timer = setTimeout(() => { if (!undone) run(); }, ms);
+  toast(text, 'neutral', { ms, action: { label: 'Undo', run: () => { undone = true; clearTimeout(timer); toast('Undone', 'good'); } } });
 }
 async function post(path, body) {
   const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Arkuzo-Token': TOKEN }, body: JSON.stringify(body || {}) });
@@ -141,8 +152,8 @@ const PAGES = {
 function showPage(page) {
   if (!PAGES[page]) return;
   if (S.page === 'settings' && page !== 'settings') {
-    if (Object.keys(S.edits).length && !confirm('Discard unsaved settings?')) return;
-    S.edits = {}; updateSaveBar();
+    // Unsaved edits are kept (no popup): they are still there when you come back.
+    if (Object.keys(S.edits).length) toast('Unsaved settings kept for later', 'info', { action: { label: 'Discard', run: () => { S.edits = {}; buildForm(); updateSaveBar(); } } });
   }
   S.page = page;
   document.querySelectorAll('.page').forEach((p) => { p.hidden = p.dataset.page !== page; });
@@ -521,15 +532,25 @@ function renderVault() {
     el('button', { class: 'btn ghost sm', onclick: () => vaultAct('/api/vault/login/cancel', {}, 'Sign-in cancelled', 'neutral') }, 'Cancel'));
   if (S.loginState && S.loginState !== login.state && (login.state === 'success' || login.state === 'failed')) toast(login.message, login.state === 'success' ? 'good' : 'critical');
   S.loginState = login.state;
-  // Rows.
+  // Rows: search, status and group filters, sort, selection.
   $('vaultSub').textContent = accounts.length ? `${accounts.length} account${accounts.length === 1 ? '' : 's'} · cookies encrypted on this PC` : '';
   const editing = document.querySelector('#vaultRows .editor');
   if (editing && editing.contains(document.activeElement)) { renderFarmSettings(v); renderServers(v); return; } // Never redraw under the cursor.
   $('vaultEmpty').hidden = accounts.length > 0;
+  $('acctHead').hidden = !accounts.length;
   const servers = v.privateServers || [];
   const rows = [];
-  for (const a of accounts.filter((x) => matches(acctName(x), x.username, x.group, x.notes))) {
+  const shown = acctView(accounts, hb, farm);
+  S.acctShown = shown.map((a) => a.id);
+  S.sel = new Set([...S.sel].filter((id) => accounts.some((a) => a.id === id)));
+  $('vaultNoMatch').hidden = !accounts.length || shown.length > 0;
+  renderAcctTools(accounts, hb, farm);
+  renderBulkBar(accounts, native);
+  for (const a of shown) {
     const [level, label] = accountStatus(a, hb, farm);
+    const pick = el('input', { type: 'checkbox', 'aria-label': 'Select ' + acctName(a) });
+    pick.checked = S.sel.has(a.id);
+    pick.addEventListener('click', (e) => acctPick(a.id, pick.checked, e.shiftKey));
     const sw = el('input', { type: 'checkbox', 'aria-label': `Relaunch ${acctName(a)}` });
     sw.checked = !!a.autoRelaunch;
     sw.addEventListener('change', () => vaultAct('/api/vault/update', { id: a.id, fields: { autoRelaunch: sw.checked } }, `${acctName(a)}: relaunch ${sw.checked ? 'on' : 'off'}`, sw.checked ? 'good' : 'neutral'));
@@ -537,7 +558,8 @@ function renderVault() {
     const live = !!(a.live || {}).processId || (a.live || {}).uiStatus === 'Launching';
     const sub = el('div', { class: 'sb', style: 'display:flex;gap:6px;align-items:center' }, el('span', { text: '@' + a.username }), a.group ? el('span', { class: 'grp', text: a.group }) : null,
       a.lastError && a.cookieStatus !== 'alive' ? el('span', { title: a.lastError, text: '· ' + a.lastError }) : null);
-    rows.push(el('div', { class: 'mrow vrow', 'aria-selected': String(S.vaultEdit === a.id) },
+    rows.push(el('div', { class: 'mrow vrow' + (S.sel.has(a.id) ? ' picked' : ''), 'aria-selected': String(S.vaultEdit === a.id) },
+      el('span', { class: 'selcell' }, pick),
       avatarFor(a),
       el('div', { style: 'min-width:0' }, el('div', { class: 'nm', text: acctName(a) }), sub),
       pill(level, label, true),
@@ -573,10 +595,117 @@ function accountEditor(a, servers, settings) {
     field('notes', 'Notes', a.notes),
     el('div', { class: 'bar' },
       el('span', { class: 'sb', style: 'margin-right:auto;color:var(--dim);font-size:11.5px', text: `User ${a.userId} · tracker ${a.browserTrackerId} · added ${agoMs(a.createdAtMs)} · launched ${agoMs(a.lastLaunchAtMs)}` }),
-      el('button', { class: 'btn danger sm', type: 'button', onclick: () => { if (confirm(`Remove ${acctName(a)} and its stored cookie from this PC? A running client keeps running.`)) vaultAct('/api/vault/remove', { id: a.id }, `${acctName(a)} removed`, 'neutral'); } }, icon('trash'), 'Remove'),
+      el('button', { class: 'btn danger sm', type: 'button', title: 'Remove this account and its stored cookie (Undo for 10 s). A running client keeps running.', onclick: () => { S.vaultEdit = null; bulkDelete([a.id]); } }, icon('trash'), 'Remove'),
       el('button', { class: 'btn ghost sm', type: 'button', onclick: () => { S.vaultEdit = null; renderVault(); } }, 'Cancel'),
       el('button', { class: 'btn accent sm', type: 'submit' }, icon('check'), 'Save')));
 }
+// ---------- account list: filters, sort, selection, bulk actions ----------
+Object.assign(S, { sel: new Set(), selAnchor: null, acctShown: [], acctQuery: '',
+  acctStatus: store.get('arkuzo-acct-status') || 'all', acctGroup: store.get('arkuzo-acct-group') || 'all', acctSort: store.get('arkuzo-acct-sort') || 'name' });
+const ACCT_STATUS = [['all', 'All'], ['ingame', 'In game'], ['launching', 'Launching'], ['idle', 'Idle'], ['signedout', 'Signed out'], ['moderated', 'Moderated']];
+const STATUS_ORDER = { ingame: 0, launching: 1, idle: 2, moderated: 3, signedout: 4 };
+function statusKey(a, hb, farm) {
+  if (a.cookieStatus === 'dead') return 'signedout';
+  if ((a.live || {}).processId) return 'ingame';
+  if (a.cookieStatus === 'moderated') return 'moderated';
+  const label = accountStatus(a, hb, farm)[1];
+  return label === 'Launching' || label === 'Relaunching' ? 'launching' : 'idle';
+}
+function acctView(accounts, hb, farm) {
+  const q = S.acctQuery;
+  const list = accounts.filter((a) => matches(acctName(a), a.username, a.group, a.notes)
+    && (!q || [acctName(a), a.username, a.group, a.notes].some((f) => String(f || '').toLowerCase().includes(q)))
+    && (S.acctStatus === 'all' || statusKey(a, hb, farm) === S.acctStatus)
+    && (S.acctGroup === 'all' || (S.acctGroup === '' ? !a.group : a.group === S.acctGroup)));
+  const byName = (a, b) => acctName(a).toLowerCase().localeCompare(acctName(b).toLowerCase());
+  const sorts = {
+    name: byName,
+    status: (a, b) => (STATUS_ORDER[statusKey(a, hb, farm)] - STATUS_ORDER[statusKey(b, hb, farm)]) || byName(a, b),
+    group: (a, b) => (!a.group - !b.group) || String(a.group || '').localeCompare(String(b.group || '')) || byName(a, b),
+    seen: (a, b) => (Number(!!(b.live || {}).processId) - Number(!!(a.live || {}).processId)) || ((b.lastLaunchAtMs || 0) - (a.lastLaunchAtMs || 0)) || byName(a, b),
+  };
+  return list.sort(sorts[S.acctSort] || byName);
+}
+function renderAcctTools(accounts, hb, farm) {
+  const counts = { all: accounts.length };
+  for (const a of accounts) { const k = statusKey(a, hb, farm); counts[k] = (counts[k] || 0) + 1; }
+  $('acctStatus').replaceChildren(...ACCT_STATUS.filter(([k]) => k === 'all' || counts[k] || S.acctStatus === k).map(([k, t]) => el('button', { class: 'chip', type: 'button', 'aria-pressed': String(S.acctStatus === k),
+    onclick: () => { S.acctStatus = k; store.set('arkuzo-acct-status', k); renderVault(); } }, t, el('span', { class: 'n', text: String(counts[k] || 0) }))));
+  const groups = [...new Set(accounts.map((a) => a.group).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  if (S.acctGroup !== 'all' && S.acctGroup !== '' && !groups.includes(S.acctGroup)) S.acctGroup = 'all';
+  const gsel = $('acctGroup');
+  if (document.activeElement !== gsel) {
+    gsel.replaceChildren(el('option', { value: 'all', text: 'All groups' }), ...groups.map((g) => el('option', { value: g, text: `${g} (${accounts.filter((a) => a.group === g).length})` })),
+      el('option', { value: '', text: `No group (${accounts.filter((a) => !a.group).length})` }));
+    gsel.value = S.acctGroup;
+  }
+  $('acctSort').value = S.acctSort;
+  const all = $('selAll'), shown = S.acctShown, picked = shown.filter((id) => S.sel.has(id)).length;
+  all.checked = shown.length > 0 && picked === shown.length; all.indeterminate = picked > 0 && picked < shown.length;
+}
+function acctPick(id, on, range) {
+  const shown = S.acctShown;
+  if (range && S.selAnchor && shown.includes(S.selAnchor)) {
+    const [i, j] = [shown.indexOf(S.selAnchor), shown.indexOf(id)].sort((x, y) => x - y);
+    for (const k of shown.slice(i, j + 1)) { if (on) S.sel.add(k); else S.sel.delete(k); }
+  } else if (on) S.sel.add(id); else S.sel.delete(id);
+  S.selAnchor = id;
+  renderVault();
+}
+function renderBulkBar(accounts, native) {
+  const bar = $('bulkBar'), ids = [...S.sel], n = ids.length;
+  if (bar.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return; // Typing a group name.
+  bar.hidden = !n;
+  if (!n) { bar.replaceChildren(); return; }
+  const picked = accounts.filter((a) => S.sel.has(a.id)), name = n === 1 ? acctName(picked[0] || {}) : `${n} accounts`;
+  const groups = [...new Set(accounts.map((a) => a.group).filter(Boolean))].sort();
+  const group = el('input', { class: 'inp', list: 'groupList', placeholder: 'Group name', maxlength: 40, 'aria-label': 'Group to assign' });
+  const assign = async () => { const g = group.value.trim(); if (!g) { group.focus(); return; } if (await bulk('group', ids, g, `${name} → group ${g}`)) { group.blur(); renderVault(); } };
+  group.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); assign(); } if (e.key === 'Escape') group.blur(); });
+  const b = (ic, text, title, run, cls) => el('button', { class: 'btn sm' + (cls ? ' ' + cls : ''), type: 'button', title, onclick: run }, icon(ic), text);
+  bar.replaceChildren(
+    el('span', { class: 'cnt', text: `${n} selected` }),
+    b('play', 'Launch', native ? 'Launch the selected accounts now (signed-out and moderated ones are skipped)' : 'Arkuzo launches only when it is the launcher', () => bulk('launch', ids, null, `Launching ${name}…`)),
+    b('x', 'Close', 'Close their clients now; with relaunch on and the farm running they come back', () => bulk('close', ids, null, `Closing ${name}`)),
+    b('refresh', 'Relaunch on', 'Keep them in game while the farm runs', () => bulk('relaunch', ids, true, `${name}: relaunch on`)),
+    b('power', 'Relaunch off', 'Stop relaunching them', () => bulk('relaunch', ids, false, `${name}: relaunch off`), 'ghost'),
+    b('check', 'Check cookie', 'Ask Roblox whether their cookies are still signed in', () => bulk('check', ids, null, `Checking ${name}…`), 'ghost'),
+    el('span', { class: 'sep' }),
+    group, el('datalist', { id: 'groupList' }, ...groups.map((g) => el('option', { value: g }))),
+    b('check', 'Assign group', 'Put the selected accounts in this group (new or existing)', assign),
+    b('x', 'Remove from group', 'Clear their group', () => bulk('group', ids, '', `${name}: no group`), 'ghost'),
+    el('span', { class: 'sep' }),
+    b('trash', 'Delete', 'Remove the selected accounts and their stored cookies (Undo for 10 s). Running clients keep running.', () => bulkDelete(ids), 'danger'),
+    el('div', { class: 'spacer' }),
+    el('button', { class: 'btn ghost sm', type: 'button', title: 'Clear the selection (Esc)', onclick: () => { S.sel.clear(); renderVault(); } }, 'Clear'));
+}
+async function bulk(action, ids, value, done) {
+  const r = await vaultAct('/api/vault/bulk', { action, ids, value }, null);
+  if (!r) return null;
+  const skipped = (r.skipped || []).length;
+  toast(done + (skipped ? ` · ${skipped} skipped (signed out or moderated)` : ''), action === 'relaunch' && !value ? 'neutral' : 'good');
+  return r;
+}
+async function bulkDelete(ids) {
+  const accounts = (S.vault || {}).accounts || [], one = ids.length === 1 && accounts.find((a) => a.id === ids[0]);
+  const r = await vaultAct('/api/vault/bulk', { action: 'delete', ids }, null);
+  if (!r) return;
+  ids.forEach((id) => S.sel.delete(id));
+  renderVault();
+  toast(`${one ? acctName(one) : r.count + ' accounts'} removed`, 'neutral', { ms: Math.max(3, (r.undoSec || 10) - 1) * 1000,
+    action: { label: 'Undo', run: async () => { const u = await vaultAct('/api/vault/bulk', { action: 'restore', batch: r.batch }, null); if (u) toast(u.skipped ? `Restored ${u.restored}; ${u.skipped} had been added again` : 'Restored', 'good'); } } });
+}
+$('acctSearch').addEventListener('input', () => { S.acctQuery = $('acctSearch').value.trim().toLowerCase(); renderVault(); });
+$('acctSearch').addEventListener('keydown', (e) => { if (e.key === 'Escape') { $('acctSearch').value = ''; S.acctQuery = ''; $('acctSearch').blur(); renderVault(); } });
+$('acctGroup').addEventListener('change', () => { S.acctGroup = $('acctGroup').value; store.set('arkuzo-acct-group', S.acctGroup); renderVault(); });
+$('acctSort').addEventListener('change', () => { S.acctSort = $('acctSort').value; store.set('arkuzo-acct-sort', S.acctSort); renderVault(); });
+$('selAll').addEventListener('change', () => { for (const id of S.acctShown) { if ($('selAll').checked) S.sel.add(id); else S.sel.delete(id); } renderVault(); });
+document.addEventListener('keydown', (e) => {
+  if (S.page !== 'accounts' || e.ctrlKey || e.metaKey || e.altKey) return;
+  const typing = /^(INPUT|TEXTAREA|SELECT)$/.test((document.activeElement || {}).tagName || '');
+  if (e.key === '/' && !typing) { e.preventDefault(); $('acctSearch').focus(); }
+  else if (e.key === 'Escape' && !typing && S.sel.size) { S.sel.clear(); renderVault(); }
+});
 const FARM_FIELDS = [
   ['provider', 'Who launches clients', 'Arkuzo uses the accounts above; Volt uses its own account manager. Auto picks Arkuzo once you add an account, unless Volt’s auto-relaunch is on.', ['enum', ['auto', 'arkuzo', 'volt']]],
   ['launchDelaySec', 'Launch spacing', 'Seconds between two launches. Roblox and executors cope better with some space.', ['int', 5, 120, 's']],
@@ -584,13 +713,14 @@ const FARM_FIELDS = [
   ['launchTimeoutSec', 'Launch timeout', 'If no client appears in this time, the launch is retried.', ['int', 30, 600, 's']],
   ['autoRelaunchEnabled', 'Relaunch accounts', 'Master switch for every account\'s relaunch toggle.', ['bool']],
   ['multiInstance', 'Multiple clients', 'Hold Roblox\'s single-instance lock so many clients run side by side.', ['bool']],
-  ['launchMethod', 'Launch method', 'Direct starts RobloxPlayerBeta; Protocol goes through Roblox\'s launcher (updates Roblox first). A build pinned on the Roblox tab always starts directly.', ['enum', ['direct', 'protocol']]],
+  ['launchMethod', 'Launch method', 'Direct starts RobloxPlayerBeta; Protocol goes through the roblox-player: link (Roblox\'s launcher, which updates Roblox first). A build chosen on the Roblox tab starts directly unless "Roblox links use this build" is on there.', ['enum', ['direct', 'protocol']]],
   ['cookieCheckMinutes', 'Cookie check', 'Ask Roblox whether every cookie is still signed in this often (0 = only by hand).', ['int', 0, 1440, 'min']],
 ];
 const LAYOUT_FIELDS = [
   ['arrangeWindows', 'Arrange windows', 'Keep every client window in an orderly layout on screen.', ['bool']],
-  ['arrangeLayout', 'Layout', 'Auto: every window on screen, side by side and as large as fits; with more windows than fit, they overlap evenly so each keeps its corner in view. Grid: your size and windows per row. Cascade: stacked diagonally. Roblox windows are never smaller than 800 × 600.', ['enum', ['auto', 'grid', 'cascade'], { auto: 'Auto (fit screen)', grid: 'Grid', cascade: 'Cascade' }]],
-  ['arrangePerRow', 'Windows per row', 'Rows that don\'t fit the screen overlap, so every window stays on screen.', ['int', 1, 12, ''], (st) => st.arrangeLayout === 'grid'],
+  ['arrangeLayout', 'Layout', 'Auto: side by side and as large as fits. Grid: your size and windows per row. Cascade: stacked diagonally (always overlapping). Roblox windows cannot be smaller than 800 × 600.', ['enum', ['auto', 'grid', 'cascade'], { auto: 'Auto (fit screen)', grid: 'Grid', cascade: 'Cascade' }]],
+  ['arrangeOverflow', 'More than fit', 'Minimize: windows never overlap; as many as fit are tiled, the rest wait minimized (Roblox keeps running). Overlap: every window stays on screen, overlapping evenly so each keeps its corner in view.', ['enum', ['minimize', 'overlap'], { minimize: 'Minimize the rest', overlap: 'Overlap evenly' }], (st) => st.arrangeLayout !== 'cascade'],
+  ['arrangePerRow', 'Windows per row', 'Never more than fit across the screen.', ['int', 1, 12, ''], (st) => st.arrangeLayout === 'grid'],
   ['arrangeWidth', 'Window width', 'At least 800: Roblox ignores anything smaller.', ['int', 160, 1920, 'px'], (st) => st.arrangeLayout !== 'auto'],
   ['arrangeHeight', 'Window height', 'At least 622 (600 plus the title bar).', ['int', 120, 1440, 'px'], (st) => st.arrangeLayout !== 'auto'],
   ['arrangeGap', 'Gap', 'Space between windows.', ['int', 0, 40, 'px']],
@@ -635,7 +765,7 @@ function renderFarmSettings(v) {
   renderFields($('layoutSettings'), LAYOUT_FIELDS, v);
   const st = v.settings;
   $('sumFarm').textContent = `${st.launchDelaySec}s apart · relaunch after ${st.relaunchDelaySec}s`;
-  $('sumLayout').textContent = !st.arrangeWindows ? 'Off' : st.arrangeLayout === 'auto' ? 'Auto · fit screen' : st.arrangeLayout === 'cascade' ? `Cascade · ${Math.max(st.arrangeWidth, ROBLOX_MIN_W)}×${Math.max(st.arrangeHeight, ROBLOX_MIN_H)}` : `${st.arrangePerRow} per row · ${Math.max(st.arrangeWidth, ROBLOX_MIN_W)}×${Math.max(st.arrangeHeight, ROBLOX_MIN_H)}`;
+  $('sumLayout').textContent = !st.arrangeWindows ? 'Off' : st.arrangeLayout === 'auto' ? (st.arrangeOverflow === 'overlap' ? 'Auto · overlap' : 'Auto · no overlap') : st.arrangeLayout === 'cascade' ? `Cascade · ${Math.max(st.arrangeWidth, ROBLOX_MIN_W)}×${Math.max(st.arrangeHeight, ROBLOX_MIN_H)}` : `${st.arrangePerRow} per row · ${Math.max(st.arrangeWidth, ROBLOX_MIN_W)}×${Math.max(st.arrangeHeight, ROBLOX_MIN_H)}`;
   const servers = v.privateServers || [];
   $('sumServers').textContent = st.privateServerMode === 'none' ? (servers.length ? `Off · ${servers.length} saved` : 'Off') : st.privateServerMode === 'shared' ? 'One for all' : 'Per account';
   const place = $('placeInput');
@@ -648,14 +778,17 @@ const ROBLOX_MIN_W = 800, ROBLOX_MIN_H = 622;
 // Mirrors Get-ArkuzoWindowSlots in the engine, on the screen this window is on.
 // A preview of the layout's shape: logical pixels, no DPI scaling, no monitor offset and no learned larger
 // minimum (the engine applies those). contracts/window-layout.json holds both planners to the same results.
-// Every window stays on screen; when they can't all fit side by side they overlap evenly.
+// Every window stays on screen. Each slot is [x, y, w, h], plus a fifth element 1 for a minimized window.
+// Overflow "minimize": as many as fit are tiled without overlap, the rest minimized onto a tile.
+// Overflow "overlap": with more windows than fit, they overlap evenly.
 function layoutSlots(count, st, W, H) {
   const gap = st.arrangeGap, right = st.arrangeCorner.endsWith('right'), bottom = st.arrangeCorner.startsWith('bottom'), out = [];
   if (count <= 0) return out;
-  const minW = ROBLOX_MIN_W, minH = ROBLOX_MIN_H;
+  const minW = ROBLOX_MIN_W, minH = ROBLOX_MIN_H, minimizeRest = (st.arrangeOverflow || 'minimize') === 'minimize';
   const stride = (size, space, n) => n <= 1 ? 0 : Math.floor(Math.max(0, Math.min(size + gap, (space - size) / (n - 1))));
+  const capacity = (w, h) => Math.max(1, Math.floor((W + gap) / (w + gap))) * Math.max(1, Math.floor((H + gap) / (h + gap)));
   const place = (dx, dy, w, h) => out.push([right ? W - dx - w : dx, bottom ? H - dy - h : dy, w, h]);
-  let w, h, cols;
+  let w, h, cols, shown = count;
   if (st.arrangeLayout === 'cascade') {
     w = Math.max(st.arrangeWidth, minW); h = Math.max(st.arrangeHeight, minH);
     const step = 32, fit = Math.max(1, Math.floor(Math.max(0, Math.min(W - w, H - h)) / step) + 1);
@@ -663,9 +796,12 @@ function layoutSlots(count, st, W, H) {
     return out;
   }
   if (st.arrangeLayout === 'auto') {
-    const aspect = minW / minH; let best = 0; cols = 1;
-    for (let c = 1; c <= count; c++) { const r = Math.ceil(count / c), fit = Math.min((W - gap * (c - 1)) / c, ((H - gap * (r - 1)) / r) * aspect); if (fit > best) { best = fit; cols = c; } }
+    const aspect = minW / minH;
+    const fitBest = (n) => { let b = 0, bc = 1; for (let c = 1; c <= n; c++) { const r = Math.ceil(n / c), fit = Math.min((W - gap * (c - 1)) / c, ((H - gap * (r - 1)) / r) * aspect); if (fit > b) { b = fit; bc = c; } } return [b, bc]; };
+    let best; [best, cols] = fitBest(count);
+    if (best < minW && minimizeRest) { shown = Math.min(count, capacity(minW, minH)); [best, cols] = fitBest(shown); }
     if (best >= minW) { w = Math.floor(best); h = Math.floor(w / aspect); }
+    else if (minimizeRest) { w = minW; h = minH; cols = 1; }
     else {
       w = minW; h = minH; let bestScore = -1, bestArea = -1;
       for (let c = 1; c <= count; c++) {
@@ -674,14 +810,19 @@ function layoutSlots(count, st, W, H) {
         if (score > bestScore || (score === bestScore && visX * visY > bestArea)) { bestScore = score; bestArea = visX * visY; cols = c; }
       }
     }
-  } else { w = Math.max(st.arrangeWidth, minW); h = Math.max(st.arrangeHeight, minH); cols = Math.max(1, Math.min(st.arrangePerRow, count)); }
-  const sx = stride(w, W, cols), sy = stride(h, H, Math.ceil(count / cols));
-  for (let i = 0; i < count; i++) place((i % cols) * sx, Math.floor(i / cols) * sy, w, h);
+  } else {
+    w = Math.max(st.arrangeWidth, minW); h = Math.max(st.arrangeHeight, minH); cols = Math.max(1, Math.min(st.arrangePerRow, count));
+    if (minimizeRest) { cols = Math.max(1, Math.min(cols, Math.floor((W + gap) / (w + gap)))); shown = Math.min(count, cols * Math.max(1, Math.floor((H + gap) / (h + gap)))); }
+  }
+  const sx = stride(w, W, cols), sy = stride(h, H, Math.ceil(shown / cols));
+  for (let i = 0; i < shown; i++) place((i % cols) * sx, Math.floor(i / cols) * sy, w, h);
+  for (let i = shown; i < count; i++) out.push([...out[i % shown].slice(0, 4), 1]);
   return out;
 }
 function slotsOverlap(slots) {
-  for (let i = 0; i < slots.length; i++) for (let j = i + 1; j < slots.length; j++) {
-    const [ax, ay, aw, ah] = slots[i], [bx, by, bw, bh] = slots[j];
+  const shown = slots.filter((s) => s[4] !== 1);
+  for (let i = 0; i < shown.length; i++) for (let j = i + 1; j < shown.length; j++) {
+    const [ax, ay, aw, ah] = shown[i], [bx, by, bw, bh] = shown[j];
     if (ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah) return true;
   }
   return false;
@@ -694,15 +835,23 @@ function renderLayoutPreview(v) {
   const shown = accounts.filter((a) => (a.live || {}).processId || (st.autoRelaunchEnabled && a.autoRelaunch && a.cookieStatus === 'alive'));
   const list = shown.length ? shown : [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }];
   const slots = layoutSlots(list.length, st, W, H);
-  const overlap = slotsOverlap(slots);
+  const overlap = slotsOverlap(slots), minimized = slots.filter((sl) => sl[4] === 1).length;
+  let tray = 0;
   box.replaceChildren(...list.map((a, i) => {
-    const [x, y, w, h] = slots[i], live = !!(a.live || {}).processId;
+    const [x, y, w, h, min] = slots[i], live = !!(a.live || {}).processId, label = a.username ? initials(acctName(a)) : '';
+    if (min === 1) {
+      // Minimized: a chip in the preview's taskbar strip.
+      const k = tray++;
+      return el('div', { class: 'win min' + (shown.length && !live ? ' off' : ''), title: (a.username ? acctName(a) + ': ' : '') + 'minimized', style: `left:${Math.min(96, 1 + k * 4.2)}%;bottom:1.5%;width:3.6%;height:5%`, text: '' });
+    }
     return el('div', { class: 'win' + (shown.length && !live ? ' off' : '') + (st.arrangeVisibility === 'background' ? ' bg' : ''), title: a.username ? acctName(a) : '',
-      style: `left:${x / W * 100}%;top:${y / H * 100}%;width:${w / W * 100}%;height:${h / H * 100}%`, text: a.username ? initials(acctName(a)) : '' });
+      style: `left:${x / W * 100}%;top:${y / H * 100}%;width:${w / W * 100}%;height:${h / H * 100}%`, text: label });
   }));
   box.style.opacity = st.arrangeWindows ? '1' : '0.45';
   $('previewCap').textContent = !st.arrangeWindows ? 'Arranging is off'
-    : `${list.length} window${list.length === 1 ? '' : 's'}${shown.length ? '' : ' (example)'}` + (overlap ? ' · overlapping: Roblox windows can\'t be smaller than 800 × 600, so each keeps its corner in view' : '') + (st.arrangeVisibility === 'minimized' ? ' · minimized' : '');
+    : `${list.length} window${list.length === 1 ? '' : 's'}${shown.length ? '' : ' (example)'}`
+      + (minimized ? ` · ${list.length - minimized} tiled, ${minimized} minimized (Roblox windows can't be smaller than 800 × 600; minimized clients keep running)` : '')
+      + (overlap ? ' · overlapping: each keeps its corner in view' : '') + (st.arrangeVisibility === 'minimized' ? ' · all minimized' : '');
 }
 for (const id of ['foldLayout', 'foldFarm', 'foldServers']) {
   const d = $(id), saved = store.get('arkuzo-' + id);
@@ -728,7 +877,7 @@ function renderServers(v) {
     el('div', { class: 'field' }, el('span', { class: 'name', text: 'Mode' }), el('span', { class: 'hint2', text: 'Per account: pick the server in each account\'s editor.' }), el('div', { class: 'ctl' }, mode)),
     v.settings.privateServerMode === 'shared' ? el('div', { class: 'field' }, el('span', { class: 'name', text: 'Server' }), el('span', { class: 'hint2', text: 'Every account joins this one.' }), el('div', { class: 'ctl' }, shared)) : '',
     ...(servers.length ? servers.map((sv) => el('div', { class: 'srv-row' }, el('div', { style: 'min-width:0' }, el('div', { class: 'nm', style: 'font-weight:650', text: sv.name }), el('div', { class: 'sb', style: 'color:var(--muted);font-size:11.5px', text: `Place ${sv.placeId} · ${used(sv.id)} account${used(sv.id) === 1 ? '' : 's'}` })),
-      el('span'), el('button', { class: 'btn ghost sm icon', title: 'Remove', onclick: () => { if (confirm(`Remove ${sv.name}?`)) vaultAct('/api/vault/servers/remove', { id: sv.id }, `${sv.name} removed`, 'neutral'); } }, icon('trash'))))
+      el('span'), el('button', { class: 'btn ghost sm icon', title: 'Remove (Undo for 8 s)', onclick: () => deferred(`Removing ${sv.name}`, () => vaultAct('/api/vault/servers/remove', { id: sv.id }, `${sv.name} removed`, 'neutral')) }, icon('trash'))))
       : [el('div', { class: 'sb', style: 'color:var(--muted);font-size:12px;padding:8px 2px', text: 'No private servers yet. The link code is stored encrypted like the cookies.' })]),
     el('form', { class: 'srv-add', onsubmit: async (e) => { e.preventDefault(); add.disabled = true; const r = await vaultAct('/api/vault/servers/add', { name: name.value, link: link.value }, 'Private server added'); add.disabled = false; if (r) { name.value = ''; link.value = ''; } } }, name, link, add));
 }
@@ -747,8 +896,7 @@ $('btnFarmStart').onclick = () => vaultAct('/api/farm/start', {}, 'Farm started:
 $('btnFarmStop').onclick = () => vaultAct('/api/farm/stop', {}, 'Farm stopped: every client closed, nothing is relaunched', 'warning');
 $('btnCloseAll').onclick = () => {
   const farm = !!(S.vault && S.vault.settings.farmRunning);
-  if (confirm(farm ? 'Close every client? The farm keeps running and launches them again.' : 'Close every client?'))
-    vaultAct('/api/farm/close-all', {}, farm ? 'Closing every client; the farm launches them again' : 'Closing every client', 'warning');
+  vaultAct('/api/farm/close-all', {}, farm ? 'Closing every client; the farm launches them again' : 'Closing every client', 'warning');
 };
 
 // ---------- Roblox builds (docs/roblox-versions.md) ----------
@@ -788,10 +936,11 @@ function renderRoblox() {
   const pinned = sel.version && sel.version !== 'auto' ? sel.version : null;
   const complete = (v.builds || []).filter((b) => b.complete), has = (ver) => complete.some((b) => b.version === ver);
   const kept = (ver) => complete.some((b) => b.managed && b.version === ver); // In Arkuzo's folder, where Roblox's updater never deletes it.
-  $('rbxTitle').textContent = pinned ? `Pinned: ${pinned}` : 'Auto: newest installed build';
+  const follow = sel.follow || '', fs = v.follow || {};
+  $('rbxTitle').textContent = follow === 'latest' ? `Newest: ${pinned || 'checking…'}` : follow ? `${fs.label || 'Exploit'}: ${pinned || 'checking…'}` : pinned ? `Pinned: ${pinned}` : 'Auto: newest installed build';
   $('rbxTile').style.setProperty('--c', pinned ? (pinned === current ? '#34d399' : '#fbbf24') : '#38bdf8');
   const last = eng.selectedVersion ? ` Last launch choice: ${eng.selectedVersion}${eng.fallback ? ' (fallback)' : ''}.` : '';
-  $('rbxSub').textContent = (pinned ? (has(pinned) ? 'Clients Arkuzo launches start this build, directly.' : 'This build is not installed: launches wait until it is.')
+  $('rbxSub').textContent = (follow ? (follow === 'latest' ? 'Following Roblox\'s newest build: new builds are installed and used automatically. ' : `Following the build ${fs.label || 'the exploit'} supports: installed and used automatically. `) : '') + (pinned ? (has(pinned) ? 'Clients Arkuzo launches start this build.' : 'This build is not installed: launches wait until it is.')
     : 'Clients start the build running clients use, otherwise the newest complete installed build.') + last;
   const windows = (cat.exploits || []).filter((x) => x.platform === 'Windows' && x.usable), updated = windows.filter((x) => x.updated).length;
   $('rbxStats').replaceChildren(...[['Roblox now', current ? shortBuild(current).slice(0, 8) : '–', current], ['Installed', String(complete.length), ''], ['Exploits updated', windows.length ? `${updated}/${windows.length}` : '–', '']]
@@ -802,7 +951,7 @@ function renderRoblox() {
   if (eng.problem) notes.push(eng.problem);
   const elsewhere = pinned ? (v.builds || []).filter((b) => b.version !== pinned).reduce((n, b) => n + (b.clients || 0), 0) : 0;
   if (elsewhere) notes.push(`${elsewhere} running client${elsewhere === 1 ? ' still uses' : 's still use'} another build. Each switches to the pinned build when it is launched again; Close all on the Accounts page switches them now.`);
-  if (pinned && sel.launchMethod === 'protocol') notes.push('Launch method is Protocol: a pinned build still launches directly, because Roblox\'s launcher would update Roblox and ignore the pin.');
+  if (pinned && sel.launchMethod === 'protocol' && !((v.protocol || {}).enabled)) notes.push('Launch method is Protocol: the chosen build still launches directly, because roblox-player: links start another build. Turn on "Roblox links use this build" to launch it by protocol.');
   if (pinned && v.provider && v.provider !== 'arkuzo') notes.push('Volt launches clients now: the pin applies when Arkuzo launches them (Accounts, Farm settings, Who launches clients).');
   $('rbxNotice').hidden = !notes.length;
   $('rbxNotice').replaceChildren(...notes.map((n, i) => el('div', { text: n, style: i ? 'margin-top:4px' : null })));
@@ -841,39 +990,104 @@ function renderRobloxBuilds(v, current, pinned) {
     if (b.clients) tags.append(pill('good', `${b.clients} client${b.clients === 1 ? '' : 's'}`, true));
     const facts = [b.build, b.bytes != null ? fmtMB(b.bytes / 1048576) : null, b.managed ? null : 'not managed by Arkuzo'].filter(Boolean).join(' · ');
     const acts = el('div', { class: 'acts' });
-    if (b.complete && b.version !== pinned) acts.append(el('button', { class: 'btn sm', title: b.managed ? 'The saver launches this build from now on' : 'Roblox deletes its own build folders when it updates: install the build into Arkuzo\'s folder to keep it', onclick: () => rbxAct('/api/roblox/select', { version: b.version }, `Pinned ${b.version}`) }, icon('check'), 'Pin'));
+    if (b.complete && b.version !== pinned) acts.append(el('button', { class: 'btn sm', title: b.managed ? 'The saver launches this build from now on' : 'Roblox deletes its own build folders when it updates: install the build into Arkuzo\'s folder to keep it', onclick: () => rbxMode('pinned', b.version) }, icon('check'), 'Use'));
     if (b.managed) acts.append(el('button', { class: 'btn ghost sm icon', 'aria-label': 'Remove ' + b.version, disabled: !b.removable,
       title: b.removable ? 'Remove this build from Arkuzo\'s folder' : b.version === pinned ? 'Pinned: choose Auto or another build first' : 'A running client uses this build',
-      onclick: () => { if (confirm(`Remove ${b.version} from Arkuzo's folder? Roblox's own installs are never touched.`)) rbxAct('/api/roblox/remove', { version: b.version }, `${b.version} removed`, 'neutral'); } }, icon('trash')));
+      onclick: () => deferred(`Removing ${b.version} from Arkuzo's folder`, () => rbxAct('/api/roblox/remove', { version: b.version }, `${b.version} removed`, 'neutral')) }, icon('trash')));
     return el('div', { class: 'mrow brow' }, el('div', { style: 'min-width:0' }, el('div', { class: 'nm mono', text: b.version, title: maskHome(b.path) }), el('div', { class: 'sb', text: facts }), tags), acts);
   }));
 }
+// One switch for the build: Auto, Newest (follow Roblox), an exploit (follow its build) or a pinned build.
+// "Switch clients" decides whether a change restarts the farm's clients now (Close all) or as they relaunch.
+async function rbxMode(mode, version) {
+  const v = S.rbx || {}, sel = v.selection || {}, now = !!sel.followRestart;
+  const label = mode === 'auto' ? 'Auto: the newest installed build' : mode === 'latest' ? 'Following Roblox\'s newest build' : mode === 'pinned' ? `Using ${version}` : 'Following ' + ((((v.catalog || {}).exploits || []).find((x) => 'exploit:' + x.id === mode) || {}).title || 'the exploit') + '\'s build';
+  try {
+    const r = (await post('/api/roblox/mode', { mode, version, apply: now ? 'now' : 'relaunch' })).result;
+    const prev = r.previous || {};
+    const undo = () => rbxMode(prev.follow ? prev.follow : prev.version === 'auto' ? 'auto' : 'pinned', prev.follow ? undefined : prev.version);
+    toast(label + (r.closed ? ` · restarting ${r.closed} client${r.closed === 1 ? '' : 's'}` : now ? '' : ' · clients switch as they relaunch'), 'good', { action: { label: 'Undo', run: undo } });
+  } catch (e) { toast(e.message, 'critical'); }
+  await loadRoblox('cached');
+}
+const FOLLOW_STATE = { checking: ['info', 'Checking…'], installing: ['info', 'Installing'], pinned: ['good', 'Up to date'], waiting: ['warning', 'Waiting'], error: ['critical', 'Problem'], off: ['neutral', 'Off'] };
 function renderRobloxSettings(v, current, complete, running, kept) {
   const box = $('rbxSettings');
-  if (box.contains(document.activeElement)) return; // Never redraw under the cursor.
-  const sel = v.selection || {}, weao = (v.catalog || {}).weao || {};
+  if (box.contains(document.activeElement) && document.activeElement.tagName !== 'BUTTON') return; // Never redraw under the cursor.
+  const sel = v.selection || {}, weao = (v.catalog || {}).weao || {}, follow = sel.follow || '', fs = v.follow || {}, proto = v.protocol || {};
+  if (follow.startsWith('exploit:')) S.rbxExploitOpen = false;
+  // "Exploit" only opens the dropdown (page-local); nothing changes until an exploit is chosen in it.
+  const mode = follow === 'latest' ? 'latest' : follow.startsWith('exploit:') || S.rbxExploitOpen ? 'exploit' : sel.version && sel.version !== 'auto' ? 'pinned' : 'auto';
+  const exploits = ((v.catalog || {}).exploits || []).filter((x) => x.platform === 'Windows');
   const versions = [...new Set(complete.map((b) => b.version))];
-  const pick = el('select', {}, el('option', { value: 'auto', text: 'Auto (newest installed)' }), ...versions.map((ver) => el('option', { value: ver, text: ver + (ver === current ? ' · current' : '') })));
-  if (sel.version && sel.version !== 'auto' && !versions.includes(sel.version)) pick.append(el('option', { value: sel.version, text: sel.version + ' · missing' }));
-  pick.value = sel.version || 'auto';
-  pick.addEventListener('change', () => rbxAct('/api/roblox/select', { version: pick.value }, pick.value === 'auto' ? 'Auto: the newest installed build' : `Pinned ${pick.value}`));
+  const row = (name, hint, ctl) => el('div', { class: 'field' }, el('span', { class: 'name', text: name }), el('span', { class: 'hint2', text: hint }), el('div', { class: 'ctl' }, ctl));
+  const wide = (name, hint, ...kids) => el('div', { class: 'field', style: 'grid-template-columns:1fr' }, el('span', { class: 'name', text: name }), el('span', { class: 'hint2', text: hint }), ...kids);
+  const seg = (items, value, onPick, label) => el('div', { class: 'seg well', role: 'group', 'aria-label': label },
+    ...items.map(([k, t, title]) => el('button', { type: 'button', 'aria-pressed': String(k === value), title: title || null, onclick: () => { if (k !== value) onPick(k); } }, t)));
+  // Mode: what decides the build.
+  const modeSeg = seg([['auto', 'Auto', 'The build running clients use, otherwise the newest installed build'], ['latest', 'Newest', 'Follow Roblox\'s current public build: installed and used automatically'],
+    ['exploit', 'Exploit', 'Follow the build your exploit supports (weao.gg): installed and used automatically'], ['pinned', 'Pinned', 'One build you choose']], mode, (k) => {
+    S.rbxExploitOpen = k === 'exploit';
+    if (k === 'auto' || k === 'latest') return rbxMode(k);
+    if (k === 'pinned') { const first = sel.version && sel.version !== 'auto' && versions.includes(sel.version) ? sel.version : versions.find((x) => x === current) || versions[0]; if (first) rbxMode('pinned', first); else toast('Install a build first', 'warning'); return; }
+    if (!exploits.length) toast('weao.gg\'s exploit list is not loaded: press Refresh', 'warning');
+    S.rbxSig = null; renderRoblox(); // Shows the dropdown; choosing an exploit there switches.
+  }, 'Which build the saver launches');
+  const kids = [row('Build', 'Auto · Newest (Roblox\'s current build) · Exploit (the build it supports) · Pinned.', modeSeg)];
+  // Exploit dropdown: weao.gg rows, plain text only.
+  if (mode === 'exploit') {
+    const chosen = follow.slice(8), list = exploits.slice().sort((a, b) => (Number(b.usable) - Number(a.usable)) || a.title.localeCompare(b.title));
+    const pick = el('select', { class: 'rbx-wide', 'aria-label': 'Exploit to follow' }, ...list.map((x) => el('option', { value: x.id, disabled: !x.usable || null,
+      text: `${x.title}${x.version ? ' ' + x.version : ''} · ${x.usable ? (x.updated ? 'updated' : 'not updated') : (x.reason || 'not usable')}${x.detected ? ' · detected' : ''}${x.robloxVersion ? ' · ' + shortBuild(x.robloxVersion).slice(0, 8) : ''}` })));
+    if (!chosen) pick.prepend(el('option', { value: '', text: 'Choose your exploit…' }));
+    else if (!list.some((x) => x.id === chosen)) pick.prepend(el('option', { value: chosen, text: 'No longer listed on weao.gg' }));
+    pick.value = chosen;
+    pick.addEventListener('change', () => { if (pick.value) rbxMode('exploit:' + pick.value); });
+    const x = list.find((e) => e.id === chosen);
+    const facts = x ? el('div', { class: 'tags' }, pill(x.updated ? 'good' : 'warning', x.updated ? 'Updated for Roblox\'s current build' : 'Not updated yet', true),
+      x.detected ? pill('serious', 'Detected', true) : pill('neutral', 'Not marked detected', true),
+      x.robloxVersion ? pill(x.robloxVersion === current ? 'good' : 'warning', 'Supports ' + shortBuild(x.robloxVersion).slice(0, 8) + (x.robloxVersion === current ? ' (current)' : ' (older)'), true) : null,
+      x.robloxVersion ? pill(versions.includes(x.robloxVersion) ? 'good' : 'info', versions.includes(x.robloxVersion) ? 'Installed' : 'Will be installed', true) : null) : null;
+    kids.push(wide('Exploit', 'The saver uses the Roblox build this exploit supports. When the exploit moves to a new build, the build is installed from Roblox\'s CDN and used (checked every 10 minutes). Arkuzo never downloads exploits.', pick, facts));
+  }
+  if (mode === 'pinned') {
+    const pins = versions.slice().sort((a, b) => (Number(b === current) - Number(a === current)) || a.localeCompare(b));
+    if (sel.version && sel.version !== 'auto' && !pins.includes(sel.version)) pins.unshift(sel.version);
+    kids.push(wide('Pinned build', 'One click switches. A build that is not Roblox\'s current one can be refused by Roblox at any time.',
+      el('div', { class: 'rbx-pins', role: 'radiogroup', 'aria-label': 'Pinned build' }, ...pins.map((ver) => {
+        const on = ver === sel.version, b = complete.find((x) => x.version === ver);
+        return el('button', { type: 'button', class: 'rbx-pin' + (on ? ' on' : ''), role: 'radio', 'aria-checked': String(on), title: ver, onclick: () => { if (!on) rbxMode('pinned', ver); } },
+          el('b', { class: 'mono', text: shortBuild(ver).slice(0, 8) }), el('span', { text: !b ? 'missing' : ver === current ? 'current' : b.managed ? 'Arkuzo' : b.source }));
+      }))));
+  }
+  if (follow) {
+    const [lvl, word] = FOLLOW_STATE[fs.state] || FOLLOW_STATE.checking;
+    const what = fs.wanted ? `${fs.label || 'Source'} wants ${fs.wanted}` : (fs.reason || fs.message || 'Asking Roblox and weao.gg…');
+    kids.push(el('div', { class: 'rbx-follow' }, pill(lvl, word, true), el('span', { class: 't2', text: what + (fs.checkedAt ? ' · checked ' + fmtClock(fs.checkedAt) : '') + (fs.state === 'error' && fs.message ? ' · ' + fs.message : '') })));
+  }
+  const apply = seg([['relaunch', 'As they relaunch', 'Running clients keep their build until they are launched again'], ['now', 'Right away', 'Closes the farm\'s clients (like Close all); the farm launches them again on the new build']],
+    sel.followRestart ? 'now' : 'relaunch', (k) => rbxAct('/api/vault/settings', { changes: { robloxFollowRestart: k === 'now' } }, k === 'now' ? 'Build changes restart the clients right away' : 'Clients switch builds as they relaunch'), 'When clients switch');
+  kids.push(row('Switch clients', 'When the build changes (by hand or by following).', apply));
+  // roblox-player: protocol.
+  const protoSw = el('input', { type: 'checkbox' }); protoSw.checked = !!proto.enabled;
+  protoSw.addEventListener('change', () => rbxAct('/api/roblox/protocol', { enabled: protoSw.checked }, protoSw.checked ? 'Roblox links now start the selected build' : 'Roblox links start Roblox\'s own build again'));
+  const where = proto.exe ? maskHome(proto.exe).replace(/\\RobloxPlayerBeta\.exe$/i, '') : 'not set';
+  kids.push(row('Roblox links use this build', `roblox-player: links (roblox.com, the Protocol launch method) start the selected build. The previous setting is saved and put back when this is off or Auto is chosen. Now: ${where}${proto.managed ? ' (Arkuzo)' : ''}.${proto.error ? ' ' + proto.error : ''}`,
+    el('label', { class: 'sw' }, protoSw, el('span', { class: 'track' }))));
   const fallback = el('input', { type: 'checkbox' }); fallback.checked = !!sel.fallback;
   fallback.addEventListener('change', () => rbxAct('/api/vault/settings', { changes: { robloxVersionFallback: fallback.checked } }, fallback.checked ? 'A missing pin falls back to the newest build' : 'A missing pin stops launches'));
+  kids.push(row('Fall back if missing', 'Off: launches wait while the chosen build is missing. On: the newest installed build starts instead.', el('label', { class: 'sw' }, fallback, el('span', { class: 'track' }))));
   const dir = el('input', { class: 'inp rbx-wide', value: sel.dir || '', placeholder: maskHome(v.defaultRoot), spellcheck: 'false', 'aria-label': 'Arkuzo\'s Roblox folder' });
   dir.addEventListener('change', () => rbxAct('/api/vault/settings', { changes: { robloxVersionsDir: dir.value.trim() } }, 'Folder saved'));
   const custom = el('input', { class: 'inp mono rbx-wide', placeholder: 'version-0123456789abcdef', spellcheck: 'false', maxlength: 24, 'aria-label': 'Roblox build to install' });
   const known = [['Current', current], ['Previous', (weao.past || {}).version], ['Upcoming, may never be released', (weao.future || {}).version]].filter(([, ver]) => ver && RBX_VERSION.test(ver));
-  const row = (name, hint, ctl) => el('div', { class: 'field' }, el('span', { class: 'name', text: name }), el('span', { class: 'hint2', text: hint }), el('div', { class: 'ctl' }, ctl));
-  const wide = (name, hint, ...kids) => el('div', { class: 'field', style: 'grid-template-columns:1fr' }, el('span', { class: 'name', text: name }), el('span', { class: 'hint2', text: hint }), ...kids);
-  box.replaceChildren(
-    row('Roblox build', 'A pinned build always launches directly: Roblox\'s launcher would update it.', pick),
-    row('Fall back if missing', 'Off: launches wait while the pinned build is missing. On: the newest installed build starts instead.', el('label', { class: 'sw' }, fallback, el('span', { class: 'track' }))),
-    wide('Install a build', 'Any Windows build Roblox still hosts, e.g. one an exploit needs. Downloaded from Roblox\'s CDN and checked against Roblox\'s checksums.',
+  kids.push(wide('Install a build', 'Any Windows build Roblox still hosts. Downloaded from Roblox\'s CDN and checked against Roblox\'s checksums.',
       el('form', { class: 'rbx-custom', onsubmit: (e) => { e.preventDefault(); const val = custom.value.trim().toLowerCase(); rbxInstall(val.startsWith('version-') ? val : 'version-' + val); } },
         custom, el('button', { class: 'btn accent sm', type: 'submit', disabled: running }, icon('plus'), 'Install')),
       known.length ? el('div', { class: 'tags' }, ...known.map(([label, ver]) => el('button', { class: 'btn ghost sm', type: 'button', title: ver, disabled: running || kept(ver), onclick: () => rbxInstall(ver) },
-        icon('plus'), `${label} · ${shortBuild(ver).slice(0, 8)}`))) : null),
-    wide('Arkuzo\'s Roblox folder', `Builds go to <folder>\\Versions. Empty: ${maskHome(v.defaultRoot)}. Never inside Roblox's own folders.`, dir));
+        icon('plus'), `${label} · ${shortBuild(ver).slice(0, 8)}`))) : null));
+  kids.push(wide('Arkuzo\'s Roblox folder', `Builds go to <folder>\\Versions. Empty: ${maskHome(v.defaultRoot)}. Never inside Roblox's own folders.`, dir));
+  box.replaceChildren(...kids);
 }
 function renderRobloxExploits(v, current, has) {
   const cat = v.catalog || {}, all = cat.exploits || [], past = ((cat.weao || {}).past || {}).version;
@@ -921,7 +1135,7 @@ function renderRobloxPick() {
   if (plan.version) {
     rows.push(el('div', { class: 'bar' },
       kept ? null : el('button', { class: installed ? 'btn sm' : 'btn accent sm', disabled: (v.install || {}).state === 'running', onclick: () => rbxInstall(plan.version) }, icon('plus'), installed ? 'Install into Arkuzo\'s folder' : 'Install this build'),
-      installed && !pinnedNow ? el('button', { class: 'btn accent sm', onclick: () => rbxAct('/api/roblox/select', { version: plan.version }, `Pinned ${plan.version}`) }, icon('check'), 'Launch this build') : null,
+      installed && !pinnedNow ? el('button', { class: 'btn accent sm', onclick: () => rbxMode('pinned', plan.version) }, icon('check'), 'Launch this build') : null,
       el('span', { class: 't2', text: installed ? (pinnedNow ? 'Installed and pinned: the saver launches it.' : 'Installed. Pin it so the saver launches it.') : 'Then pin it so the saver launches it.' })));
   }
   box.replaceChildren(...rows);
@@ -1022,7 +1236,10 @@ async function act(path, done, body, level) {
   catch (e) { toast(e.message, 'critical'); }
 }
 $('btnStart').onclick = () => act('/api/saver/start', 'Saver starting…');
-$('btnStop').onclick = () => { if (confirm('Stop the saver? Clients keep running but are no longer managed or recovered.')) act('/api/saver/stop', 'Saver stopped', undefined, 'warning'); };
+$('btnStop').onclick = async () => {
+  try { await post('/api/saver/stop', {}); setTimeout(poll, 300); toast('Saver stopped: clients keep running but are not managed or recovered', 'warning', { action: { label: 'Start again', run: () => act('/api/saver/start', 'Saver starting…') } }); }
+  catch (e) { toast(e.message, 'critical'); }
+};
 $('btnRestart').onclick = () => act('/api/saver/restart', 'Saver restarting…');
 $('btnTrim').onclick = () => act('/api/trim-now', 'Trim requested for every eligible client', undefined, 'good');
 $('autopilot').onchange = (e) => act('/api/prefs', e.target.checked ? 'Autopilot on' : 'Autopilot off', { autopilot: e.target.checked }, e.target.checked ? 'good' : 'warning');
@@ -1089,7 +1306,7 @@ function editedValue(section, key) { const k = section + '.' + key; return k in 
 async function loadSettings() {
   try {
     const r = await fetch('/api/config', { cache: 'no-store' }).then((x) => x.json());
-    S.config = r.config; S.presets = r.presets; S.schema = r.schema; S.restartKeys = r.restartKeys; S.edits = {};
+    S.config = r.config; S.presets = r.presets; S.schema = r.schema; S.restartKeys = r.restartKeys; S.edits = S.edits || {}; // Unsaved edits survive leaving the page.
   } catch (e) { toast('Could not load settings', 'critical'); return; }
   if (!S.config) { toast('data/config.json is missing or invalid', 'critical'); return; }
   buildForm(); updateSaveBar();
@@ -1171,13 +1388,19 @@ function renderRemote(st) {
   $('remoteState').textContent = parts.join(' · ');
   $('btnLeaveRdp').disabled = !(r.protocol === 'rdp' && r.sessionState === 'active');
 }
-$('btnLeaveRdp').onclick = () => {
-  if (!confirm('Move this Remote Desktop session to the PC’s own screen? The Remote Desktop window closes and the PC stays signed in and unlocked on its monitor until you lock it there.')) return;
-  act('/api/remote/leave', 'Session moved to the console', {}, 'good');
-};
+// Two clicks instead of a popup: the first arms the button for 4 s and says what will happen.
+function armed(button, text, run) {
+  if (button.dataset.armed === '1') { delete button.dataset.armed; button.classList.remove('danger'); run(); return; }
+  button.dataset.armed = '1'; button.classList.add('danger');
+  toast(text, 'warning', { ms: 4000 });
+  setTimeout(() => { delete button.dataset.armed; button.classList.remove('danger'); }, 4000);
+}
+$('btnLeaveRdp').onclick = () => armed($('btnLeaveRdp'), 'Click again to move this session to the PC’s own screen: the Remote Desktop window closes and the PC stays signed in and unlocked on its monitor.',
+  () => act('/api/remote/leave', 'Session moved to the console', {}, 'good'));
 const goodbye = (text) => document.body.replaceChildren(el('div', { style: 'height:100vh;display:grid;place-items:center;color:#7e879a;font-weight:600', text }));
 $('btnQuit').onclick = async () => { await post('/api/quit', {}).catch(() => {}); goodbye('Control Center closed. The saver keeps running; you can close this window.'); };
-$('btnQuitAll').onclick = async () => { if (!confirm('Stop the saver and quit? Clients keep running but are no longer managed.')) return; await post('/api/quit', { stopSaver: true }).catch(() => {}); goodbye('Saver stopped and Control Center closed. You can close this window.'); };
+$('btnQuitAll').onclick = () => armed($('btnQuitAll'), 'Click again to stop the saver and quit. Clients keep running but are no longer managed.',
+  async () => { await post('/api/quit', { stopSaver: true }).catch(() => {}); goodbye('Saver stopped and Control Center closed. You can close this window.'); });
 
 showPage(PAGES[params.get('page')] ? params.get('page') : PAGES[store.get('arkuzo-page')] ? store.get('arkuzo-page') : 'overview');
 poll();

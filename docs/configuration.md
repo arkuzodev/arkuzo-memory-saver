@@ -128,9 +128,13 @@ Arkuzo's account list, farm settings (place, launch spacing, relaunch delay, lau
 
 | Setting (`accounts.json` → `settings`) | Values | Meaning |
 | :--- | :--- | :--- |
-| `robloxVersion` | `auto` (default) or `version-<16 hex>` | `auto`: the build running clients use, otherwise the newest complete installed build. A version: exactly that build, always launched directly (never through Roblox's launcher). |
+| `robloxVersion` | `auto` (default) or `version-<16 hex>` | `auto`: the build running clients use, otherwise the newest complete installed build. A version: exactly that build, launched directly unless `robloxProtocol` points `roblox-player:` at it (never through Roblox's own launcher). |
+| `robloxVersionFollow` | empty (default), `latest`, `exploit:<weao.gg id>` | Follow Roblox's newest build or the build an exploit supports: the Control Center installs it into Arkuzo's folder and sets `robloxVersion` to it (checked every 10 minutes). A build chosen by hand clears it. |
+| `robloxFollowRestart` | `false` (default), `true` | `true`: when the build changes, the farm's clients are closed (like Close all) so they relaunch on it right away. `false`: they switch as they relaunch. |
+| `robloxProtocol` | `false` (default), `true` | `true`: `roblox-player:` and `roblox:` (HKCU only) start the pinned build; the previous keys are saved to `data/roblox-protocol-backup.json` and restored when this is off or the build is Auto. |
 | `robloxVersionFallback` | `false` (default), `true` | When the pinned build is missing: `false` holds launches (and says why), `true` launches the Auto choice instead. |
-| `robloxVersionsDir` | empty (default) or an absolute folder | Where the Roblox tab installs builds (`<folder>\Versions`); empty is `%LOCALAPPDATA%\Arkuzo\Roblox`. Never inside Roblox's own install folders. | With `arkuzo`, the `recovery` section's journal and readiness settings still apply. Its Volt-specific waits (`restore_wait_sec`, `relaunch_delay_sec`, `retry_base_sec`) are replaced by the account list's relaunch delay, launch spacing and launch timeout.
+| `robloxVersionsDir` | empty (default) or an absolute folder | Where the Roblox tab installs builds (`<folder>\Versions`); empty is `%LOCALAPPDATA%\Arkuzo\Roblox`. Never inside Roblox's own install folders. |
+| `arrangeOverflow` | `minimize` (default), `overlap` | Window layout with more clients than fit side by side: `minimize` tiles as many as fit without overlap and minimizes the rest; `overlap` keeps all on screen, overlapping evenly ([accounts](accounts.md#window-layout)). | With `arkuzo`, the `recovery` section's journal and readiness settings still apply. Its Volt-specific waits (`restore_wait_sec`, `relaunch_delay_sec`, `retry_base_sec`) are replaced by the account list's relaunch delay, launch spacing and launch timeout.
 
 **Built-in limits with `arkuzo`** (the goal is the most time in game per account: relaunches never back off):
 

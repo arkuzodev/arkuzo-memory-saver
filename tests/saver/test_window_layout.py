@@ -38,9 +38,24 @@ class WindowLayoutVectorTests(unittest.TestCase):
         self.assertGreaterEqual(len(cases), 10)
         for case in cases:
             self.assertEqual(len(case['expected']), case['count'], case['name'])
-            for x, y, w, h in case['expected']:
-                self.assertTrue(0 <= x and 0 <= y and x + w <= case['screen'][0] and y + h <= case['screen'][1], case['name'] + ': every window stays on screen')
+            fits = case['screen'][0] >= 800 and case['screen'][1] >= 622
+            for slot in case['expected']:
+                self.assertIn(len(slot), (4, 5), case['name'])
+                if len(slot) == 5:
+                    self.assertEqual(slot[4], 1, case['name'] + ': a fifth element marks a minimized window')
+                    self.assertIn(slot[:4], [s for s in case['expected'] if len(s) == 4], case['name'] + ': a minimized window waits on a tile')
+                x, y, w, h = slot[:4]
+                if fits:
+                    self.assertTrue(0 <= x and 0 <= y and x + w <= case['screen'][0] and y + h <= case['screen'][1], case['name'] + ': every window stays on screen')
                 self.assertTrue(w >= 800 and h >= 622, case['name'] + ': never below the Roblox minimum')
+            if case['settings'].get('arrangeOverflow') == 'minimize' and case['settings']['arrangeLayout'] != 'cascade':
+                self.assertFalse(case['overlap'], case['name'] + ': minimize overflow never overlaps windows')
+
+    def test_auto_default_tiles_without_overlap(self):
+        cases = {c['name']: c for c in json.loads(VECTORS.read_text(encoding='utf-8'))['cases']}
+        farm = cases['auto, eleven on 1920 x 1032 (11 Nov farm), rest minimized']['expected']
+        self.assertEqual([s for s in farm if len(s) == 4], [[0, 0, 958, 744], [962, 0, 958, 744]])
+        self.assertEqual(sum(1 for s in farm if len(s) == 5), 9)
 
     def test_page_preview_matches_the_vectors(self):
         node = shutil.which('node')

@@ -60,7 +60,7 @@ Everything lives in the data directory (`<root>\data`). Three files carry a sche
 | `config-backups\config-*.json` | Control Center before each config write | People | Last 15 kept. |
 | `avatars\<userId>.png` | Control Center | Control Center | 24 h cache. |
 | `browser-login\<random>\` | Control Center (throwaway Edge profile) | Edge | Deleted after sign-in and at every start. |
-| `%LOCALAPPDATA%\Arkuzo\Roblox\Versionsersion-<hash>\` (vault `robloxVersionsDir` moves it) | Control Center's Roblox tab (install worker; staging in `..\.staging`, renamed into place when complete) | Engine (`Get-ArkuzoRobloxInstalls`, graphics flags, crash-handler roots), Control Center | Outside `data`. See [roblox-versions.md](roblox-versions.md). |
+| `%LOCALAPPDATA%\Arkuzo\Roblox\Versions\version-<hash>\` (vault `robloxVersionsDir` moves it) | Control Center's Roblox tab (install worker; staging in `..\.staging`, renamed into place when complete) | Engine (`Get-ArkuzoRobloxInstalls`, graphics flags, crash-handler roots), Control Center | Outside `data`. See [roblox-versions.md](roblox-versions.md). |
 
 ### 2.1 `config.json`
 
@@ -77,16 +77,20 @@ The engine's built-in fallbacks differ from the shipped defaults (for example `h
   settings: { defaultPlaceId, launchDelaySec(5-120, 12), relaunchDelaySec(0-600, 8), launchTimeoutSec(30-600, 120),
               autoRelaunchEnabled, farmRunning, privateServerMode(none|shared|assigned), sharedPrivateServerId,
               multiInstance, launchMethod(direct|protocol), cookieCheckMinutes(0-1440, 60),
-              arrangeWindows, arrangeLayout(auto|grid|cascade), arrangePerRow, arrangeWidth, arrangeHeight, arrangeGap,
+              arrangeWindows, arrangeLayout(auto|grid|cascade), arrangeOverflow(minimize|overlap), arrangePerRow, arrangeWidth, arrangeHeight, arrangeGap,
               arrangeCorner, arrangeMonitor, arrangeOrder(fixed|name|launch), arrangeMode(keep|once),
               arrangeVisibility(normal|background|minimized), arrangeRequestedAtMs,
-              robloxVersion(auto|version-<16 hex>), robloxVersionFallback, robloxVersionsDir },
+              robloxVersion(auto|version-<16 hex>), robloxVersionFallback, robloxVersionsDir,
+              robloxVersionFollow(''|latest|exploit:<weao id>), robloxFollowRestart, robloxProtocol },
   accounts: [ { id (GUID), userId (int), username, displayName, alias, group, notes,
                 cookie ("dpapi:..."), cookieStatus (alive|dead|moderated|unknown), browserTrackerId (10-16 digits, unique),
                 autoRelaunch, privateServerId, placeId, lastError?,
                 lastCheckAtMs, lastLaunchAtMs, createdAtMs, updatedAtMs, launchRequestedAtMs, closeRequestedAtMs } ],
   privateServers: [ { id, name, placeId, linkCode ("dpapi:..."), createdAtMs } ],
-  unreadable: [ rows that failed validation, kept verbatim ] }
+  unreadable: [ rows that failed validation, kept verbatim ],
+  trash: [ { batch (16 hex), deletedAtMs, account: { the full row, cookie still encrypted } } ] }
+                deleted accounts held UNDO_SEC (10 s) for Undo, then purged (timer, next delete, next start);
+                the engine reads `accounts` only and keeps unknown keys when it writes
 ```
 
 - The Control Center normalises on every write (`normalize_vault`): unknown fields on an account are dropped, malformed rows move to `unreadable`. The engine reads with `ConvertFrom-Json` and writes the whole document back with `ConvertTo-Json -Depth 12`. A field added on one side must be added to `normalize_vault` or it disappears on the next Control Center write.
@@ -148,11 +152,12 @@ JSON lines, one file per session part, rotated at `-MaxLogMB` (10 MB) keeping fi
 | POST `/api/accounts/recovery` | yes | `{accountId, enabled}` → edits `recovery.excluded_account_ids`. |
 | POST `/api/prefs` | yes | `autopilot`, `startSaverOnLaunch`, `startWithWindows` (HKCU Run key). |
 | POST `/api/vault/add`, `/login`, `/login/cancel`, `/check`, `/update`, `/remove`, `/launch`, `/close`, `/settings`, `/arrange`, `/servers/add`, `/servers/remove` | yes | Vault actions (`vault_action`). |
+| POST `/api/vault/bulk` | yes | `{action, ids, value?, batch?}`: `delete` (held for Undo, answers `{batch, count, undoSec}`), `restore` (`batch`), `group` (`value` text, empty = remove), `relaunch` (`value` bool), `launch` (signed-out and moderated accounts skipped), `close` (exact clients only), `check`. Every id must exist or nothing changes; one locked, atomic vault write (`bulk_accounts`). |
 | POST `/api/farm/start`, `/stop`, `/close-all` | yes | `farmRunning` and close stamps; `stop` and `close-all` also close mapped clients at once. |
 | POST `/api/remote/leave`, `/api/remote/session` | yes | Hand an RDP session back to the console (`tscon`); session info. |
 | POST `/api/window-closed` | body token | Close beacon from `pagehide`. |
 | POST `/api/quit` | yes | `{stopSaver}` → optional saver stop, then shutdown. |
-| POST `/api/roblox/install`, `/install/cancel`, `/remove`, `/select`, `/exploits` | yes | Roblox tab actions (`ROBLOX_ROUTES`, behind `post_roblox`); [roblox-versions.md](roblox-versions.md). |
+| POST `/api/roblox/install`, `/install/cancel`, `/remove`, `/select`, `/mode`, `/protocol`, `/exploits` | yes | Roblox tab actions (`ROBLOX_ROUTES`, behind `post_roblox`): `/mode` switches Auto / Newest / Exploit / Pinned (follow modes are re-checked every 10 min by `RobloxVersions.start_follower`), `/protocol` points `roblox-player:` (HKCU only) at the pin and restores it; [roblox-versions.md](roblox-versions.md). |
 
 Errors: 400 `{error}` for `ConfigError`/`VaultError`, 403 for a bad host or token, 404, 413 above 256 KB, 500 for `OSError`. Any other exception is a 500 `{error: "Internal error (<type>)"}` (`Handler._guarded`; the type name only, never the message) and a line in the activity feed. Routes are a table: `GET_ROUTES` (path → `Handler` method, no token), `POST_ROUTES` (path → handler and its auth, `token` or `beacon`) and `VAULT_ROUTES` (the account and farm actions, behind `post_vault`). An unknown POST path needs the token before it is answered 404; an unknown `/api/vault/…` or `/api/farm/…` path is a 400 "Unknown account action". The page hard-codes the same paths; `test_control_center.py` checks that each of them has a route.
 
@@ -340,7 +345,7 @@ An update records the version it replaces in `app\previous.json` (and `app\contr
 
 | Logic | Copies |
 | --- | --- |
-| Window layout | `Get-ArkuzoWindowSlots`, `Test-ArkuzoSlotsOverlap`, `Get-ArkuzoArrangeTargets` (engine: physical pixels, chosen monitor, DPI scale, learned minimum size, three orders) and `layoutSlots`, `slotsOverlap`, `renderLayoutPreview` (page: logical pixels of the screen the window is on, fixed 800 × 622, name order only). Both are held to the golden vectors in `contracts/window-layout.json` (`WindowLayout.Tests.ps1` for the engine, `test_window_layout.py` runs the page's functions in Node.js). The preview's simplifications are intended: it shows the shape of the layout; DPI scaling and the monitor offset only scale or shift it, and a larger minimum the engine learns from a real window is not shown. |
+| Window layout | `Get-ArkuzoWindowSlots`, `Test-ArkuzoSlotsOverlap`, `Test-ArkuzoSlotMinimized`, `Get-ArkuzoArrangeTargets` (engine: physical pixels, chosen monitor, DPI scale, learned minimum size, three orders; with `arrangeOverflow` `minimize` the slots that don't fit carry a fifth element 1 and their windows are minimized, never the window that has the focus, `WindowArrangeLoop.Tests.ps1`) and `layoutSlots`, `slotsOverlap`, `renderLayoutPreview` (page: logical pixels of the screen the window is on, fixed 800 × 622, name order only). Both are held to the golden vectors in `contracts/window-layout.json` (`WindowLayout.Tests.ps1` for the engine, `test_window_layout.py` runs the page's functions in Node.js). The preview's simplifications are intended: it shows the shape of the layout; DPI scaling and the monitor offset only scale or shift it, and a larger minimum the engine learns from a real window is not shown. |
 | Presets | Source: `contracts/config-schema.json`. Generated: `PRESETS` (Python). Checked: `Get-ArkuzoPresets`, `PRESET_INFO` (page). Not checked: the `-Mode` block after config load. |
 | Config ranges | Source: `contracts/config-schema.json`. Generated: `SCHEMA`, `TOP_LEVEL`, `RESTART_KEYS` (Python). Checked: engine validators and `-MaxRamMB`/`-PollMs`/... parameter ranges. Not checked: ranges quoted in `configuration.md`. |
 | Vault setting ranges and defaults | Source: `contracts/config-schema.json`. Generated: `VAULT_SETTINGS` (Python). Checked: the `Get-ArkuzoVaultSetting` calls in the engine (`arrangeRequestedAtMs` caps at 2^53 - 1 there, 2^53 in Python), `FARM_FIELDS` / `LAYOUT_FIELDS` (page). |

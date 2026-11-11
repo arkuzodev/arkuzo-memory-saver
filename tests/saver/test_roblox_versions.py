@@ -529,6 +529,7 @@ class RouteTests(unittest.TestCase):
         cc.update_vault_settings(cls.data, {'robloxVersionsDir': str(cls.root)})
         cls.app = cc.App(cls.data, 0)
         cls.app.supervisor.initial_start = False
+        cls.app.roblox.protocol_base = r'Software\ArkuzoTest\routes\Classes'  # Never Roblox's own keys.
         cc.Handler.app = cls.app
         cls.server = cc.ThreadingHTTPServer(('127.0.0.1', 0), cc.Handler)
         cls.port = cls.app.port = cls.server.server_address[1]

@@ -2,7 +2,7 @@
 
 The Control Center's **Roblox** tab installs Roblox Windows player builds into a folder Arkuzo manages, and lets the saver launch a chosen build ("pin") instead of whatever Roblox installed last. It reads which builds exist, and which build each exploit currently supports, from weao.gg. This page records what was researched (10 Nov 2026) and how the feature uses it.
 
-Contents: [weao.gg](#weaogg-api) · [Roblox's CDN](#roblox-cdn) · [Install](#how-arkuzo-installs-a-build) · [Which build the saver launches](#which-build-the-saver-launches) · [Outdated builds](#outdated-builds) · [Other features](#other-features) · [Settings and routes](#settings-and-routes)
+Contents: [weao.gg](#weaogg-api) · [Roblox's CDN](#roblox-cdn) · [Install](#how-arkuzo-installs-a-build) · [Which build the saver launches](#which-build-the-saver-launches) · [Follow an exploit or the newest build](#follow-an-exploit-or-the-newest-build) · [Roblox links (protocol)](#roblox-links-roblox-player-protocol) · [Outdated builds](#outdated-builds) · [Other features](#other-features) · [Settings and routes](#settings-and-routes)
 
 ## weao.gg API
 
@@ -139,13 +139,40 @@ Vault setting `robloxVersion` (accounts.json → settings), set on the Roblox ta
   - Limitation: a build Roblox's own installer wrote gets the install time, which can be later than a newer build's package time (for example a build deployed days before its release). Pin a build when it matters which one starts.
 - **Pinned** (`version-<16 hex>`): that build, found by folder name in Arkuzo's folder first, then in Roblox's, Bloxstrap's and Fishstrap's. Running clients of another build do not change it.
   - If the pinned build is missing or incomplete, the launch is refused **before** a ticket is requested (event `ROBLOX_VERSION_PIN_MISSING`, a dashboard warning, the Roblox tab and the account's last error say why), unless `robloxVersionFallback` is on: then the Auto choice is used and the event says so.
-  - A pin **always launches directly**, whatever `launchMethod` says: the `protocol` method hands the launch to Roblox's own launcher, which updates Roblox and starts its own newest build, ignoring the pin. The engine logs `ROBLOX_VERSION_PROTOCOL_OVERRIDDEN` once per engine run.
+  - With `launchMethod` `protocol`, a pin launches by protocol **only while `roblox-player:` starts exactly the pinned build's `RobloxPlayerBeta.exe`** (the engine reads `HKEY_CLASSES_ROOT\roblox-player\shell\open\command`; see [Roblox links](#roblox-links-roblox-player-protocol)). Otherwise it launches directly, because the handler would be Roblox's own launcher, which updates Roblox and starts its own newest build, ignoring the pin; the engine then logs `ROBLOX_VERSION_PROTOCOL_OVERRIDDEN` once per engine run.
 
 The heartbeat's `robloxVersion` block (`mode`, `pinned`, `fallback`, `selectedPath`, `selectedVersion`, `method`, `problem`, `managedRoot`, `checkedUtc`; refreshed every 30 s and at each launch, `null` until the first check) tells the page what the saver chose; `NATIVE_LAUNCH_STARTED` names the build (`robloxVersion`, `pinned`).
 
 Pinning a build in Roblox's own folder works, but Roblox's updater deletes its old version folders when it updates (that is how the gutted `version-f0ea…` folder on this PC came about), so the tab offers to install the build into Arkuzo's folder as well.
 
 The pin applies only when Arkuzo launches clients (account provider `arkuzo`). With Volt as the launcher, Volt starts Roblox itself.
+
+## Follow an exploit or the newest build
+
+The tab's **Build** switch has four positions:
+
+| Position | Settings | What happens |
+| --- | --- | --- |
+| **Auto** | `robloxVersion` `auto`, `robloxVersionFollow` empty | As above. |
+| **Newest** | `robloxVersionFollow` `latest` | Follows Roblox's current public build (Roblox's version service, weao.gg when Roblox does not answer). A new build is installed into Arkuzo's folder from Roblox's CDN and then pinned. |
+| **Exploit** | `robloxVersionFollow` `exploit:<weao.gg _id>` | A dropdown of weao.gg's Windows exploits, each with its status (updated or not, detected, its version, the build it supports). The build the chosen exploit supports is installed if missing (in the background, with progress) and then pinned. When the exploit moves to another build, that build is installed and pinned. |
+| **Pinned** | `robloxVersion` `version-<hash>`, `robloxVersionFollow` empty | One installed build. The installed builds are a row of buttons: one click switches. |
+
+While following, `robloxVersion` holds the build the source wants once it is installed, so the engine is unchanged: it launches the pin. A build chosen by hand (Pinned, or **Use** in the build list) ends following.
+
+- **When the source is checked:** when the mode is chosen, every 10 minutes after that (`ROBLOX_FOLLOW_SEC`; one check is 5 requests: Roblox's version service and four weao.gg calls, against weao.gg's 120 a minute; checks in quick succession share one fetch), and right after a followed install finishes.
+- **What is never done:** a source that names no valid build, an exploit that is not for Windows or no longer listed, or a weao.gg row that changes to garbage never changes the pin; the tab says why. An install that failed is tried again at the next check, not in a loop. Exploits are never downloaded; weao.gg only chooses the build.
+- **Switch clients** (`robloxFollowRestart`): *As they relaunch* (default) leaves running clients on their build until they are launched again. *Right away* closes the farm's clients when the build changes, by hand or by following, exactly like **Close all**: only exactly mapped clients, and the running farm launches them again on the new build. There is no confirmation dialog; the toast that reports a switch has **Undo**, which switches back (clients already closed are launched again on the restored build).
+
+## Roblox links (`roblox-player:` protocol)
+
+**Roblox links use this build** (`robloxProtocol`, off by default) points the Windows `roblox-player:` and `roblox:` URL protocols at the selected build, so links on roblox.com and the Protocol launch method start it too.
+
+- Only `HKEY_CURRENT_USER\Software\Classes\roblox-player` and `...\roblox` are written (they win over Roblox's all-users keys in `HKEY_LOCAL_MACHINE`, which are never touched): `(Default)` `URL: Roblox Protocol`, `URL Protocol`, `DefaultIcon`, `shell\open\command` = `"<build>\RobloxPlayerBeta.exe" %1`, plus a marker value `ArkuzoManaged`.
+- Before the first change, both keys as they were (every value of every subkey, or "did not exist") are saved to `roblox-protocol-backup.json` in the data folder. Turning the switch off, or choosing Auto, restores them exactly and deletes the file. Re-pointing to another build keeps the saved copy. If Roblox's installer rewrites the keys in between (they lose the marker), restoring leaves Roblox's keys alone, and the next re-point saves Roblox's new keys as the copy.
+- It applies while a build is pinned (by hand or by following) and that build is complete; it follows the pin when it changes. The Control Center puts the keys right when it starts.
+- Why this matters: on 11 Nov the keys on the development PC pointed at `%LOCALAPPDATA%\Roblox\Versions\version-f0ea5da9412f4e35`, a folder Roblox's updater had emptied, so every roblox.com link failed.
+- **Not verified:** whether a player started by protocol from an Arkuzo folder starts Roblox's updater on its own (Arkuzo's folders hold no installer or launcher). If clients fail to start by protocol, use the Direct method.
 
 ## Outdated builds
 
@@ -176,6 +203,11 @@ Vault settings (`contracts/config-schema.json` → `vault`):
 | `robloxVersion` | `auto` or `version-<16 hex>` | `auto` |
 | `robloxVersionFallback` | bool | `false` |
 | `robloxVersionsDir` | empty, or an absolute local folder | empty = `%LOCALAPPDATA%\Arkuzo\Roblox` |
+| `robloxVersionFollow` | empty, `latest` or `exploit:<weao.gg _id>` | empty (follow nothing) |
+| `robloxFollowRestart` | bool: a build change restarts the farm's clients right away | `false` |
+| `robloxProtocol` | bool: `roblox-player:` starts the pinned build | `false` |
+
+GET `/api/roblox` also returns `selection.follow`, `selection.followRestart`, `follow` (`state`: `off`, `checking`, `installing`, `pinned`, `waiting`, `error`; `wanted`, `label`, `reason`, `message`, `checkedAt`) and `protocol` (`exe`, `managed`, `enabled`, `saved`, `error`).
 
 Control Center routes:
 
@@ -185,7 +217,9 @@ Control Center routes:
 | POST `/api/roblox/install` | yes | `{version}` (`version-<16 hex>` or `latest`) → starts the install. |
 | POST `/api/roblox/install/cancel` | yes | Cancels the running install. |
 | POST `/api/roblox/remove` | yes | `{version}` → removes an Arkuzo-installed build. |
-| POST `/api/roblox/select` | yes | `{version, fallback?}` → sets the pin (`auto` or an installed build). |
+| POST `/api/roblox/select` | yes | `{version, fallback?}` → sets the pin (`auto` or an installed build) and ends following. |
+| POST `/api/roblox/mode` | yes | `{mode, version?, apply?, restart?}`: `mode` `auto`, `pinned` (+ `version`), `latest` or `exploit:<id>`; `apply` `now` closes the farm's clients after a change (Close all). Answers `{previous: {version, follow}, version, follow, closed}`; the page's Undo sends `previous` back. |
+| POST `/api/roblox/protocol` | yes | `{enabled}` → turns **Roblox links use this build** on or off and applies or restores the keys at once. |
 | POST `/api/roblox/exploits` | yes | `{ids}` → the build the selected exploits all support, or the conflict. |
 
 `robloxVersionsDir` is set through `/api/vault/settings`.

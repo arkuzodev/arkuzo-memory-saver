@@ -3,12 +3,13 @@ $ErrorActionPreference = 'Stop'
 #  - Auto: finds Program Files installs and Arkuzo's own Versions folder, prefers a complete version
 #    folder over a newer one that only kept its locked files, then the newest player file.
 #  - Pinned (vault robloxVersion): that build or nothing (unless robloxVersionFallback), never the
-#    running build of another version, and always a direct launch.
+#    running build of another version, and a direct launch unless roblox-player: starts exactly
+#    that build (registry read from a test key under HKCU\Software\ArkuzoTest, never Roblox's own).
 $engine = Join-Path $PSScriptRoot '..\..\src\saver\Arkuzo-Memory-Saver.ps1'
 $t = $null; $e = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile((Resolve-Path $engine), [ref]$t, [ref]$e)
 foreach ($name in @('Get-ArkuzoVaultSetting', 'Get-ArkuzoManagedVersionsRoot', 'Test-ArkuzoRobloxBuildComplete', 'Select-ArkuzoNewestRobloxBuild',
-        'Get-ArkuzoRobloxInstalls', 'Get-ArkuzoRobloxPlayerPath', 'Resolve-ArkuzoRobloxPlayer', 'Update-ArkuzoRobloxVersionStatus', 'Get-ArkuzoRobloxVersionPreflight', 'Start-ArkuzoRobloxClient')) {
+        'Get-ArkuzoRobloxInstalls', 'Get-ArkuzoRobloxPlayerPath', 'Get-ArkuzoProtocolPlayerPath', 'Resolve-ArkuzoRobloxPlayer', 'Update-ArkuzoRobloxVersionStatus', 'Get-ArkuzoRobloxVersionPreflight', 'Start-ArkuzoRobloxClient')) {
     $fn = $ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name }, $true) | Select-Object -First 1
     if (-not $fn) { throw "$name not found" }
     . ([scriptblock]::Create($fn.Extent.Text))
@@ -67,11 +68,27 @@ try {
     $pinVault = New-Vault @{ robloxVersion = 'version-0123456789abcdef' }
     $r = Resolve-ArkuzoRobloxPlayer $running $pinVault 'direct'
     Check 'pinned build is used, not the running build of another version' ($r.path -eq $mine -and $r.mode -ceq 'pinned' -and -not $r.problem)
-    $r = Resolve-ArkuzoRobloxPlayer $running $pinVault 'protocol'
-    Check 'a pin always launches directly' ($r.method -ceq 'direct' -and $r.path -eq $mine)
+    $noKey = 'HKCU:\Software\ArkuzoTest\' + [guid]::NewGuid().ToString('N') + '\roblox-player\shell\open\command'
+    $r = Resolve-ArkuzoRobloxPlayer $running $pinVault 'protocol' $noKey
+    Check 'a pin launches directly while roblox-player: starts another build' ($r.method -ceq 'direct' -and $r.path -eq $mine)
     $script:events = @(); Update-ArkuzoRobloxVersionStatus $r 'protocol'; Update-ArkuzoRobloxVersionStatus $r 'protocol'
     Check 'the protocol override is logged once' (@($script:events | Where-Object { $_.kind -ceq 'ROBLOX_VERSION_PROTOCOL_OVERRIDDEN' }).Count -eq 1)
     Check 'heartbeat block names the build' ($script:robloxVersionStatus.selectedVersion -ceq 'version-0123456789abcdef' -and $script:robloxVersionStatus.mode -ceq 'pinned')
+    # roblox-player: pointed at the pinned build (the Roblox tab's protocol switch): Protocol is honoured.
+    $testRoot = 'HKCU:\Software\ArkuzoTest\' + [guid]::NewGuid().ToString('N')
+    $key = Join-Path $testRoot 'roblox-player\shell\open\command'
+    try {
+        New-Item -Path $key -Force | Out-Null
+        Set-Item -LiteralPath $key -Value ('"' + $mine + '" %1')
+        Check 'the protocol handler path is read from the command' ((Get-ArkuzoProtocolPlayerPath $key) -eq $mine)
+        $r = Resolve-ArkuzoRobloxPlayer $running $pinVault 'protocol' $key
+        Check 'a pin launches by protocol when roblox-player: starts exactly that build' ($r.method -ceq 'protocol' -and $r.path -eq $mine -and -not $r.problem)
+        $script:robloxProtocolOverrideLogged = $false; $script:events = @(); Update-ArkuzoRobloxVersionStatus $r 'protocol'
+        Check 'no override is logged when the protocol honours the pin' (@($script:events | Where-Object { $_.kind -ceq 'ROBLOX_VERSION_PROTOCOL_OVERRIDDEN' }).Count -eq 0 -and $script:robloxVersionStatus.method -ceq 'protocol')
+        Set-Item -LiteralPath $key -Value ('"' + $other + '" %1')
+        Check 'a handler pointing at another build means a direct launch' ((Resolve-ArkuzoRobloxPlayer $running $pinVault 'protocol' $key).method -ceq 'direct')
+        Check 'direct stays direct whatever the handler' ((Resolve-ArkuzoRobloxPlayer $running $pinVault 'direct' $key).method -ceq 'direct')
+    } finally { Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue }
     $pinOther = New-Vault @{ robloxVersion = 'version-1111111111111111' }
     Check 'a pinned build is also found in Roblox''s own folder' ((Resolve-ArkuzoRobloxPlayer @() $pinOther 'direct').path -eq $other)
 

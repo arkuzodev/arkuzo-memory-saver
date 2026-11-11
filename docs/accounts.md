@@ -11,6 +11,31 @@ Open **Accounts** in the Control Center.
 
 Adding an account that is already in the list refreshes its cookie instead of duplicating it. This is how you bring a signed-out account back.
 
+## Find and manage many accounts
+
+The account list has a toolbar that stays on top while you scroll:
+
+- **Search** (press `/`): name, `@username`, group or notes. `Esc` clears it.
+- **Status**: All, In game, Launching, Idle, Signed out, Moderated, each with its count.
+- **Group**: every group with its count, or *No group*.
+- **Sort**: name, status, group or last launched.
+
+Rows are compact and have a checkbox. Shift-click selects a range; the checkbox in the header selects every account the filters show. With accounts selected, a bar offers:
+
+| Action | What happens |
+| :--- | :--- |
+| Launch | Launches them now. Signed-out and moderated accounts are skipped (the toast says how many). |
+| Close | Closes their clients now (only the exact clients the saver reports). With relaunch on and the farm running, they come back. |
+| Relaunch on / off | Sets their **Relaunch** switch. |
+| Check cookie | Asks Roblox whether their cookies are still signed in. |
+| Assign group | Type a new group or pick an existing one (Enter works). |
+| Remove from group | Clears their group. |
+| Delete | Removes them and their stored cookies. Running clients keep running. |
+
+`Esc` clears the selection. A group is a label of up to 40 characters on each account (also in the account's editor, ✎); it is not secret and is stored with the account in `data/accounts.json`. Filter by a group, select all, and **Launch** or **Close** to start or stop one group.
+
+**No confirmation popups.** Nothing in the Control Center asks "Are you sure?" any more. Deleting accounts happens at once and the toast offers **Undo** for 10 seconds: the accounts are held in `accounts.json` (cookies still encrypted, never shown or launched) and Undo puts everything back, cookie, group, notes and settings included. After 10 seconds they are gone for good. Removing a private server or a Roblox build waits 8 seconds with **Undo** before it happens. **Stop** (saver) acts at once and offers **Start again**. **Close all** just acts. Moving a Remote Desktop session to the console and **Stop saver and quit** take a second click within 4 seconds instead of a popup. Unsaved changes on the Settings page are kept when you leave it (the toast offers **Discard**).
+
 ## Cookie health
 
 Each row shows whether the cookie is **Alive**, **Dead** (Roblox rejected it: signed out, expired or changed password) or **Unchecked**, and when it was last checked.
@@ -64,20 +89,27 @@ Then choose a mode: *One server for all*, or *Per account* (pick the server in e
 | Launch timeout | 120 s | Time for a launched client to appear before the launch is retried. |
 | Relaunch accounts | On | Master switch for every account's Relaunch switch. |
 | Multiple clients | On | Hold Roblox's single-instance lock so several clients run side by side, like Volt's multi-instance option. |
-| Launch method | Direct | *Direct* starts the installed `RobloxPlayerBeta.exe` (the build chosen on the Roblox tab). *Protocol* goes through Roblox's own launcher, which updates Roblox first. Switch to Protocol if a Roblox update leaves clients failing to start. A build pinned on the Roblox tab always launches directly. |
+| Launch method | Direct | *Direct* starts the installed `RobloxPlayerBeta.exe` (the build chosen on the Roblox tab). *Protocol* goes through Roblox's own launcher, which updates Roblox first. Switch to Protocol if a Roblox update leaves clients failing to start. A build pinned on the Roblox tab launches directly, unless **Roblox links use this build** is on there (then Protocol starts the pinned build). |
 | Cookie check | 60 min | How often every cookie is checked. |
 
-Which Roblox build these clients start is chosen on the **Roblox** tab: *Auto* (the newest installed build) or a pinned build installed there, for example the build your executor supports. See [Roblox versions](roblox-versions.md).
+Which Roblox build these clients start is chosen on the **Roblox** tab: *Auto* (the newest installed build), *Newest* (follows Roblox's current build), *Exploit* (follows the build your exploit supports, from a dropdown) or a *Pinned* build. See [Roblox versions](roblox-versions.md).
 
 ### Window layout
 
-Under **Window layout** the saver keeps every client's window in place on the chosen screen, without ever taking focus. Roblox never makes its window smaller than 800 × 600 (800 × 622 with the title bar at 100% scaling), so every layout works with at least that size and keeps each window fully on screen:
+Under **Window layout** the saver keeps every client's window in place on the chosen screen, without ever taking focus. Roblox never makes its window smaller than 800 × 600 (800 × 622 with the title bar at 100% scaling), so every layout works with at least that size and keeps each window fully on screen. **More than fit** decides what happens when the windows can't all fit side by side:
 
-- **Auto** (the default) puts the windows side by side, as large as fits. With more windows than fit (on a 1920 × 1080 screen, more than 2), they overlap evenly: 10 windows go 5 across and 2 down, each keeping a 280 × 410 corner in view. Later windows sit on top, so every window's corner stays visible.
-- **Grid** uses your windows per row and size (raised to the minimum); rows or columns that don't fit overlap evenly instead of running off the screen.
-- **Cascade** stacks the windows diagonally and starts over before reaching the edge.
+- **Minimize the rest** (the default): windows never overlap. As many as fit are tiled, as large as fits (on a 1920 × 1080 screen: 2 windows of 958 × 744); the others are minimized. A minimized Roblox window is the same state as the existing **Windows: Minimized** option: on 11 Nov a Roblox app window (not in a game) stayed responsive to the saver's health probe, kept its main window and kept using CPU for the 30 s it was watched. The saver's freeze detection needs an unresponsive window, not just low CPU, so a quiet minimized client is not treated as frozen. Not tested: a minimized client in a game, and the executor with it. Each minimized window is placed on a tile first, so restoring one from the taskbar shows it there; a window you restore stays up until the layout changes or you press **Arrange now**. The window you are using is never minimized while it has the focus (that would move the focus); it is minimized after you switch away.
+- **Overlap evenly**: every window stays on screen. With more windows than fit, they overlap evenly: 10 windows go 5 across and 2 down, each keeping a 280 × 410 corner in view. Later windows sit on top, so every window's corner stays visible.
 
-A maximized window is un-maximized first. A window that is already in place is left alone, and the stacking order is only set when a window was actually moved, so a client you bring forward stays in front until the layout changes. **Arrange now** puts every window back at once. The preview shows the same layout and says when windows overlap.
+Layouts:
+
+- **Auto** (the default) puts the windows side by side, as large as fits, in Roblox's shape.
+- **Grid** uses your windows per row and size (raised to the minimum). With *Minimize the rest*, no more columns or rows than fit the screen; with *Overlap evenly*, rows or columns that don't fit overlap evenly instead of running off the screen.
+- **Cascade** stacks the windows diagonally (always overlapping) and starts over before reaching the edge.
+
+**Why not smaller windows?** On 11 Nov every way of forcing a Roblox window below 800 × 600 was tried on a real Roblox window (the Roblox app's home screen, started without an account ticket; a game could not be joined for the test): `SetWindowPos`, `MoveWindow`, and removing the resize frame are clamped by Roblox to 800 × 600; `SetWindowPos` with `SWP_NOSENDCHANGING` gets past the clamp, but Roblox then resizes its own window to 65,535 pixels high, its Direct3D swap chain fails (`ResizeBuffers failed hr=0x80070057` in the Roblox log) and the client crashes within 3 seconds, every time (5 of 5 tries, borderless and framed, width or height alone below the minimum). Whether a client in a game behaves the same was not tested. The only other way, changing Roblox's window procedure, means loading code into the Roblox process, which Arkuzo never does. So the saver tiles what fits and minimizes the rest.
+
+A maximized window is un-maximized first. A window that is already in place is left alone, and the stacking order is only set when a window was actually moved, so a client you bring forward stays in front until the layout changes. **Arrange now** puts every window back at once. The preview shows the same layout, the minimized windows as a strip at the bottom, and says how many are tiled, minimized or overlapping.
 
 ## Moving over from Volt
 

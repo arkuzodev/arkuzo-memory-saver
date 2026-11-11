@@ -159,6 +159,18 @@
       "rule": ["folder"],
       "default": ""
     },
+    "robloxVersionFollow": {
+      "rule": ["robloxfollow"],
+      "default": ""
+    },
+    "robloxFollowRestart": {
+      "rule": ["bool"],
+      "default": false
+    },
+    "robloxProtocol": {
+      "rule": ["bool"],
+      "default": false
+    },
     "cookieCheckMinutes": {
       "rule": ["int", 0, 1440],
       "default": 60
@@ -170,6 +182,10 @@
     "arrangeLayout": {
       "rule": ["enum", ["auto", "grid", "cascade"]],
       "default": "auto"
+    },
+    "arrangeOverflow": {
+      "rule": ["enum", ["minimize", "overlap"]],
+      "default": "minimize"
     },
     "arrangePerRow": {
       "rule": ["int", 1, 12],

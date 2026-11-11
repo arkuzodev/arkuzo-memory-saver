@@ -2,7 +2,7 @@
 
 Changes for **Arkuzo Memory Saver with Volt Integration** are recorded here.
 
-## Unreleased
+## v2.4.0 — Roblox build manager, no-overlap windows and account bulk actions
 
 - **Window layout: no more overlapping windows.** Roblox's windows can't be made smaller than 800 × 600, so on a 1920 × 1080 screen only 2 fit side by side, and 11 farm clients overlapped. Forcing smaller windows was tried on a real Roblox window on 11 Nov (the app's home screen; not in a game): every normal way (`SetWindowPos`, `MoveWindow`, removing the resize frame) is clamped to 800 × 600 by Roblox, and bypassing the clamp (`SWP_NOSENDCHANGING`) makes Roblox resize itself to 65,535 pixels high and crash within 3 seconds, every time. So the new default, **More than fit: Minimize the rest**, tiles as many windows as fit without overlap, as large as they fit, and minimizes the others. Minimized is the same window state as the existing *Minimized* option (a minimized Roblox window stayed responsive to the saver's health probe and kept running; not yet tested in a game), and the window you are using is never minimized while it has the focus. A minimized window restored from the taskbar stays up until the layout changes or **Arrange now**. **Overlap evenly** keeps the old behaviour. The preview shows minimized windows as a strip and says how many are tiled and minimized.
 

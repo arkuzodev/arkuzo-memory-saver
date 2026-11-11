@@ -4,7 +4,7 @@
 
 <br>
 
-[![Version](https://img.shields.io/badge/version-2.3.0-38bdf8?style=for-the-badge&labelColor=12141b)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-2.4.0-38bdf8?style=for-the-badge&labelColor=12141b)](CHANGELOG.md)
 [![Windows x64](https://img.shields.io/badge/Windows-x64-818cf8?style=for-the-badge&labelColor=12141b)](#requirements)
 [![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-a78bfa?style=for-the-badge&labelColor=12141b)](#requirements)
 [![Volt optional](https://img.shields.io/badge/Volt-optional-34d399?style=for-the-badge&labelColor=12141b)](docs/accounts.md)
@@ -219,14 +219,14 @@ Arkuzo started as a memory saver bolted onto Volt. The roadmap turns it into a f
 
 ## Integrity and antivirus
 
-v2.3.0 ships a rebuilt executable, runtime and Control Center add-on; all 1.x releases are deprecated. VirusTotal scanned all four files on 9 Nov 2026 and no engine flagged any of them. Still compare the checksums with the release before running anything.
+v2.4.0 ships a rebuilt executable, runtime and Control Center add-on; all 1.x releases are deprecated. VirusTotal results for these files follow after release. Compare the checksums with the release before running anything.
 
 | File | SHA-256 | VirusTotal |
 | :--- | :--- | :--- |
-| **`ArkuzoMemorySaver.exe`** | `717e84bd7b0399f2c9b03fddc40e22f857d18eef278083832e53ef7da1afa06d` | [Clean, 0/69](https://www.virustotal.com/gui/file/717e84bd7b0399f2c9b03fddc40e22f857d18eef278083832e53ef7da1afa06d/detection) |
-| **`ArkuzoMemorySaver-runtime.zip`** | `343c710d31c9223295657ea37cf14d6ba2cd72cb927086d70e36ccd7487c1ca4` | [Clean, 0 detections](https://www.virustotal.com/gui/file/343c710d31c9223295657ea37cf14d6ba2cd72cb927086d70e36ccd7487c1ca4/detection) |
-| **`ArkuzoMemorySaver-controlcenter.zip`** | `f2c54820a4f33c0cb9eda1c9787410497e5373d1a8571c4c2d5347d638f952e0` | [Clean, 0 detections](https://www.virustotal.com/gui/file/f2c54820a4f33c0cb9eda1c9787410497e5373d1a8571c4c2d5347d638f952e0/detection) |
-| **`ArkuzoMemorySaver-v2.3.0-win-x64.zip`** | `48e1039b580dc88bc2073dc1693e2ebaaab49e1b7da91069b9151243ba4eb822` | [Clean, 0 detections](https://www.virustotal.com/gui/file/48e1039b580dc88bc2073dc1693e2ebaaab49e1b7da91069b9151243ba4eb822/detection) |
+| **`ArkuzoMemorySaver.exe`** | `3bb9ef9b40fed1b6811e9cd416ae1da6b651fcbad75c3295f6f59e3ea1dae7eb` | Scan pending |
+| **`ArkuzoMemorySaver-runtime.zip`** | `94186e60ebcd36fd5139a65cf11683c45bd4452da521c8bf1b0c77b151358765` | Scan pending |
+| **`ArkuzoMemorySaver-controlcenter.zip`** | `7cc6e811d612edd9f3f7fb94427da6f8898fe086fa92b764bca83f6eed3f82f3` | Scan pending |
+| **`ArkuzoMemorySaver-v2.4.0-win-x64.zip`** | `0db839e0133c35edd846b5d5229cb0177d1db80b10278a21b8a3b0487b539971` | Scan pending |
 
 Each release also publishes **`SHA256SUMS.txt`**, plus **`ArkuzoMemorySaver-runtime.sha256`** and **`ArkuzoMemorySaver-controlcenter.sha256`** for the updater. The launcher checks downloaded bytes and GitHub's asset digests. A checksum detects a mismatch; it is not a code signature. See [security and privacy](SECURITY.md).
 

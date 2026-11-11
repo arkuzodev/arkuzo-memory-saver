@@ -1,13 +1,20 @@
 #requires -Version 5.1
 [CmdletBinding()]
-param([string]$Version = 'v1.0.2', [switch]$SkipLauncherBuild)
+param([string]$Version, [switch]$SkipLauncherBuild)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
+# The release version lives in one place, the VERSION file; -Version only confirms it.
+$fileVersion = 'v' + ([IO.File]::ReadAllText((Join-Path $root 'VERSION'))).Trim()
+if (-not $Version) { $Version = $fileVersion }
 if ($Version -notmatch '^v\d+\.\d+\.\d+$') { throw 'Use a stable semantic version, for example v1.0.0.' }
+if ($Version -cne $fileVersion) { throw ('-Version ' + $Version + ' does not match VERSION (' + $fileVersion + '). Change VERSION, run build/bundle.ps1, then package.') }
 if (-not $SkipLauncherBuild) {
     & (Join-Path $PSScriptRoot 'launcher-build.ps1')
     if ($LASTEXITCODE -ne 0) { throw 'Launcher build failed.' }
 }
+# The engine (and the page) ship as generated single files; refuse to package stale ones.
+& (Join-Path $PSScriptRoot 'bundle.ps1') -Check
+if ($LASTEXITCODE -ne 0) { throw 'Generated files are out of date: run build/bundle.ps1 and commit the result.' }
 $exe = Join-Path $root 'ArkuzoMemorySaver.exe'
 if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'Build ArkuzoMemorySaver.exe before packaging.' }
 $dist = Join-Path $root 'dist'

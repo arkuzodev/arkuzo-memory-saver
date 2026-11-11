@@ -24,7 +24,7 @@
     "startup_error_timeout_sec": 5,
     "disconnect_timeout_sec": 5,
     "cooldown_sec": 90,
-    "max_recycles_per_hour": 20,
+    "max_recycles_per_hour": 60,
     "trim_spacing_sec": 2,
     "private_limit_sustain_sec": 60,
     "farm_freeze_enabled": true,

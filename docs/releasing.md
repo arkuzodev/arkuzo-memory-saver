@@ -2,19 +2,36 @@
 
 Use Windows x64 with PowerShell 5.1, the .NET 10 SDK, Python 3, Git, and authenticated GitHub CLI. End users do not need the .NET SDK.
 
+## Version
+
+The version lives in one place: the `VERSION` file at the repository root (for example `2.3.0`, no `v`). To release a new version:
+
+1. Change `VERSION`.
+2. Run `build/bundle.ps1`: it stamps the version into the engine (`$ArkuzoRuntimeVersion` in the generated `src/saver/Arkuzo-Memory-Saver.ps1`).
+3. Update the README badge and the changelog heading.
+
+The launcher build takes the version from `VERSION` through `src/launcher/Directory.Build.props` (assembly version and the updater's user agent), `build/package.ps1` uses it as the release tag (`-Version` is optional and must match), and `build/verify-release.py` reads it. `tests/saver/test_version.py` fails when a copy disagrees.
+
+## Generated files
+
+`src/saver/Arkuzo-Memory-Saver.ps1` and `src/saver/Arkuzo-Control-Center.html` are generated from modules by `build/bundle.ps1` and checked in, so the tests, `Arkuzo-Control-Center.cmd`, the package and the launcher keep using the same single files. Edit the modules (`src/saver/engine/`, `src/saver/control-center/`), never the generated files, then run `build/bundle.ps1`. `build/bundle.ps1 -Check` (also run by `package.ps1`) and `tests/saver/Bundle.Tests.ps1` fail when a generated file is out of date. See [development.md](development.md).
+
 ## Validate and package
 
 ```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File build/bundle.ps1 -Check
 powershell -NoProfile -ExecutionPolicy Bypass -File build/test.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File build/package.ps1 -Version v1.0.1
+powershell -NoProfile -ExecutionPolicy Bypass -File build/package.ps1
 ```
+
+`build/test.ps1` runs every tracked test file in its own process and ends with a pass/fail summary; `-Filter <name>` runs a subset while you work (for example `-Filter FarmFreeze,test_account_vault`). The same script runs in GitHub Actions (`.github/workflows/tests.yml`). `build/lint.ps1` runs the linters (the overload check and `ruff` must pass; PSScriptAnalyzer only reports); `build/test.ps1 -Lint` runs them after the tests.
 
 The package script rebuilds the self-contained launcher and creates, under ignored `dist/`:
 
 | Asset | Purpose |
 | --- | --- |
 | `ArkuzoMemorySaver.exe` | Single-file Windows x64 launcher |
-| `ArkuzoMemorySaver-v1.0.2-win-x64.zip` | End-user archive containing only `ArkuzoMemorySaver.exe` |
+| `ArkuzoMemorySaver-v<version>-win-x64.zip` | End-user archive containing only `ArkuzoMemorySaver.exe` |
 | `ArkuzoMemorySaver-runtime.zip` | Exactly three runtime programs and `defaults.json` |
 | `ArkuzoMemorySaver-runtime.sha256` | Updater checksum for the runtime ZIP |
 | `ArkuzoMemorySaver-controlcenter.zip` | Control Center add-on: exactly `Arkuzo-Control-Center.py` and `Arkuzo-Control-Center.html` |
@@ -32,7 +49,7 @@ Launchers already in the field accept a runtime ZIP only when it holds exactly t
 - On startup a new launcher starts `pythonw.exe -I app/control-center/<version>/Arkuzo-Control-Center.py --data <root>/data` and exits. It uses the first `pythonw.exe` on `PATH` that reports Python 3.8 or newer. With no add-on, no usable Python, or `--console`, it runs the console saver as before. Existing takeover rules still apply to console savers. A Control Center already answering on `127.0.0.1:48650` is reopened, and the saver it supervises is never taken over. `--console` refuses to start next to it.
 - The new launcher only reaches users when they download the new `ArkuzoMemorySaver.exe` from the release; the running launcher never replaces itself. Mention this in the release notes.
 
-Never include `data/`, `app/`, a local `config.json`, logs, recovery journals, Volt databases, or credentials in a release. `config/defaults.json` is the public default, not a live user's configuration. Update the engine, launcher, and changelog version together for subsequent releases.
+Never include `data/`, `app/`, a local `config.json`, logs, recovery journals, Volt databases, or credentials in a release. `config/defaults.json` is the public default, not a live user's configuration. For a new version, change `VERSION` (see [Version](#version)); nothing else holds the number.
 
 ## Publish
 
@@ -48,7 +65,7 @@ Before and after publishing each new version:
 ## Verify the published assets
 
 1. Download `ArkuzoMemorySaver.exe` from the newly published release into a new writable test directory.
-2. Run `ArkuzoMemorySaver.exe --verify-only` to exercise the real GitHub metadata, download, checksum, extraction, configuration initialization, and installed-cache checks without starting Roblox or the saver. The output must include `Verified Control Center <version>`. `build/verify-release.py` checks the same: update its `VERSION` first.
+2. Run `ArkuzoMemorySaver.exe --verify-only` to exercise the real GitHub metadata, download, checksum, extraction, configuration initialization, and installed-cache checks without starting Roblox or the saver. The output must include `Verified Control Center <version>`. `build/verify-release.py` checks the same for the version in `VERSION`.
 3. Hash `data/config.json`, customize it, run verification again, and confirm that it is byte-identical.
 4. Run `ArkuzoMemorySaver.exe --offline --verify-only` to validate the cache without network access.
 5. Confirm the release tag points to the intended commit and all uploaded asset digests match the local artifacts.

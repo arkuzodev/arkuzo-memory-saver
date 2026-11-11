@@ -17,26 +17,12 @@ public sealed class LauncherLock : IDisposable
    try { owned=mutex.WaitOne(0); } catch(AbandonedMutexException) { owned=true; }
    if(!owned) {
     if (verifyOnly) throw new AlreadyRunningException("Another launcher is already running for this installation.");
-    AutocloseRunningLauncherProcesses();
+    // Only a launcher of this same installation can hold this mutex; never touch other installs.
+    InstallProcesses.StopOwnLaunchers(root);
     try { owned=mutex.WaitOne(3000); } catch(AbandonedMutexException) { owned=true; }
     if(!owned) throw new AlreadyRunningException("Another launcher is already running for this installation.");
    }
   } catch {mutex.Dispose();throw;}
- }
- private static void AutocloseRunningLauncherProcesses()
- {
-  try
-  {
-   var currentPid = Environment.ProcessId;
-   foreach (var proc in Process.GetProcessesByName("ArkuzoMemorySaver"))
-   {
-    if (proc.Id != currentPid)
-    {
-     try { proc.Kill(); proc.WaitForExit(3000); } catch { }
-    }
-   }
-  }
-  catch { }
  }
  public void Dispose() { if(owned) {mutex.ReleaseMutex(); owned=false;} mutex.Dispose(); }
 }
@@ -52,11 +38,22 @@ public static class LauncherEntry
    if(args.Contains("--verify-only")) return;
    if(acknowledgement is null) LauncherUi.WaitForDismissal(false); else acknowledgement();
   }
-  if(args.Any(x=>x!="--offline" && x!="--verify-only" && x!="--console") || args.Distinct().Count()!=args.Length)
-  { Console.Error.WriteLine("Usage: ArkuzoMemorySaver.exe [--offline] [--verify-only] [--console]");return 2; }
+  if(args.Any(x=>x!="--offline" && x!="--verify-only" && x!="--console" && x!="--rollback") || args.Distinct().Count()!=args.Length || (args.Contains("--rollback") && args.Length!=1))
+  { Console.Error.WriteLine("Usage: ArkuzoMemorySaver.exe [--offline] [--verify-only] [--console]  |  ArkuzoMemorySaver.exe --rollback");return 2; }
   var consoleOnly=args.Contains("--console");
   try {
    using var updaterLock=new LauncherLock(root, args.Contains("--verify-only"));
+   if (args.Contains("--rollback"))
+   {
+    // Back to the version installed before the last update, which stays skipped until a newer release.
+    if (controlCenter.IsRunning() || io.IsRunning(controllerMutexName))
+     throw new AlreadyRunningException("Quit the Control Center (Settings > Quit app) and stop the saver before rolling back.");
+    var store0=new Installation(Path.GetFullPath(root));
+    var from=store0.TryGetInstalled(out var before) ? before.Version : "the installed version";
+    var back=store0.Rollback();
+    Console.WriteLine("Rolled back from "+from+" to "+back.Version+". "+from+" is skipped until a newer release is published. Start ArkuzoMemorySaver.exe again to run "+back.Version+".");
+    return 0;
+   }
    // A running Control Center supervises (and would restart) its saver, so it is never taken over.
    var controlCenterRunning=!args.Contains("--verify-only") && controlCenter.IsRunning();
    if (controlCenterRunning && consoleOnly)
@@ -161,57 +158,14 @@ public static class LauncherEntry
  }
  internal static void AutocloseRunningSaverProcesses(string root, string controllerMutexName)
  {
+  // Fallback after an exact takeover failed: only engines of this install (InstallProcesses.IsOwnEngine).
   try
   {
-   foreach (var statusPath in new[] { Path.Combine(root, "data", "runtime-status.json"), Path.Combine(root, "runtime-status.json") })
-   {
-    if (File.Exists(statusPath))
-    {
-     try
-     {
-      using var doc = JsonDocument.Parse(File.ReadAllText(statusPath));
-      if (doc.RootElement.TryGetProperty("pid", out var pidProp))
-      {
-       var p = Process.GetProcessById(pidProp.GetInt32());
-       if (p.ProcessName.Contains("powershell", StringComparison.OrdinalIgnoreCase) ||
-           p.ProcessName.Contains("pwsh", StringComparison.OrdinalIgnoreCase))
-       {
-        p.Kill();
-        p.WaitForExit(2000);
-       }
-      }
-     }
-     catch { }
-    }
-   }
-   foreach (var name in new[] { "powershell", "pwsh" })
-   {
-    foreach (var proc in Process.GetProcessesByName(name))
-    {
-     try
-     {
-      if (!string.IsNullOrEmpty(proc.MainWindowTitle) &&
-          (proc.MainWindowTitle.Contains("ARKUZO", StringComparison.OrdinalIgnoreCase) ||
-           proc.MainWindowTitle.Contains("Memory Saver", StringComparison.OrdinalIgnoreCase)))
-      {
-       proc.Kill();
-       proc.WaitForExit(2000);
-      }
-     }
-     catch { }
-    }
-   }
-   using var cimKill = Process.Start(new ProcessStartInfo("powershell.exe",
-       "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'powershell.exe' -or $_.Name -eq 'pwsh.exe') -and $_.CommandLine -like '*Arkuzo-Memory-Saver*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }\"")
-   {
-       CreateNoWindow = true,
-       UseShellExecute = false
-   });
-   cimKill?.WaitForExit(4000);
+   InstallProcesses.StopOwnEngines(Path.GetFullPath(root));
    for (int i = 0; i < 30; i++)
    {
-       if (!ControllerIsRunning(controllerMutexName)) break;
-       Thread.Sleep(100);
+    if (!ControllerIsRunning(controllerMutexName)) break;
+    Thread.Sleep(100);
    }
   }
   catch { }

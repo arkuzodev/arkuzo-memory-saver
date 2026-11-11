@@ -1,0 +1,10 @@
+<Project>
+  <!-- The release version lives in one place, the VERSION file at the repository root.
+       Every launcher build (dotnet run of the tests included) takes it from there. -->
+  <PropertyGroup>
+    <ArkuzoVersion>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)../../VERSION').Trim())</ArkuzoVersion>
+    <Version>$(ArkuzoVersion)</Version>
+    <AssemblyVersion>$(ArkuzoVersion).0</AssemblyVersion>
+    <FileVersion>$(ArkuzoVersion).0</FileVersion>
+  </PropertyGroup>
+</Project>

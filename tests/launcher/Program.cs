@@ -51,6 +51,9 @@ Assert(repo is not null && cc.All(x=>File.Exists(Path.Combine(repo.FullName,"src
 var ccSource=File.ReadAllText(Path.Combine(repo!.FullName,"src","saver","Arkuzo-Control-Center.py"));
 Assert(ccSource.Contains("APP_ID = '"+ControlCenter.AppId+"'") && System.Text.RegularExpressions.Regex.IsMatch(ccSource,@"^DEFAULT_PORT = "+ControlCenter.Port+@"\r?$",System.Text.RegularExpressions.RegexOptions.Multiline),"launcher ping matches the Control Center app id and port");
 Console.WriteLine("PASS Control Center add-on: strict two-file ZIP, six-file runtime ZIP rejected, checksum bound to asset name");
+var versionFile=File.ReadAllText(Path.Combine(repo.FullName,"VERSION")).Trim();
+Assert(GitHubReleaseSource.UserAgentVersion==versionFile,"launcher version (user agent) comes from the VERSION file: "+GitHubReleaseSource.UserAgentVersion);
+Console.WriteLine("PASS launcher version stamped from VERSION");
 var temp=Path.Combine(Environment.GetEnvironmentVariable("TMPDIR")!,"launcher-tests-"+Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(temp);
 try {
@@ -85,6 +88,22 @@ try {
  Assert(Updater.PrepareAsync(store,true,()=>throw new Exception("must not fetch")).GetAwaiter().GetResult().Version=="v1.1.0","offline no network");
  Assert(Updater.PrepareAsync(store,false,()=>Task.FromException<ReleasePayload>(new HttpRequestException("network down"))).GetAwaiter().GetResult().Version=="v1.1.0","network fallback validated");
  Reject(()=>Updater.PrepareAsync(store,false,()=>Task.FromResult(release with {Version="v1.2.0",Checksum=new string('0',64)})).GetAwaiter().GetResult());
+ Assert(Updater.PrepareAsync(store,false,()=>Task.FromException<ReleasePayload>(new InvalidDataException("Required release asset missing or duplicated: ArkuzoMemorySaver-runtime.zip"))).GetAwaiter().GetResult().Version=="v1.1.0","an unusable latest release falls back to the installed runtime");
+ var releaseError="";
+ try { Updater.PrepareAsync(new Installation(Path.Combine(temp,"no-runtime")),false,()=>Task.FromException<ReleasePayload>(new InvalidDataException("Invalid GitHub release metadata."))).GetAwaiter().GetResult(); }
+ catch(InvalidDataException ex) { releaseError=ex.Message; }
+ Assert(releaseError=="Invalid GitHub release metadata.","with nothing installed the release error is reported, not a missing runtime");
+ var repairDir=store.RuntimePath(store.Validate());
+ File.WriteAllText(Path.Combine(repairDir,"stray.txt"),"left behind");
+ Directory.CreateDirectory(Path.Combine(repairDir,"__pycache__")); File.WriteAllText(Path.Combine(repairDir,"__pycache__","probe.pyc"),"cache");
+ File.SetAttributes(Path.Combine(repairDir,"stray.txt"),FileAttributes.ReadOnly);
+ Reject(()=>store.Validate());
+ try { Updater.PrepareAsync(store,false,()=>Task.FromException<ReleasePayload>(new InvalidDataException("bad release"))).GetAwaiter().GetResult(); releaseError="none"; }
+ catch(InvalidDataException ex) { releaseError=ex.Message; }
+ Assert(releaseError=="bad release","an invalid installed runtime is never started as a fallback");
+ store.Install(release with {Version="v1.1.0"});
+ Assert(store.Validate().Version=="v1.1.0" && Directory.GetFileSystemEntries(repairDir).Select(Path.GetFileName).OrderBy(x=>x,StringComparer.Ordinal).SequenceEqual(RuntimePackage.Files.OrderBy(x=>x,StringComparer.Ordinal)),"repair removes stray files and folders");
+ Console.WriteLine("PASS unusable release falls back to a valid installed runtime only; repair removes files that do not belong");
  var child=Updater.ChildStart(temp,store.RuntimePath(store.Validate()));
  Assert(child.FileName.EndsWith("powershell.exe",StringComparison.OrdinalIgnoreCase),"PowerShell exact binary");
  Assert(child.ArgumentList.SequenceEqual(new[]{"-NoProfile","-ExecutionPolicy","Bypass","-File",Path.Combine(store.RuntimePath(store.Validate()),"Arkuzo-Memory-Saver.ps1"),"-DataDirectory",Path.Combine(temp,"data")}),"exact child args");
@@ -129,6 +148,77 @@ try {
  Assert(ccChild.ArgumentList.SequenceEqual(new[]{"-I",Path.Combine(ccStore.ControlCenterPath(newer),"Arkuzo-Control-Center.py"),"--data",Path.Combine(ccRoot,"data")}),"exact Control Center arguments");
  Console.WriteLine("PASS add-on install: fail-closed checksum, old-layout compatibility, tamper/extra rejection, repair, version pinning, exact pythonw arguments");
 } finally { Directory.Delete(temp,true); }
+// Old versions are pruned (current and previous kept), --rollback returns to the previous version and skips the one it left.
+var pruneRoot=Path.Combine(Environment.GetEnvironmentVariable("TMPDIR")!,"launcher-prune-"+Guid.NewGuid().ToString("N"));
+try {
+ var pruneStore=new Installation(pruneRoot);
+ var prunePkg=Zip(RuntimePackage.Files);
+ var pruneZip=Zip(cc,8);
+ var pruneRelease=new ReleasePayload("v1.0.0",prunePkg,Convert.ToHexStringLower(SHA256.HashData(prunePkg)),null,new AddonPayload(pruneZip,Convert.ToHexStringLower(SHA256.HashData(pruneZip))));
+ Reject(()=>pruneStore.Rollback());
+ pruneStore.Install(pruneRelease);
+ Assert(!File.Exists(Path.Combine(pruneRoot,"app","previous.json")),"a first install has no previous version");
+ Reject(()=>pruneStore.Rollback());
+ pruneStore.Install(pruneRelease with {Version="v1.1.0"});
+ pruneStore.Install(pruneRelease with {Version="v1.1.0"});
+ var previousPointer=System.Text.Json.JsonSerializer.Deserialize<Installed>(File.ReadAllBytes(Path.Combine(pruneRoot,"app","previous.json")))!;
+ Assert(previousPointer.Version=="v1.0.0","the previous version is recorded, and a same-version repair keeps it");
+ var keepMe=Path.Combine(pruneRoot,"app","versions","keep-me"); Directory.CreateDirectory(keepMe);
+ Directory.CreateDirectory(Path.Combine(pruneRoot,"app","versions","v0.9.0"));
+ pruneStore.Install(pruneRelease with {Version="v1.2.0"});
+ string[] Folders(string sub) => Directory.GetDirectories(Path.Combine(pruneRoot,"app",sub)).Select(Path.GetFileName).OrderBy(x=>x,StringComparer.Ordinal).ToArray()!;
+ Assert(Folders("versions").SequenceEqual(new[]{"keep-me","v1.1.0","v1.2.0"}),"runtime folders: current and previous kept, older versions removed, unknown folders left alone: "+string.Join(",",Folders("versions")));
+ Assert(Folders("control-center").SequenceEqual(new[]{"v1.1.0","v1.2.0"}),"add-on folders pruned the same way");
+ var v12=pruneStore.Validate();
+ Assert(v12.Version=="v1.2.0" && pruneStore.HasValidControlCenter(v12),"the current version still validates after pruning");
+ File.WriteAllText(Path.Combine(pruneStore.RuntimePath(new Installed("v1.1.0","",[])),"Arkuzo-Memory-Saver.ps1"),"tampered");
+ Reject(()=>pruneStore.Rollback());
+ Assert(pruneStore.Validate().Version=="v1.2.0" && pruneStore.SkippedVersion is null,"a damaged previous version is refused and nothing changes");
+ File.WriteAllBytes(Path.Combine(pruneStore.RuntimePath(new Installed("v1.1.0","",[])),"Arkuzo-Memory-Saver.ps1"),new byte[4]);
+ var back=pruneStore.Rollback();
+ Assert(back.Version=="v1.1.0" && pruneStore.Validate().Version=="v1.1.0","rollback makes the previous version current");
+ Assert(pruneStore.HasValidControlCenter(back),"and its Control Center add-on with it");
+ Assert(pruneStore.SkippedVersion=="v1.2.0","the version it left is skipped");
+ Assert(!File.Exists(Path.Combine(pruneRoot,"app","previous.json")),"a rollback is not undone by a second one");
+ Assert(Updater.PrepareAsync(pruneStore,false,()=>Task.FromResult(pruneRelease with {Version="v1.2.0"})).GetAwaiter().GetResult().Version=="v1.1.0","the skipped release is not installed again");
+ Assert(Updater.PrepareAsync(pruneStore,false,()=>Task.FromResult(pruneRelease with {Version="v1.3.0"})).GetAwaiter().GetResult().Version=="v1.3.0","a newer release installs");
+ Assert(pruneStore.SkippedVersion is null && System.Text.Json.JsonSerializer.Deserialize<Installed>(File.ReadAllBytes(Path.Combine(pruneRoot,"app","previous.json")))!.Version=="v1.1.0","and clears the skip; the version it replaced becomes the previous one");
+ Assert(Folders("versions").SequenceEqual(new[]{"keep-me","v1.1.0","v1.3.0"}),"the rolled-back release is pruned once a newer one is installed");
+ var rollbackHost=new FixtureControlCenterHost {Running=true};
+ var rollbackWaits=0;
+ Assert(LauncherEntry.Run(new[]{"--rollback"},pruneRoot,"fixture",()=>rollbackWaits++,new FixtureControllerIo(),rollbackHost)==0 && rollbackWaits==1 && pruneStore.Validate().Version=="v1.3.0","--rollback refuses while the Control Center runs");
+ Assert(LauncherEntry.Run(new[]{"--rollback","--offline"},pruneRoot,"fixture",null,new FixtureControllerIo())==2,"--rollback takes no other flag");
+ Assert(LauncherEntry.Run(new[]{"--rollback"},pruneRoot,"fixture",null,new FixtureControllerIo(),new FixtureControlCenterHost())==0 && pruneStore.Validate().Version=="v1.1.0" && pruneStore.SkippedVersion=="v1.3.0","--rollback switches back when nothing runs");
+ Console.WriteLine("PASS prune old versions (current and previous kept), previous pointer, rollback with skip, --rollback");
+} finally { if(Directory.Exists(pruneRoot)) Directory.Delete(pruneRoot,true); }
+// The kill fallback only touches this install: its own launcher, and engines whose -File is inside <root>\app\.
+var ownRoot=@"C:\Farm\Arkuzo";
+var ps=@"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
+string Line(string script) => "\""+ps+"\" -NoProfile -ExecutionPolicy Bypass -File \""+script+"\" -Headless -DataDirectory \""+ownRoot+"\\data\"";
+Assert(InstallProcesses.IsOwnEngine(ownRoot,ps,Line(ownRoot+@"\app\control-center\v2.3.0\Arkuzo-Memory-Saver.ps1")),"the installed Control Center's engine");
+Assert(InstallProcesses.IsOwnEngine(ownRoot,ps,Line(ownRoot+@"\app\versions\v2.3.0\Arkuzo-Memory-Saver.ps1")),"the console engine");
+Assert(InstallProcesses.IsOwnEngine(ownRoot+"\\",@"C:\Program Files\PowerShell\7\pwsh.exe","pwsh -File \""+ownRoot+@"\app\versions\v2.3.0\arkuzo-memory-saver.ps1"+"\""),"pwsh, a trailing separator and any case");
+Assert(!InstallProcesses.IsOwnEngine(ownRoot,ps,Line(@"C:\Other\Arkuzo\app\versions\v2.3.0\Arkuzo-Memory-Saver.ps1")),"another installation");
+Assert(!InstallProcesses.IsOwnEngine(ownRoot,ps,Line(ownRoot+@"\src\saver\Arkuzo-Memory-Saver.ps1")),"a run from source");
+Assert(!InstallProcesses.IsOwnEngine(ownRoot,ps,Line(ownRoot+@"\app\..\src\saver\Arkuzo-Memory-Saver.ps1")),"a path that leaves app");
+Assert(!InstallProcesses.IsOwnEngine(ownRoot,ps,Line(ownRoot+@"\app-old\versions\v2.3.0\Arkuzo-Memory-Saver.ps1")),"a sibling folder whose name starts with app");
+Assert(!InstallProcesses.IsOwnEngine(ownRoot,ps,Line(ownRoot+@"\app\versions\v2.3.0\Arkuzo-Volt-Control.ps1")),"another script");
+Assert(!InstallProcesses.IsOwnEngine(ownRoot,ps,"\""+ps+"\" -File app\\versions\\v2.3.0\\Arkuzo-Memory-Saver.ps1"),"a relative path");
+Assert(!InstallProcesses.IsOwnEngine(ownRoot,@"C:\Windows\System32\cmd.exe",Line(ownRoot+@"\app\versions\v2.3.0\Arkuzo-Memory-Saver.ps1")),"not PowerShell");
+Assert(!InstallProcesses.IsOwnEngine(ownRoot,ps,"\""+ps+"\" -Command \"& '"+ownRoot+@"\app\versions\v2.3.0\Arkuzo-Memory-Saver.ps1'"+"\""),"-Command, not -File");
+Assert(!InstallProcesses.IsOwnEngine(ownRoot,ps,Line(ownRoot+@"\app\versions\v2.3.0\Arkuzo-Memory-Saver.ps1")+" -File \"C:\\x.ps1\""),"two -File arguments");
+Assert(!InstallProcesses.IsOwnEngine(ownRoot,ps,"\""+ps+"\" -File \""+ownRoot+@"\app\versions\v2.3.0\Arkuzo-Memory-Saver.ps1"),"an unterminated quote");
+Assert(!InstallProcesses.IsOwnEngine(ownRoot,ps,"") && !InstallProcesses.IsOwnEngine(ownRoot,null,Line(ownRoot+@"\app\x\Arkuzo-Memory-Saver.ps1")),"nothing known, nothing matched");
+Assert(InstallProcesses.IsOwnLauncher(ownRoot,ownRoot+@"\ArkuzoMemorySaver.exe") && !InstallProcesses.IsOwnLauncher(ownRoot,@"C:\Downloads\ArkuzoMemorySaver.exe") && !InstallProcesses.IsOwnLauncher(ownRoot,ownRoot+@"\app\ArkuzoMemorySaver.exe") && !InstallProcesses.IsOwnLauncher(ownRoot,null),"only this install's launcher");
+var rows=System.Text.Json.JsonSerializer.Serialize(new object[]{
+ new {ProcessId=11,ExecutablePath=ps,CommandLine=Line(ownRoot+@"\app\control-center\v2.3.0\Arkuzo-Memory-Saver.ps1"),StartTicks=638000000000000000L},
+ new {ProcessId=12,ExecutablePath=ps,CommandLine=Line(ownRoot+@"\src\saver\Arkuzo-Memory-Saver.ps1"),StartTicks=638000000000000001L},
+ new {ProcessId=13,ExecutablePath=ps,CommandLine=(string?)null,StartTicks=638000000000000002L}});
+var own=InstallProcesses.OwnEngines(ownRoot,rows);
+Assert(own.Count==1 && own[0].Pid==11 && own[0].StartTicks==638000000000000000L,"only rows of this install's engine are candidates");
+Assert(InstallProcesses.OwnEngines(ownRoot,System.Text.Json.JsonSerializer.Serialize(new {ProcessId=11,ExecutablePath=ps,CommandLine=Line(ownRoot+@"\app\versions\v2.3.0\Arkuzo-Memory-Saver.ps1"),StartTicks=1L})).Count==1 && InstallProcesses.OwnEngines(ownRoot,"").Count==0,"a single row and no rows");
+Assert(InstallProcesses.SameStart(638000000000000000L,638000000000009999L) && !InstallProcesses.SameStart(638000000000000000L,638000000010000000L),"a reused process id (other start time) is not killed");
+Console.WriteLine("PASS kill fallback limited to this install: own launcher, engines under app, not other installs or a run from source");
 var handler=new FixtureHandler(Zip(RuntimePackage.Files));
 var remote=new GitHubReleaseSource(handler).FetchAsync().GetAwaiter().GetResult();
 Assert(remote.Version=="v1.0.0" && handler.Requests.Count==3,"release downloaded");

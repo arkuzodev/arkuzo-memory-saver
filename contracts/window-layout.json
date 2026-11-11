@@ -1,0 +1,445 @@
+{
+  "description": "Golden vectors for the window layout planner. Get-ArkuzoWindowSlots (engine) and layoutSlots (Control Center page) must both produce expected (x, y, width, height per window) and overlap for every case. Inputs are the vault settings of the Accounts page and a work area at the origin in logical pixels at 100% scaling (96 DPI), with Roblox minimum window 800 x 622 and no learned minimum: the page preview works in exactly these terms. The engine additionally scales by the monitor DPI, offsets by the chosen monitor and learns larger minimums (tests/saver/NativeAccounts.Tests.ps1). Generated from the engine; change both planners together.",
+  "cases": [
+    {
+      "name": "auto, no windows",
+      "count": 0,
+      "screen": [1920, 1040],
+      "settings": {
+        "arrangeLayout": "auto",
+        "arrangePerRow": 2,
+        "arrangeWidth": 800,
+        "arrangeHeight": 622,
+        "arrangeGap": 4,
+        "arrangeCorner": "top-left"
+      },
+      "expected": [],
+      "overlap": false
+    },
+    {
+      "name": "auto, one window fills the screen",
+      "count": 1,
+      "screen": [1920, 1040],
+      "settings": {
+        "arrangeLayout": "auto",
+        "arrangePerRow": 2,
+        "arrangeWidth": 800,
+        "arrangeHeight": 622,
+        "arrangeGap": 4,
+        "arrangeCorner": "top-left"
+      },
+      "expected": [
+        [0, 0, 1337, 1039]
+      ],
+      "overlap": false
+    },
+    {
+      "name": "auto, two side by side",
+      "count": 2,
+      "screen": [1920, 1040],
+      "settings": {
+        "arrangeLayout": "auto",
+        "arrangePerRow": 2,
+        "arrangeWidth": 800,
+        "arrangeHeight": 622,
+        "arrangeGap": 4,
+        "arrangeCorner": "top-left"
+      },
+      "expected": [
+        [0, 0, 958, 744],
+        [962, 0, 958, 744]
+      ],
+      "overlap": false
+    },
+    {
+      "name": "auto, three",
+      "count": 3,
+      "screen": [1920, 1040],
+      "settings": {
+        "arrangeLayout": "auto",
+        "arrangePerRow": 2,
+        "arrangeWidth": 800,
+        "arrangeHeight": 622,
+        "arrangeGap": 4,
+        "arrangeCorner": "top-left"
+      },
+      "expected": [
+        [0, 0, 800, 622],
+        [560, 0, 800, 622],
+        [1120, 0, 800, 622]
+      ],
+      "overlap": true
+    },
+    {
+      "name": "auto, four on a large screen",
+      "count": 4,
+      "screen": [2560, 1400],
+      "settings": {
+        "arrangeLayout": "auto",
+        "arrangePerRow": 2,
+        "arrangeWidth": 800,
+        "arrangeHeight": 622,
+        "arrangeGap": 4,
+        "arrangeCorner": "top-left"
+      },
+      "expected": [
+        [0, 0, 897, 697],
+        [901, 0, 897, 697],
+        [0, 701, 897, 697],
+        [901, 701, 897, 697]
+      ],
+      "overlap": false
+    },
+    {
+      "name": "auto, ten overlap evenly (9 Nov farm)",
+      "count": 10,
+      "screen": [1920, 1040],
+      "settings": {
+        "arrangeLayout": "auto",
+        "arrangePerRow": 2,
+        "arrangeWidth": 800,
+        "arrangeHeight": 622,
+        "arrangeGap": 4,
+        "arrangeCorner": "top-left"
+      },
+      "expected": [
+        [0, 0, 800, 622],
+        [280, 0, 800, 622],
+        [560, 0, 800, 622],
+        [840, 0, 800, 622],
+        [1120, 0, 800, 622],
+        [0, 418, 800, 622],
+        [280, 418, 800, 622],
+        [560, 418, 800, 622],
+        [840, 418, 800, 622],
+        [1120, 418, 800, 622]
+      ],
+      "overlap": true
+    },
+    {
+      "name": "auto, thirteen",
+      "count": 13,
+      "screen": [1920, 1040],
+      "settings": {
+        "arrangeLayout": "auto",
+        "arrangePerRow": 2,
+        "arrangeWidth": 800,
+        "arrangeHeight": 622,
+        "arrangeGap": 4,
+        "arrangeCorner": "top-left"
+      },
+      "expected": [
+        [0, 0, 800, 622],
+        [280, 0, 800, 622],
+        [560, 0, 800, 622],
+        [840, 0, 800, 622],
+        [1120, 0, 800, 622],
+        [0, 209, 800, 622],
+        [280, 209, 800, 622],
+        [560, 209, 800, 622],
+        [840, 209, 800, 622],
+        [1120, 209, 800, 622],
+        [0, 418, 800, 622],
+        [280, 418, 800, 622],
+        [560, 418, 800, 622]
+      ],
+      "overlap": true
+    },
+    {
+      "name": "auto, twenty",
+      "count": 20,
+      "screen": [1920, 1040],
+      "settings": {
+        "arrangeLayout": "auto",
+        "arrangePerRow": 2,
+        "arrangeWidth": 800,
+        "arrangeHeight": 622,
+        "arrangeGap": 4,
+        "arrangeCorner": "top-left"
+      },
+      "expected": [
+        [0, 0, 800, 622],
+        [186, 0, 800, 622],
+        [372, 0, 800, 622],
+        [558, 0, 800, 622],
+        [744, 0, 800, 622],
+        [930, 0, 800, 622],
+        [1116, 0, 800, 622],
+        [0, 209, 800, 622],
+        [186, 209, 800, 622],
+        [372, 209, 800, 622],
+        [558, 209, 800, 622],
+        [744, 209, 800, 622],
+        [930, 209, 800, 622],
+        [1116, 209, 800, 622],
+        [0, 418, 800, 622],
+        [186, 418, 800, 622],
+        [372, 418, 800, 622],
+        [558, 418, 800, 622],
+        [744, 418, 800, 622],
+        [930, 418, 800, 622]
+      ],
+      "overlap": true
+    },
+    {
+      "name": "auto, six on a small laptop screen",
+      "count": 6,
+      "screen": [1366, 728],
+      "settings": {
+        "arrangeLayout": "auto",
+        "arrangePerRow": 2,
+        "arrangeWidth": 800,
+        "arrangeHeight": 622,
+        "arrangeGap": 4,
+        "arrangeCorner": "top-left"
+      },
+      "expected": [
+        [0, 0, 800, 622],
+        [283, 0, 800, 622],
+        [566, 0, 800, 622],
+        [0, 106, 800, 622],
+        [283, 106, 800, 622],
+        [566, 106, 800, 622]
+      ],
+      "overlap": true
+    },
+    {
+      "name": "auto, gap 0",
+      "count": 4,
+      "screen": [1920, 1040],
+      "settings": {
+        "arrangeLayout": "auto",
+        "arrangePerRow": 2,
+        "arrangeWidth": 800,
+        "arrangeHeight": 622,
+        "arrangeGap": 0,
+        "arrangeCorner": "top-left"
+      },
+      "expected": [
+        [0, 0, 800, 622],
+        [800, 0, 800, 622],
+        [0, 418, 800, 622],
+        [800, 418, 800, 622]
+      ],
+      "overlap": true
+    },
+    {
+      "name": "auto, gap 40, bottom-right",
+      "count": 5,
+      "screen": [1920, 1040],
+      "settings": {
+        "arrangeLayout": "auto",
+        "arrangePerRow": 2,
+        "arrangeWidth": 800,
+        "arrangeHeight": 622,
+        "arrangeGap": 40,
+        "arrangeCorner": "bottom-right"
+      },
+      "expected": [
+        [1120, 418, 800, 622],
+        [560, 418, 800, 622],
+        [0, 418, 800, 622],
+        [1120, 0, 800, 622],
+        [560, 0, 800, 622]
+      ],
+      "overlap": true
+    },
+    {
+      "name": "grid, two per row",
+      "count": 4,
+      "screen": [1920, 1040],
+      "settings": {
+        "arrangeLayout": "grid",
+        "arrangePerRow": 2,
+        "arrangeWidth": 800,
+        "arrangeHeight": 622,
+        "arrangeGap": 4,
+        "arrangeCorner": "top-left"
+      },
+      "expected": [
+        [0, 0, 800, 622],
+        [804, 0, 800, 622],
+        [0, 418, 800, 622],
+        [804, 418, 800, 622]
+      ],
+      "overlap": true
+    },
+    {
+      "name": "grid, three per row, 1000 x 700",
+      "count": 7,
+      "screen": [2560, 1400],
+      "settings": {
+        "arrangeLayout": "grid",
+        "arrangePerRow": 3,
+        "arrangeWidth": 1000,
+        "arrangeHeight": 700,
+        "arrangeGap": 4,
+        "arrangeCorner": "top-left"
+      },
+      "expected": [
+        [0, 0, 1000, 700],
+        [780, 0, 1000, 700],
+        [1560, 0, 1000, 700],
+        [0, 350, 1000, 700],
+        [780, 350, 1000, 700],
+        [1560, 350, 1000, 700],
+        [0, 700, 1000, 700]
+      ],
+      "overlap": true
+    },
+    {
+      "name": "grid, too small a size is raised to the minimum",
+      "count": 3,
+      "screen": [1920, 1040],
+      "settings": {
+        "arrangeLayout": "grid",
+        "arrangePerRow": 3,
+        "arrangeWidth": 160,
+        "arrangeHeight": 120,
+        "arrangeGap": 4,
+        "arrangeCorner": "top-left"
+      },
+      "expected": [
+        [0, 0, 800, 622],
+        [560, 0, 800, 622],
+        [1120, 0, 800, 622]
+      ],
+      "overlap": true
+    },
+    {
+      "name": "grid, more per row than windows",
+      "count": 2,
+      "screen": [1920, 1040],
+      "settings": {
+        "arrangeLayout": "grid",
+        "arrangePerRow": 12,
+        "arrangeWidth": 800,
+        "arrangeHeight": 622,
+        "arrangeGap": 4,
+        "arrangeCorner": "top-left"
+      },
+      "expected": [
+        [0, 0, 800, 622],
+        [804, 0, 800, 622]
+      ],
+      "overlap": false
+    },
+    {
+      "name": "grid, top-right",
+      "count": 3,
+      "screen": [1920, 1040],
+      "settings": {
+        "arrangeLayout": "grid",
+        "arrangePerRow": 2,
+        "arrangeWidth": 800,
+        "arrangeHeight": 622,
+        "arrangeGap": 4,
+        "arrangeCorner": "top-right"
+      },
+      "expected": [
+        [1120, 0, 800, 622],
+        [316, 0, 800, 622],
+        [1120, 418, 800, 622]
+      ],
+      "overlap": true
+    },
+    {
+      "name": "grid, bottom-left, gap 10",
+      "count": 6,
+      "screen": [1920, 1040],
+      "settings": {
+        "arrangeLayout": "grid",
+        "arrangePerRow": 3,
+        "arrangeWidth": 800,
+        "arrangeHeight": 622,
+        "arrangeGap": 10,
+        "arrangeCorner": "bottom-left"
+      },
+      "expected": [
+        [0, 418, 800, 622],
+        [560, 418, 800, 622],
+        [1120, 418, 800, 622],
+        [0, 0, 800, 622],
+        [560, 0, 800, 622],
+        [1120, 0, 800, 622]
+      ],
+      "overlap": true
+    },
+    {
+      "name": "cascade",
+      "count": 5,
+      "screen": [1920, 1040],
+      "settings": {
+        "arrangeLayout": "cascade",
+        "arrangePerRow": 2,
+        "arrangeWidth": 800,
+        "arrangeHeight": 622,
+        "arrangeGap": 4,
+        "arrangeCorner": "top-left"
+      },
+      "expected": [
+        [0, 0, 800, 622],
+        [32, 32, 800, 622],
+        [64, 64, 800, 622],
+        [96, 96, 800, 622],
+        [128, 128, 800, 622]
+      ],
+      "overlap": true
+    },
+    {
+      "name": "cascade wraps around",
+      "count": 20,
+      "screen": [1920, 1040],
+      "settings": {
+        "arrangeLayout": "cascade",
+        "arrangePerRow": 2,
+        "arrangeWidth": 1200,
+        "arrangeHeight": 800,
+        "arrangeGap": 4,
+        "arrangeCorner": "top-left"
+      },
+      "expected": [
+        [0, 0, 1200, 800],
+        [32, 32, 1200, 800],
+        [64, 64, 1200, 800],
+        [96, 96, 1200, 800],
+        [128, 128, 1200, 800],
+        [160, 160, 1200, 800],
+        [192, 192, 1200, 800],
+        [224, 224, 1200, 800],
+        [0, 0, 1200, 800],
+        [32, 32, 1200, 800],
+        [64, 64, 1200, 800],
+        [96, 96, 1200, 800],
+        [128, 128, 1200, 800],
+        [160, 160, 1200, 800],
+        [192, 192, 1200, 800],
+        [224, 224, 1200, 800],
+        [0, 0, 1200, 800],
+        [32, 32, 1200, 800],
+        [64, 64, 1200, 800],
+        [96, 96, 1200, 800]
+      ],
+      "overlap": true
+    },
+    {
+      "name": "cascade, bottom-right",
+      "count": 3,
+      "screen": [1920, 1040],
+      "settings": {
+        "arrangeLayout": "cascade",
+        "arrangePerRow": 2,
+        "arrangeWidth": 800,
+        "arrangeHeight": 622,
+        "arrangeGap": 4,
+        "arrangeCorner": "bottom-right"
+      },
+      "expected": [
+        [1120, 418, 800, 622],
+        [1088, 386, 800, 622],
+        [1056, 354, 800, 622]
+      ],
+      "overlap": true
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+# Python linting for src/saver, tests/saver and build (run: build/lint.ps1 -Only ruff).
+# The Control Center must run on Python 3.8, the oldest version the launcher accepts.
+target-version = "py38"
+line-length = 200
+
+[lint]
+# Blocking in CI: real errors only (syntax, broken comparisons, undefined names).
+# build/lint.ps1 also prints a wider report (E, F, W, B) that never fails the run.
+select = ["E9", "F63", "F7", "F82"]

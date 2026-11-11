@@ -262,7 +262,7 @@ Assert ($samples -gt $first) 'Round-robin resumes work for other generations'
 foreach($b in @('cooldown','hourly')) {
     Initialize-Fixture
     if($b -eq 'cooldown') {$recoveryAttempts=@([datetime]::UtcNow)}
-    else {$recoveryAttempts=@(1..20|ForEach-Object {[datetime]::UtcNow.AddMinutes(-2)})}
+    else {$recoveryAttempts=@(1..[int]$healthPolicy.max_recycles_per_hour|ForEach-Object {[datetime]::UtcNow.AddMinutes(-2)})}
     Invoke-ClientRecovery 101 $state
     Assert ($watcher.Kills -eq 0 -and $checks -eq 0) ("Production budget remains fail closed: $b")
 }

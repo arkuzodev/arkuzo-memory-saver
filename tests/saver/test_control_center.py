@@ -2,6 +2,7 @@ import importlib.util
 import json
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,13 @@ ENGINE = ROOT / 'src' / 'saver' / 'Arkuzo-Memory-Saver.ps1'
 spec = importlib.util.spec_from_file_location('control_center', SOURCE)
 cc = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cc)
+
+
+def free_port() -> int:
+    """A port Windows hands out right now: fixed ports fail (WinError 10013) when it has reserved their range."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(('127.0.0.1', 0))
+        return probe.getsockname()[1]
 
 
 class FakeProc:
@@ -77,28 +85,7 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(cc.ConfigError):
             cc.set_account_recovery(self.base, 'not-a-guid', False)
 
-    def test_presets_match_engine(self):
-        text = ENGINE.read_text(encoding='utf-8')
-        body = re.search(r'function Get-ArkuzoPresets \{(.*?)\n\}', text, re.S).group(1)
-        for name, values in cc.PRESETS.items():
-            block = re.search(r"'" + name + r"' = \[ordered\]@\{(.*?)\n        \}", body, re.S).group(1)
-            for key, value in values.items():
-                match = re.search(r'\b' + key + r'\s*=\s*(\S+)', block)
-                self.assertIsNotNone(match, f'{name}.{key} missing in engine')
-                raw = match.group(1)
-                engine_value = {'$true': True, '$false': False}.get(raw, raw.strip("'"))
-                if isinstance(value, int) and not isinstance(value, bool):
-                    engine_value = int(engine_value)
-                self.assertEqual(engine_value, value, f'{name}.{key}')
-
-    def test_schema_ranges_match_engine(self):
-        text = ENGINE.read_text(encoding='utf-8')
-        for function, section in (('Get-ArkuzoHealthPolicy', 'health'), ('Get-ArkuzoRestorePolicy', 'recovery')):
-            body = re.search('function ' + function + r'\(.*?\n\}', text, re.S).group(0)
-            ranges = dict((k, (int(a), int(b))) for k, a, b in re.findall(r'(\w+)\s*=\s*@\((\d+),(\d+)\)', body))
-            for key, rule in cc.SCHEMA[section].items():
-                if rule[0] == 'int':
-                    self.assertEqual(ranges.get(key), (rule[1], rule[2]), f'{section}.{key}')
+    # Presets and ranges are checked against contracts/config-schema.json in test_config_schema.py.
 
 
 class PageScriptTests(unittest.TestCase):
@@ -361,7 +348,27 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(sup.state, 'crashed')
 
     def test_backoff_caps(self):
-        self.assertEqual([cc.restart_delay(n) for n in range(1, 8)], [5, 10, 20, 40, 80, 120, 120])
+        # A short fixed wait: a 5 s floor (never a busy loop), then 10 s, never growing.
+        self.assertEqual([cc.restart_delay(n) for n in range(1, 8)], [5, 10, 10, 10, 10, 10, 10])
+        self.assertLessEqual(cc.CRASH_LOOP_RETRY_SEC, 15)
+        self.assertGreaterEqual(min(cc.restart_delay(1), cc.CRASH_LOOP_RETRY_SEC), 5)
+
+    def test_crash_loop_keeps_retrying_quickly_and_logs_every_crash(self):
+        sup = self.make()
+        now = time.time()
+        sup.tick(None, now)
+        for n in range(1, cc.CRASH_LOOP_LIMIT + 4):
+            self.launched[-1].code = 1
+            sup.tick(None, now)
+            self.assertEqual(sup.crash_loop, n >= cc.CRASH_LOOP_LIMIT)
+            if sup.crash_loop:
+                self.assertIn(f'every {cc.CRASH_LOOP_RETRY_SEC} s', sup.message)
+            self.assertLessEqual(sup.next_restart - now, cc.CRASH_LOOP_RETRY_SEC, 'never a long wait')
+            now = sup.next_restart
+            sup.tick(None, now)
+        self.assertEqual(len(self.launched), cc.CRASH_LOOP_LIMIT + 4, 'every crash is followed by a restart')
+        crashes = [e for e in sup.feed.since(0) if e.get('level') == 'critical']
+        self.assertEqual(len(crashes), cc.CRASH_LOOP_LIMIT + 3, 'each crash is logged')
 
 
 class IssueTests(unittest.TestCase):
@@ -455,12 +462,13 @@ class HttpTests(unittest.TestCase):
     def setUpClass(cls):
         cls.data = Path(tempfile.mkdtemp())
         (cls.data / 'config.json').write_text(json.dumps({'selected_preset': 'normal', 'settings': {}, 'health': {}, 'recovery': {}}), encoding='utf-8')
-        cls.app = cc.App(cls.data, 48699)
+        cls.app = cc.App(cls.data, 0)
         cls.app.prefs['startSaverOnLaunch'] = False
         cls.app.supervisor.initial_start = False
         cls.app.prefs['autopilot'] = False
         cc.Handler.app = cls.app
-        cls.server = cc.ThreadingHTTPServer(('127.0.0.1', 48699), cc.Handler)
+        cls.server = cc.ThreadingHTTPServer(('127.0.0.1', 0), cc.Handler)
+        cls.port = cls.app.port = cls.server.server_address[1]  # Ephemeral: the host check uses app.port.
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
 
     @classmethod
@@ -470,7 +478,7 @@ class HttpTests(unittest.TestCase):
         shutil.rmtree(cls.data)
 
     def request(self, path, body=None, token=None, host=None):
-        req = urllib.request.Request('http://127.0.0.1:48699' + path, data=None if body is None else json.dumps(body).encode(), method='GET' if body is None else 'POST')
+        req = urllib.request.Request(f'http://127.0.0.1:{self.port}' + path, data=None if body is None else json.dumps(body).encode(), method='GET' if body is None else 'POST')
         if token:
             req.add_header('X-Arkuzo-Token', token)
         if host:
@@ -481,11 +489,37 @@ class HttpTests(unittest.TestCase):
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read())
 
+    def test_unexpected_handler_error_is_a_json_500_without_secrets(self):
+        original = self.app.vault_view
+
+        def broken():
+            raise KeyError('secret-' + self.app.token)
+        self.app.vault_view = broken
+        try:
+            status, body = self.request('/api/vault')
+        finally:
+            self.app.vault_view = original
+        self.assertEqual(status, 500)
+        self.assertEqual(body, {'error': 'Internal error (KeyError)'})
+        self.assertNotIn(self.app.token, json.dumps(body))
+        texts = ' '.join(str(e.get('text')) for e in self.app.feed.since(0))
+        self.assertIn('/api/vault failed (KeyError)', texts)
+        self.assertNotIn(self.app.token, texts)
+        original_start = self.app.supervisor.start
+        self.app.supervisor.start = lambda *a, **k: 1 / 0
+        try:
+            status, body = self.request('/api/saver/start', {}, token=self.app.token)
+        finally:
+            self.app.supervisor.start = original_start
+        self.assertEqual((status, body), (500, {'error': 'Internal error (ZeroDivisionError)'}))
+        status, _ = self.request('/api/state')
+        self.assertEqual(status, 200, 'the server keeps answering')
+
     def test_state_and_page(self):
         status, state = self.request('/api/state')
         self.assertEqual(status, 200)
         self.assertEqual(state['app'], cc.APP_ID)
-        with urllib.request.urlopen('http://127.0.0.1:48699/', timeout=5) as r:
+        with urllib.request.urlopen(f'http://127.0.0.1:{self.port}/', timeout=5) as r:
             page = r.read().decode()
         self.assertIn(self.app.token, page)
         self.assertNotIn('__ARKUZO_TOKEN__', page)
@@ -493,7 +527,7 @@ class HttpTests(unittest.TestCase):
     def test_posts_require_token_and_loopback_host(self):
         self.assertEqual(self.request('/api/trim-now', {})[0], 403)
         self.assertEqual(self.request('/api/trim-now', {}, token='wrong')[0], 403)
-        self.assertEqual(self.request('/api/state', host='evil.example:48699')[0], 403)
+        self.assertEqual(self.request('/api/state', host=f'evil.example:{self.port}')[0], 403)
         self.assertEqual(self.request('/api/trim-now', {}, token=self.app.token)[0], 200)
         self.assertTrue((self.data / 'trim-now.signal').exists())
 
@@ -528,6 +562,23 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(set(self.app.pages), {'fresh', 'current'})
         self.app.pages.clear()
 
+    def test_route_table_declares_auth_per_route(self):
+        self.assertEqual({p for p, (_, auth) in cc.POST_ROUTES.items() if auth == cc.Handler.AUTH_BEACON}, {'/api/window-closed'}, 'only the close beacon may carry its token in the body')
+        self.assertTrue(all(auth in (cc.Handler.AUTH_TOKEN, cc.Handler.AUTH_BEACON) for _, auth in cc.POST_ROUTES.values()), 'every POST needs the token')
+        self.assertFalse(set(cc.GET_ROUTES) & {'/api/trim-now', '/api/quit', '/api/farm/start'}, 'nothing that changes state answers GET')
+        html = (ROOT / 'src' / 'saver' / 'Arkuzo-Control-Center.html').read_text(encoding='utf-8')
+        used = set(re.findall(r"'(/api/[a-z/-]+)'", html))
+        self.assertGreaterEqual(len(used), 20)
+        self.assertEqual(used - set(cc.GET_ROUTES) - set(cc.POST_ROUTES), set(), 'every path the page calls has a route')
+
+    def test_unknown_paths(self):
+        self.assertEqual(self.request('/api/nothing')[0], 404)
+        self.assertEqual(self.request('/api/nothing', {})[0], 403, 'an unknown POST path reveals nothing without the token')
+        self.assertEqual(self.request('/api/nothing', {}, token=self.app.token)[0], 404)
+        status, body = self.request('/api/vault/nothing', {}, token=self.app.token)
+        self.assertEqual((status, body), (400, {'error': 'Unknown account action'}))
+        self.assertEqual(self.request('/api/trim-now')[0], 404, 'a POST route does not answer GET')
+
     def test_config_round_trip_with_backup(self):
         status, body = self.request('/api/config', {'changes': {'settings': {'target_ram_mb': 500}}}, token=self.app.token)
         self.assertEqual(status, 200)
@@ -554,10 +605,72 @@ class VersionTests(unittest.TestCase):
         self.assertFalse(cc.should_take_over(None, '1.0.0'), 'an unknown own version never takes over')
 
 
+class LoopSurvivalTests(unittest.TestCase):
+    """The supervisor loop is the only thing that restarts the saver: bad input must not end it."""
+
+    def setUp(self):
+        self.data = Path(tempfile.mkdtemp())
+        self.app = cc.App(self.data, free_port())
+        self.ticks = []
+        self.app.supervisor.tick = lambda heartbeat, now=None: self.ticks.append(now)
+
+    def tearDown(self):
+        shutil.rmtree(self.data, ignore_errors=True)
+
+    def test_a_malformed_heartbeat_value_does_not_end_the_loop(self):
+        updated = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+        (self.data / 'runtime-status.json').write_text(json.dumps({
+            'pid': 1, 'updatedUtc': updated, 'totalPhysicalMB': 'lots', 'systemMemory': {'availablePhysicalMB': 'n/a'},
+            'clients': [{'residentMB': 'many', 'privateMB': None}]}), encoding='utf-8')
+        with self.assertRaises(ValueError):
+            self.app.heartbeat = cc.read_json(self.data / 'runtime-status.json')
+            self.app._sample(time.time())  # The unguarded call this fix wraps.
+        self.app.step(1.0)
+        self.app.step(2.0)
+        self.assertEqual(self.ticks, [1.0, 2.0], 'the supervisor was still ticked on every pass')
+
+    def test_a_failing_log_feed_or_cookie_check_does_not_end_the_loop(self):
+        def boom(*_):
+            raise TypeError('unexpected log record')
+        self.app.feed.poll = boom
+        self.app.cookies.tick = boom
+        self.app.step(5.0)
+        self.assertEqual(self.ticks, [5.0])
+
+    def test_an_error_outside_step_does_not_end_the_loop(self):
+        calls = []
+
+        def broken_close_check(now):
+            calls.append(now)
+            raise RuntimeError('window bookkeeping failed')
+        self.app.window_close_due = broken_close_check
+        waits = []
+
+        def wait(timeout):
+            waits.append(timeout)
+            if len(waits) >= 3:
+                self.app.stop_event.set()
+        self.app.stop_event.wait = wait
+        self.app.loop()
+        self.assertEqual(len(calls), 3, 'the loop carried on after each failure')
+        self.assertEqual(waits, [2.0, 2.0, 2.0], 'and still waited between passes (no busy loop)')
+        self.assertIn('RuntimeError', self.app.supervisor.message)
+
+    def test_a_log_line_with_unexpected_types_is_survived(self):
+        logs = self.data / 'Arkuzo-Logs'
+        logs.mkdir()
+        (logs / 'Arkuzo-20260101-000000-1-part0.log').write_text(
+            json.dumps({'event': 'CLIENT_START', 'data': {'pid': 5, 'slot': 'first'}}) + '\n' +
+            json.dumps({'event': 'SESSION_STOP', 'data': {'uptimeSeconds': 'long'}}) + '\n', encoding='utf-8')
+        self.app.step(7.0)
+        self.app.step(8.0)
+        self.assertEqual(self.ticks, [7.0, 8.0])
+
+
 class WindowCloseTests(unittest.TestCase):
     def setUp(self):
         self.data = Path(tempfile.mkdtemp())
-        self.app = cc.App(self.data, 48698)
+        self.app = cc.App(self.data, free_port())
         self.stops = []
         self.app.supervisor.stop = lambda wait_sec=25.0: self.stops.append(wait_sec)
 
@@ -667,10 +780,8 @@ class WindowCloseTests(unittest.TestCase):
 
 
 class TakeoverTests(unittest.TestCase):
-    port = 48690
-
     def setUp(self):
-        TakeoverTests.port += 1
+        self.port = free_port()
         self.data = Path(tempfile.mkdtemp()).resolve()
         (self.data / 'config.json').write_text('{}', encoding='utf-8')
         self.old = cc.App(self.data, self.port)
@@ -750,7 +861,7 @@ class ProcessHandoverTests(unittest.TestCase):
         self.fail(f'no Control Center {version} on port {port}')
 
     def test_newer_process_takes_over_the_port(self):
-        port = 48689
+        port = free_port()
         old = self.start(self.old_dir / 'Arkuzo-Control-Center.py', port)
         self.wait_for(port, '1.0.0')
         new = self.start(SOURCE, port)

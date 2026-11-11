@@ -69,7 +69,7 @@
 <td valign="top">
 <img src="docs/images/readme/feature-autopilot.svg" width="44" align="left" hspace="10" alt="">
 <b>Autopilot</b><br>
-<sub>Keeps the saver alive: restarts it with backoff after a crash, exit or hang, and pauses instead of looping if it keeps crashing.</sub>
+<sub>Keeps the saver alive: restarts it after a crash, exit or hang within 5–10 s, and keeps retrying every 15 s even if it keeps crashing.</sub>
 </td>
 </tr>
 </table>

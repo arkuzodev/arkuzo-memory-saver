@@ -66,7 +66,11 @@ $shipped = [IO.File]::ReadAllText((Join-Path (Split-Path -Parent (Split-Path -Pa
 $fromFile = Get-ArkuzoHealthPolicy $shipped.health
 Assert ($fromFile.farm_freeze_remote_confirm_sec -eq 20 -and $fromFile.keep_display_awake -eq $true -and $fromFile.remote_hold_max_sec -eq 600) 'shipped defaults carry the remote settings'
 $lockText = [IO.File]::ReadAllText($source)
-Assert (([regex]::Matches($lockText, 'farm_freeze_remote_confirm_sec = \[math\]::Max\(\$\w+\.farm_freeze_remote_confirm_sec, 15\)')).Count -eq 2) 'config_lock floors the remote confirmation at 15 s on load and on reload'
+Assert (([regex]::Matches($lockText, 'Set-ArkuzoConfigLockLimits [$](?:healthPolicy|newHealth)')).Count -eq 2) 'config_lock limits are applied on load and on reload'
+$locked = Get-ArkuzoHealthPolicy @{ farm_freeze_remote_confirm_sec = 10 }; Set-ArkuzoConfigLockLimits $locked
+Assert ($locked.farm_freeze_remote_confirm_sec -eq 15) 'config_lock floors the remote confirmation at 15 s'
+$kept = Get-ArkuzoHealthPolicy @{ farm_freeze_remote_confirm_sec = 40 }; Set-ArkuzoConfigLockLimits $kept
+Assert ($kept.farm_freeze_remote_confirm_sec -eq 40) 'a longer remote confirmation is kept under config_lock'
 
 # ---- Attribution --------------------------------------------------------------------------
 Assert (Test-ArkuzoRemoteDisconnectOnset 905 900 $p) 'a freeze 5 s after a disconnect is attributed'

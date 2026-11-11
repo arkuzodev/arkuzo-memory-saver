@@ -1,0 +1,215 @@
+{
+  "description": "The one source for config.json rules, presets and account-vault settings. build/bundle.ps1 generates the Control Center tables (PRESETS, SCHEMA, TOP_LEVEL, RESTART_KEYS, VAULT_SETTINGS) from this file, between the BEGIN/END GENERATED markers in Arkuzo-Control-Center.py. tests/saver/test_config_schema.py checks the engine validators, the page and config/defaults.json against it. Rules: [\"int\", min, max], [\"bool\"], [\"enum\", [values]], [\"placeid\"], [\"serverid\"], [\"robloxversion\"] (\"auto\" or version-<16 hex>), [\"folder\"] (empty or an absolute local folder; docs/roblox-versions.md). The engine keeps its own built-in fallbacks for a config.json without a section; those are deliberately not the shipped defaults (docs/architecture.md, 2.1).",
+  "presets": {
+    "normal": {
+      "target_ram_mb": 850,
+      "trim_enabled": true,
+      "trim_every_sec": 120,
+      "priority": "BelowNormal",
+      "cores_per_instance": 4,
+      "hard_limit": false,
+      "poll_ms": 500,
+      "minimize_on_launch": false,
+      "apply_graphics_flags": false,
+      "memory_priority": "BelowNormal",
+      "adaptive_trim": true,
+      "pressure_trim_available_percent": 15
+    },
+    "agressive": {
+      "target_ram_mb": 600,
+      "trim_enabled": true,
+      "trim_every_sec": 60,
+      "priority": "BelowNormal",
+      "cores_per_instance": 2,
+      "hard_limit": false,
+      "poll_ms": 350,
+      "minimize_on_launch": false,
+      "apply_graphics_flags": false,
+      "memory_priority": "Low",
+      "adaptive_trim": true,
+      "pressure_trim_available_percent": 20
+    },
+    "extreme": {
+      "target_ram_mb": 450,
+      "trim_enabled": true,
+      "trim_every_sec": 30,
+      "priority": "BelowNormal",
+      "cores_per_instance": 1,
+      "hard_limit": false,
+      "poll_ms": 250,
+      "minimize_on_launch": false,
+      "apply_graphics_flags": false,
+      "memory_priority": "VeryLow",
+      "adaptive_trim": true,
+      "pressure_trim_available_percent": 25
+    }
+  },
+  "config": {
+    "settings": {
+      "target_ram_mb": ["int", 128, 32768],
+      "trim_every_sec": ["int", 1, 120],
+      "cores_per_instance": ["int", 1, 64],
+      "poll_ms": ["int", 250, 10000],
+      "pressure_trim_available_percent": ["int", 5, 60],
+      "trim_enabled": ["bool"],
+      "adaptive_trim": ["bool"],
+      "hard_limit": ["bool"],
+      "minimize_on_launch": ["bool"],
+      "apply_graphics_flags": ["bool"],
+      "priority": ["enum", ["Idle", "BelowNormal", "Normal"]],
+      "memory_priority": ["enum", ["VeryLow", "Low", "Medium", "BelowNormal", "Normal"]]
+    },
+    "health": {
+      "enabled": ["bool"],
+      "private_limit_mb": ["int", 1024, 16384],
+      "hang_timeout_sec": ["int", 60, 900],
+      "warmup_sec": ["int", 60, 900],
+      "pressure_percent": ["int", 60, 98],
+      "pressure_min_private_mb": ["int", 1024, 16384],
+      "cooldown_sec": ["int", 30, 300],
+      "max_recycles_per_hour": ["int", 1, 60],
+      "trim_spacing_sec": ["int", 1, 30],
+      "startup_error_timeout_sec": ["int", 0, 300],
+      "disconnect_timeout_sec": ["int", 0, 300],
+      "private_limit_sustain_sec": ["int", 0, 300],
+      "farm_freeze_enabled": ["bool"],
+      "farm_freeze_confirm_sec": ["int", 20, 120],
+      "farm_freeze_min_clients": ["int", 3, 50],
+      "farm_freeze_onset_window_sec": ["int", 5, 60],
+      "farm_freeze_max_cpu_percent": ["int", 1, 10],
+      "farm_freeze_spacing_sec": ["int", 10, 60],
+      "farm_freeze_refreeze_sec": ["int", 0, 86400],
+      "farm_freeze_remote_confirm_sec": ["int", 10, 120],
+      "farm_freeze_remote_window_sec": ["int", 10, 300],
+      "remote_hold_max_sec": ["int", 0, 3600],
+      "keep_display_awake": ["bool"]
+    },
+    "recovery": {
+      "enabled": ["bool"],
+      "restore_missing": ["bool"],
+      "restore_wait_sec": ["int", 90, 900],
+      "relaunch_delay_sec": ["int", 30, 120],
+      "retry_base_sec": ["int", 90, 900],
+      "retry_max_sec": ["int", 180, 3600],
+      "retry_max_per_hour": ["int", 1, 500],
+      "ready_stable_sec": ["int", 30, 300],
+      "abandon_after_retries": ["int", 1, 100],
+      "abandon_after_sec": ["int", 900, 86400],
+      "quarantine_sec": ["int", 0, 86400]
+    },
+    "accounts": {
+      "provider": ["enum", ["auto", "arkuzo", "volt"]]
+    }
+  },
+  "topLevel": {
+    "selected_preset": ["enum", ["normal", "agressive", "extreme"]],
+    "config_lock": ["bool"]
+  },
+  "restartKeys": ["apply_graphics_flags", "hard_limit"],
+  "vault": {
+    "defaultPlaceId": {
+      "rule": ["placeid"],
+      "default": ""
+    },
+    "launchDelaySec": {
+      "rule": ["int", 5, 120],
+      "default": 12
+    },
+    "relaunchDelaySec": {
+      "rule": ["int", 0, 600],
+      "default": 8
+    },
+    "launchTimeoutSec": {
+      "rule": ["int", 30, 600],
+      "default": 120
+    },
+    "autoRelaunchEnabled": {
+      "rule": ["bool"],
+      "default": true
+    },
+    "farmRunning": {
+      "rule": ["bool"],
+      "default": false
+    },
+    "privateServerMode": {
+      "rule": ["enum", ["none", "shared", "assigned"]],
+      "default": "none"
+    },
+    "sharedPrivateServerId": {
+      "rule": ["serverid"],
+      "default": null
+    },
+    "multiInstance": {
+      "rule": ["bool"],
+      "default": true
+    },
+    "launchMethod": {
+      "rule": ["enum", ["direct", "protocol"]],
+      "default": "direct"
+    },
+    "robloxVersion": {
+      "rule": ["robloxversion"],
+      "default": "auto"
+    },
+    "robloxVersionFallback": {
+      "rule": ["bool"],
+      "default": false
+    },
+    "robloxVersionsDir": {
+      "rule": ["folder"],
+      "default": ""
+    },
+    "cookieCheckMinutes": {
+      "rule": ["int", 0, 1440],
+      "default": 60
+    },
+    "arrangeWindows": {
+      "rule": ["bool"],
+      "default": true
+    },
+    "arrangeLayout": {
+      "rule": ["enum", ["auto", "grid", "cascade"]],
+      "default": "auto"
+    },
+    "arrangePerRow": {
+      "rule": ["int", 1, 12],
+      "default": 2
+    },
+    "arrangeWidth": {
+      "rule": ["int", 160, 1920],
+      "default": 800
+    },
+    "arrangeHeight": {
+      "rule": ["int", 120, 1440],
+      "default": 622
+    },
+    "arrangeGap": {
+      "rule": ["int", 0, 40],
+      "default": 4
+    },
+    "arrangeCorner": {
+      "rule": ["enum", ["top-left", "top-right", "bottom-left", "bottom-right"]],
+      "default": "top-left"
+    },
+    "arrangeMonitor": {
+      "rule": ["int", 0, 8],
+      "default": 0
+    },
+    "arrangeOrder": {
+      "rule": ["enum", ["fixed", "name", "launch"]],
+      "default": "fixed"
+    },
+    "arrangeMode": {
+      "rule": ["enum", ["keep", "once"]],
+      "default": "keep"
+    },
+    "arrangeVisibility": {
+      "rule": ["enum", ["normal", "background", "minimized"]],
+      "default": "normal"
+    },
+    "arrangeRequestedAtMs": {
+      "rule": ["int", 0, 9007199254740992],
+      "default": 0
+    }
+  }
+}

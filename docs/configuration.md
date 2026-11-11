@@ -80,8 +80,8 @@ Trimming waits for the **individual client's** warmup, checks its current reside
 | `hang_timeout_sec` | `120` | Continuous unresponsive-window observation before a hang becomes a candidate. |
 | `startup_error_timeout_sec` | `5` | Separate continuous observation grace for a recognized startup-error dialog. |
 | `disconnect_timeout_sec` | `5` | Grace after a detected, correctly bound in-game disconnect or kick. |
-| `cooldown_sec` | `90` | Spacing between budgeted recovery attempts. |
-| `max_recycles_per_hour` | `20` | Hourly recovery-attempt budget; restarting the monitor does not reset persisted accounting. |
+| `cooldown_sec` | `90` | Spacing between budgeted recovery attempts. With Arkuzo as the launcher, a client verified kicked or disconnected is closed without it. |
+| `max_recycles_per_hour` | `60` | Hourly budget for closing clients that are still running (hung, over the memory limit, commit pressure, startup error, farm freeze); restarting the monitor does not reset persisted accounting. Clients that already exited are never counted. With Arkuzo as the launcher, a client verified kicked or disconnected is neither counted nor held back. The default was 20 before this version; an existing `config.json` keeps its value (at least 20 with `config_lock`). |
 | `trim_spacing_sec` | `2` | Minimum global spacing between successful trim attempts. |
 | `farm_freeze_enabled` | `true` | Farm-wide freeze fast path (below). `false` leaves every hang to `hang_timeout_sec`. |
 | `farm_freeze_confirm_sec` | `35` | How long a farm-wide freeze must last, after its last client froze, before recycling starts. 20-120; at least 30 with `config_lock`. |
@@ -106,17 +106,17 @@ The **88% threshold is a candidate-selection policy, not a guarantee**. OS commi
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | `true` | Enables guarded account recovery. Disabling it blocks destructive recovery. |
-| `restore_missing` | `true` | Allows verified launch requests for eligible missing accounts. |
+| `restore_missing` | `false` | With Volt as the launcher: allows verified launch requests for eligible missing accounts that were launched before. With Arkuzo as the launcher this setting is not used: a running farm launches every opted-in account. |
 | `restore_wait_sec` | `90` | Native-launcher grace before a missing-account request can be considered. |
 | `relaunch_delay_sec` | `30` | Minimum requested native Volt relaunch delay. A larger existing user delay is preserved. |
 | `retry_base_sec` | `90` | Initial bounded retry delay. |
 | `retry_max_sec` | `900` | Default upper bound of increasing retry backoff. |
-| `retry_max_per_hour` | `6` | Per-account launch-retry budget, separate from client-termination budgets. |
+| `retry_max_per_hour` | `6` | Launch-request budget per hour, shared by all accounts and separate from the client-termination budget. Not used with Arkuzo as the launcher: there the launch spacing is the only limit, so an outage never parks the farm for the rest of the hour. |
 | `ready_stable_sec` | `30` | Continuous restoration-readiness confirmation interval. |
 | `excluded_account_ids` | `[]` | Account identifiers excluded from restoration eligibility. Keep real identifiers private. The Control Center's per-account toggle edits this list. |
-| `abandon_after_retries` | `8` | Failed recovery attempts after which an account is quarantined and stops blocking other accounts. |
-| `abandon_after_sec` | `5400` | Unresolved recovery age after which the same quarantine applies. |
-| `quarantine_sec` | `1800` | How long a quarantined account is left untouched before normal recovery resumes. `0` releases it without a quarantine. |
+| `abandon_after_retries` | `8` | Volt only: failed recovery attempts after which an account is quarantined and stops blocking other accounts. With Arkuzo as the launcher no account is ever quarantined (see below). |
+| `abandon_after_sec` | `5400` | Volt only: unresolved recovery age after which the same quarantine applies. |
+| `quarantine_sec` | `1800` | Volt only: how long a quarantined account is left untouched before normal recovery resumes. `0` releases it without a quarantine. |
 
 ## `accounts`: who launches clients
 
@@ -124,7 +124,23 @@ The **88% threshold is a candidate-selection policy, not a guarantee**. OS commi
 | :--- | :--- | :--- |
 | `provider` | `auto` (default), `arkuzo`, `volt` | `arkuzo`: the saver launches and relaunches the accounts in `data/accounts.json` itself. `volt`: Volt's account manager does, as before. `auto`: Arkuzo once `data/accounts.json` holds an account, unless Volt runs with auto-relaunch on; otherwise Volt. An active Arkuzo farm stays on Arkuzo if Volt starts later. |
 
-Arkuzo's account list, farm settings (place, launch spacing, relaunch delay, launch timeout) and private servers live in `data/accounts.json`, managed on the Control Center's Accounts page; see [accounts without Volt](accounts.md). With `arkuzo`, the `recovery` section's journal, quarantine and readiness settings still apply. Its Volt-specific waits (`restore_wait_sec`, `relaunch_delay_sec`, `retry_base_sec`) are replaced by the account list's relaunch delay, launch spacing and launch timeout.
+Arkuzo's account list, farm settings (place, launch spacing, relaunch delay, launch timeout) and private servers live in `data/accounts.json`, managed on the Control Center's Accounts page; see [accounts without Volt](accounts.md). The Roblox build Arkuzo launches is in the same file, set on the Roblox tab ([Roblox versions](roblox-versions.md)):
+
+| Setting (`accounts.json` → `settings`) | Values | Meaning |
+| :--- | :--- | :--- |
+| `robloxVersion` | `auto` (default) or `version-<16 hex>` | `auto`: the build running clients use, otherwise the newest complete installed build. A version: exactly that build, always launched directly (never through Roblox's launcher). |
+| `robloxVersionFallback` | `false` (default), `true` | When the pinned build is missing: `false` holds launches (and says why), `true` launches the Auto choice instead. |
+| `robloxVersionsDir` | empty (default) or an absolute folder | Where the Roblox tab installs builds (`<folder>\Versions`); empty is `%LOCALAPPDATA%\Arkuzo\Roblox`. Never inside Roblox's own install folders. | With `arkuzo`, the `recovery` section's journal and readiness settings still apply. Its Volt-specific waits (`restore_wait_sec`, `relaunch_delay_sec`, `retry_base_sec`) are replaced by the account list's relaunch delay, launch spacing and launch timeout.
+
+**Built-in limits with `arkuzo`** (the goal is the most time in game per account: relaunches never back off):
+
+- **No quarantine.** An account whose launches keep failing is retried at the normal spacing, forever. Launches go in a fair order (the account tried least recently first), so a failing account never takes the others' turns. `abandon_after_*` and `quarantine_sec` apply to Volt only; quarantines saved by an earlier version are cleared for vault accounts.
+- **No hourly launch cap.** The launch spacing (12 s by default) is the only limit; `retry_max_per_hour` is not used.
+- **Refused launches retry quickly.** When Roblox refuses the ticket (or doesn't answer), or the client closes before it is in game, the account is launched again after the relaunch delay (8 s). Only a launch that produces nothing at all waits the launch timeout (120 s). Moderated and signed-out accounts are never retried.
+- **Kicked clients don't wait.** A client verified kicked or disconnected (from its log or the executor signal) is closed without the cooldown or the hourly budget and is not counted against them; all such clients are closed in the same pass. Clients that already exited go straight to the relaunch queue.
+- **No serial handoff.** A client that maps exactly to one account (its own tracker, same process ID and start time) can be recovered while other accounts wait for their relaunch. Clients that are still running (hung, over the memory limit) keep `cooldown_sec` and `max_recycles_per_hour`, one closure per pass. Volt keeps the serial handoff gate and all of the limits above.
+- **Launch timing.** The launch step runs on every pass while accounts wait, so `launchDelaySec` is the real gap between launch requests (it used to be up to 10 s more); each client starts when Roblox answers its ticket request, usually within a second. The ticket request runs in the background, one at a time, and the saver keeps watching the farm meanwhile.
+- **Kicked means verified.** A disconnect counts as a kick for the fast path when the Roblox log reports it (a client-initiated leave, code 285, never does) or the executor signal reports an error message or prompt. A signal that only says the connection object went away (which an ordinary teleport can also cause) keeps the cooldown and budget.
 
 ## `pagefile`: guarded virtual memory scaling (bounded)
 
@@ -165,6 +181,16 @@ Restoration confirmation requires all of the following for the exact account:
 - Continuous successful observation over `ready_stable_sec`.
 
 A launch-button invocation, process creation, or “Connected” label alone does not satisfy these checks. Passing them confirms the observed readiness interval—not long-term stability, useful gameplay, or an endurance test.
+
+## Command-line logging options
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `-MaxLogMB` | `10` | Size of one diagnostic log part; each session keeps its newest five parts. |
+| `-MaxLogSessions` | `200` | At start, older sessions' logs in `Arkuzo-Logs` are deleted beyond the newest 200 sessions... |
+| `-MaxLogTotalMB` | `300` | ...or beyond 300 MB in all, whichever comes first. The current session is never deleted. A long farm session writes about 25–45 MB a day, so the defaults keep roughly a week of a busy farm (several days at the least); many short sessions (restarts) are small and mostly limited by the size cap. Only `Arkuzo-<session>-part<N>.log` files are touched. |
+
+A log write that fails (disk full, the file locked) pauses logging for 5 s and then continues in a new part. While a write is failing, closures wait: every closure still needs a successful audit write.
 
 ## Changes and troubleshooting
 

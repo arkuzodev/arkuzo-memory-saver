@@ -184,7 +184,7 @@ class VaultTests(unittest.TestCase):
         with self.assertRaises(cc.VaultError):
             cc.update_vault_settings(self.data, {'launchDelaySec': 1})
         layout = cc.update_vault_settings(self.data, {'arrangePerRow': 3, 'arrangeVisibility': 'background', 'arrangeCorner': 'bottom-right'})
-        self.assertEqual((layout['arrangePerRow'], layout['arrangeVisibility'], layout['arrangeWidth']), (3, 'background', 320))
+        self.assertEqual((layout['arrangePerRow'], layout['arrangeVisibility'], layout['arrangeWidth']), (3, 'background', 800))
         for bad in ({'arrangePerRow': 0}, {'arrangeVisibility': 'hidden'}, {'arrangeWidth': 100}):
             with self.assertRaises(cc.VaultError):
                 cc.update_vault_settings(self.data, bad)

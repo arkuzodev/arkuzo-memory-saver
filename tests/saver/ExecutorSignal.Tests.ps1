@@ -70,6 +70,18 @@ try {
     Assert ($script:lastDiagnostic.kind -eq "EXECUTOR_KICK_SIGNAL_TRIGGERED") "Diagnostic event must fire"
     Assert (-not (Test-Path $rootSig)) "Signal file in root workspace must be deleted after consumption"
 
+    # Test 2b: one tracked client and a signal naming another account: nothing is marked.
+    $otherState = [pscustomobject]@{ isDisconnected = $false; GameReady = $true; DisconnectReason = $null; TrackerId = '88888'; StartTicks = 1; Watcher = $null; LogPath = $null }
+    $script:tracked = @{ 6666 = $otherState }
+    function script:Resolve-ArkuzoAccountName { param($ProcessId, $TrackerId, $LogPath) return 'SomeoneElse' }
+    $script:lastDiagnostic = $null
+    $otherSig = Join-Path $fakePotWs "arkuzo_signals_TestFarmer2.json"
+    [IO.File]::WriteAllText($otherSig, $payload, [Text.Encoding]::UTF8)
+    Process-ArkuzoExecutorSignals
+    Assert (-not $otherState.isDisconnected -and $otherState.GameReady) "A signal naming another account must not mark the only tracked client"
+    Assert ($null -eq $script:lastDiagnostic) "No kick diagnostic for an unmatched signal"
+    Assert (-not (Test-Path $otherSig)) "Unmatched signal file is still consumed"
+
     # Test 3: Stale signals are ignored and cleaned up
     $staleFile = Join-Path $fakeVoltWs "arkuzo_signals_old.json"
     $stalePayload = @{

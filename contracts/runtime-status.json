@@ -1,0 +1,38 @@
+{
+  "description": "Shape of data/runtime-status.json (the saver's heartbeat). The engine writes exactly these keys; readers may rely on them. Adding a key is compatible: add it here and leave schemaVersion alone. Removing or renaming a key, or changing what one means, needs a new schemaVersion and readers that accept both. Checked by tests/saver/RuntimeStatusContract.Tests.ps1 (writer) and tests/saver/test_contracts.py (Control Center, page, launcher).",
+  "schemaVersion": 1,
+  "topLevel": [
+    "schemaVersion", "version", "pid", "startTicks", "updatedUtc", "monitorOnly", "controller",
+    "clients", "accounts", "expectedAccounts", "missingAccounts",
+    "pending", "pendingRecoveries", "suspendedAccounts", "suspendedAccountCount", "missingRecoveryBlocked",
+    "voltControlAvailable", "recoveryJournalHealthy", "systemMemory", "health", "recovery", "logFailed",
+    "pagefilePolicy", "pagefile", "nativePrivileges", "graphics",
+    "updateAvailable", "remoteSession",
+    "accountProvider", "accountProviderNotice", "farmRunning", "robloxVersion",
+    "quarantined", "uptimeSec", "trims", "totals", "totalPhysicalMB", "settings", "alerts"
+  ],
+  "client": [
+    "pid", "startTicks", "cpuPercent", "residentMB", "privateMB", "responding", "windowPresent", "launchError",
+    "state", "sampleTime", "eligible", "isDisconnected", "parentId", "account", "slot", "ageSec", "nextTrim",
+    "gameReady", "disconnectReason", "memoryPriority"
+  ],
+  "account": [
+    "accountId", "username", "processId", "uiStatus", "controlReady", "cookieStatus", "suspensionSafe", "autoRelaunch"
+  ],
+  "settings": [
+    "mode", "targetMB", "trimEnabled", "trimEverySec", "effectiveTrimSec", "trimPressure", "availablePhysicalPercent",
+    "adaptiveTrim", "priority", "memoryPriority", "coresPerInstance", "softLimit", "configLocked"
+  ],
+  "readers": {
+    "supervisor": ["pid", "startTicks", "updatedUtc"],
+    "instantClose": { "topLevel": ["accountProvider", "clients", "accounts"], "client": ["pid", "startTicks"], "account": ["accountId", "processId"] },
+    "launcherTakeover": ["pid", "startTicks", "updatedUtc", "controller", "monitorOnly"],
+    "controlCenterState": [
+      "schemaVersion", "version", "pid", "uptimeSec", "trims", "totals", "settings", "systemMemory", "totalPhysicalMB", "clients",
+      "accounts", "pending", "quarantined", "suspendedAccounts", "alerts", "voltControlAvailable",
+      "recoveryJournalHealthy", "missingRecoveryBlocked", "expectedAccounts", "missingAccounts", "pendingRecoveries",
+      "health", "recovery", "logFailed", "updateAvailable", "accountProvider", "accountProviderNotice", "remoteSession",
+      "robloxVersion"
+    ]
+  }
+}

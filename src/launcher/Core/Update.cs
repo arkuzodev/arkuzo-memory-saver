@@ -5,10 +5,12 @@ public sealed class GitHubReleaseSource
  private readonly HttpMessageHandler handler;
  public GitHubReleaseSource() : this(new HttpClientHandler {AllowAutoRedirect=false,UseCookies=false}) { }
  internal GitHubReleaseSource(HttpMessageHandler handler) { this.handler=handler; }
+ // Stamped from the VERSION file at build time (src/launcher/Directory.Build.props).
+ internal static string UserAgentVersion => typeof(GitHubReleaseSource).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
  public async Task<ReleasePayload> FetchAsync()
  {
   using var client=new HttpClient(handler) {Timeout=TimeSpan.FromSeconds(30)};
-  client.DefaultRequestHeaders.UserAgent.ParseAdd("ArkuzoMemorySaver-Launcher/1.0.2");
+  client.DefaultRequestHeaders.UserAgent.ParseAdd("ArkuzoMemorySaver-Launcher/"+UserAgentVersion);
   client.DefaultRequestHeaders.Add("X-GitHub-Api-Version","2022-11-28");
   using var budget=new CancellationTokenSource(TimeSpan.FromSeconds(90));
   var metadata=await Download(client,"https://api.github.com/repos/arkuzodev/arkuzo-memory-saver/releases/latest",1024*1024,budget.Token);
@@ -83,6 +85,23 @@ public static class Updater
   catch(Exception ex) when(ex is HttpRequestException or TaskCanceledException)
   {
    Console.Error.WriteLine("Network unavailable. Validating known-good local runtime.");
+   return store.Validate();
+  }
+  catch(InvalidDataException ex)
+  {
+   // The latest release itself is unusable (an asset missing or still uploading, bad metadata).
+   // A runtime that is already installed and valid must still start; with none, the release error stands.
+   Installed? known=null;
+   try { known=store.Validate(); }
+   catch(Exception local) when(local is InvalidDataException or IOException or UnauthorizedAccessException) { }
+   if(known is null) throw;
+   Console.Error.WriteLine("Latest release could not be used ("+ex.Message+"). Starting the installed runtime "+known.Version+".");
+   return known;
+  }
+  if (store.SkippedVersion is { } skipped && release.Version==skipped && store.TryGetInstalled(out _))
+  {
+   // Rolled back from this release (--rollback): stay on the installed version until a newer one is published.
+   Console.Error.WriteLine("Release "+skipped+" was rolled back; starting the installed runtime.");
    return store.Validate();
   }
   if (store.TryGetInstalled(out var current) && Installation.ParseVersion(release.Version) <= Installation.ParseVersion(current.Version))

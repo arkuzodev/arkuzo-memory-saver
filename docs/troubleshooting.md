@@ -24,6 +24,16 @@ The launcher must reject that runtime. Check connectivity, proxy interference, a
 
 SHA-256 verifies agreement with the published checksum; it does not make an unsigned executable signed or establish trust independently of the release source.
 
+### A new version does not work: roll back
+
+The launcher keeps the version you had before the last update (and removes older ones). To go back to it:
+
+1. Quit the Control Center (**Settings > Quit app**) and stop the saver.
+2. Run `ArkuzoMemorySaver.exe --rollback` from a terminal in the install folder.
+3. Start `ArkuzoMemorySaver.exe` as usual.
+
+The version you left is skipped until a newer release is published; then the launcher updates as normal. A rollback needs the files of the previous version to be intact (they are checked first) and works once per update. This needs an `ArkuzoMemorySaver.exe` built after this change.
+
 ### The saver refuses to start because configuration is invalid
 
 Your existing `data/config.json` is intentionally preserved. Stop the saver, back up the file, and correct malformed JSON or invalid values, or restore your own known-good backup. JSON cannot contain comments or trailing commas. See [configuration](configuration.md).
@@ -89,7 +99,7 @@ Singleton protection applies across saver copies. The launcher checks both its i
 
 Normal startup errors and nonzero runtime exits also remain visible until acknowledged. Redirected input/output and `--verify-only` never wait for keyboard input; real errors retain nonzero exit codes.
 
-Find the existing saver console and any supervising process, then stop the existing controller normally before switching versions or folders. Do not remove the mutex, kill unrelated processes, or run a second controller against the same clients.
+Find the existing saver console and any supervising process, then stop the existing controller normally before switching versions or folders. Do not remove the mutex, kill unrelated processes, or run a second controller against the same clients. When the launcher has to stop a stuck saver itself, it only stops saver processes of its own install (an engine started from its `app` folder, or its own `ArkuzoMemorySaver.exe`); a saver from another folder or run from source is never touched.
 
 ### Red `COOKIE DEAD` in the separate paused-account section
 
@@ -101,7 +111,7 @@ Once the account is precisely identified as dead, idle, and without an associate
 
 Possible causes include cooldown/hourly budgets, an unresolved handoff, invalid recovery state, unavailable audit logging, or an account that cannot be uniquely restored. Review the reason before changing policy.
 
-Default recovery attempts are spaced by a **240-second cooldown**, with **10 per hour**. Missing-account launch retries have a separate **six-per-hour** budget and persistent **90–900 second backoff**. Saver restarts do not reset journaled budgets or unresolved state.
+Closures of clients that are still running are spaced by a **90-second cooldown**, with **60 per hour** by default (`health.cooldown_sec`, `health.max_recycles_per_hour`). With Volt, missing-account launch retries have a separate **six-per-hour** budget and persistent **90–900 second backoff**; with Arkuzo as the launcher, kicked clients skip the cooldown and budget, and launches are only spaced by *Launch spacing*. Saver restarts do not reset journaled budgets or unresolved state.
 
 When one account is unresolved, the saver avoids collateral closures of other accounts. Do not erase the journal or restart the whole healthy launcher to force one account through. Confirm the missing account is opted in, previously launched, valid, uniquely mapped, and demonstrably idle—not still connecting or counting down.
 
@@ -121,19 +131,25 @@ Arkuzo Memory Saver does **not** guarantee a fix for these conditions. A seat-li
 
 Review Volt's own visible error and supported account/session controls. Never replay authenticated launch commands, extract credentials, or write to its database. Leave ambiguous clients untouched rather than trying to force a return path.
 
+### Every launch closes again with “WebLogin HTTP error, statusCode: 403”
+
+The Roblox client's own log (in `%LOCALAPPDATA%\Roblox\logs`) shows this when the Roblox desktop app has a saved login on this PC, for example after someone signed in to the app to read a moderation notice. A client launched with a ticket then loads that login and cannot sign in, on every account. The saver moves Roblox's `RobloxCookies.dat` aside before each launch when it holds a saved login (Activity: "Signed the Roblox app out on this PC"); the old file stays as `RobloxCookies.dat.arkuzo-saved-login` in `%LOCALAPPDATA%\Roblox\LocalStorage`. To read an account's notice, sign in on roblox.com in a browser instead of the Roblox app.
+
 ### An account shows “Quarantined”
 
-Its recovery failed `recovery.abandon_after_retries` times or stayed unresolved for `recovery.abandon_after_sec`. It is released so the other accounts can keep recovering, left untouched for `recovery.quarantine_sec`, then retried automatically. Check the account in Volt (session, seat, launch errors). Quarantine survives saver restarts by design.
+Volt only. Its recovery failed `recovery.abandon_after_retries` times or stayed unresolved for `recovery.abandon_after_sec`. It is released so the other accounts can keep recovering, left untouched for `recovery.quarantine_sec`, then retried automatically. Check the account in Volt (session, seat, launch errors). Quarantine survives saver restarts by design.
+
+With Arkuzo as the launcher accounts are never quarantined: a failing account is retried at the normal launch spacing for as long as the farm runs, in a fair order, so it never holds up the others. A quarantine saved by an earlier version is cleared at the first check. Look at the account's *Activity* lines ("not launched: …") for the reason.
 
 ### Control Center shows “Crashed” or “Autopilot paused”
 
-The saver exited eight times within 30 minutes, so autopilot stopped restarting it. Read `data/Arkuzo-Logs/saver-console.log` (the previous run is in `saver-console.previous.log`) and the newest `Arkuzo-*.log`, fix the cause (often an invalid `config.json`), then press **Start** or toggle **Autopilot** on.
+The saver exited eight times within 30 minutes. Autopilot keeps restarting it every 15 seconds (a single failure is restarted after 5 seconds, later ones after 10), and every failure is logged. Read `data/Arkuzo-Logs/saver-console.log` (the previous run is in `saver-console.previous.log`) and the newest `Arkuzo-*.log`, fix the cause (often an invalid `config.json`), then press **Start** or toggle **Autopilot** on.
 
 ## Logs and recovery state
 
 ### Audit writes fail or the recovery journal is invalid
 
-Destructive recovery must remain blocked. Check available disk space and access to `data/`, and preserve the affected files for local diagnosis. Stop the saver before restoring a known-good backup or moving the installation. Do not truncate the journal to clear an unresolved handoff or reset retry limits.
+Destructive recovery must remain blocked while writes fail. A failed log write pauses logging for 5 s and then continues in a new log part (*Activity*: "Saver logging works again"); closures resume as soon as a write succeeds, without a saver restart. If it keeps failing, check available disk space and access to `data/`, and preserve the affected files for local diagnosis. Old sessions' logs are removed at each start beyond the newest 200 sessions or 300 MB. Stop the saver before restoring a known-good backup or moving the installation. Do not truncate the journal to clear an unresolved handoff or reset retry limits.
 
 ### Reporting an issue safely
 

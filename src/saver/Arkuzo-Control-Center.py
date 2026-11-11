@@ -9,8 +9,11 @@ Its account manager (data/accounts.json) stores Roblox login cookies encrypted
 with Windows DPAPI for the current user, checks them with Roblox and can sign
 in through a small browser window. Cookies never leave that file in plain text:
 no API response, log line or command line carries them. It never writes Volt
-state and never touches Roblox processes: launching and closing clients stays
-inside the saver engine, which reads the same vault.
+state and never launches a client: launching stays inside the saver engine,
+which reads the same vault. The one thing it does to a Roblox process is the
+instant Close / Close all / Stop farm (close_live_clients): it ends a client
+only when the saver's heartbeat maps it to exactly one Arkuzo account and the
+live process has the same PID, start time and image name.
 """
 from __future__ import annotations
 
@@ -18,19 +21,23 @@ import argparse
 import collections
 import ctypes
 import datetime as dt
+import hashlib
 import json
 import os
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
+import zipfile
 from ctypes import wintypes
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -52,8 +59,13 @@ START_GRACE_SEC = 150
 STABLE_RESET_SEC = 600
 CRASH_LOOP_WINDOW_SEC = 1800
 CRASH_LOOP_LIMIT = 8
-# After a crash loop, keep trying slowly: an unmanaged farm is worse than a retry.
-CRASH_LOOP_RETRY_SEC = 600
+# Restarts never back off far: every minute the saver is down is a minute the farm runs
+# unmanaged. The first retry waits RESTART_FLOOR_SEC, every later one RESTART_MAX_SEC, so a
+# saver that dies at once can never busy-loop. A crash loop (CRASH_LOOP_LIMIT failures in
+# CRASH_LOOP_WINDOW_SEC) is only shown as such; it keeps retrying every CRASH_LOOP_RETRY_SEC.
+RESTART_FLOOR_SEC = 5
+RESTART_MAX_SEC = 10
+CRASH_LOOP_RETRY_SEC = 15
 # A pause this long in the 2 s supervisor loop means the PC slept or stalled; that is not the saver's silence.
 SUSPEND_GAP_SEC = 30
 # After the last window closes the Control Center quits; a page reload reconnects well within this.
@@ -62,56 +74,102 @@ WINDOW_CLOSE_GRACE_SEC = 8
 # not seen for this long belongs to a window that is gone, e.g. one reloaded after an update.
 PAGE_STALE_SEC = 180
 
-# Mirrors Get-ArkuzoPresets in the engine; tests cross-check the two.
-PRESETS = {
-    'normal': {'target_ram_mb': 850, 'trim_enabled': True, 'trim_every_sec': 120, 'priority': 'BelowNormal', 'cores_per_instance': 4,
-               'hard_limit': False, 'poll_ms': 500, 'minimize_on_launch': False, 'apply_graphics_flags': False,
-               'memory_priority': 'BelowNormal', 'adaptive_trim': True, 'pressure_trim_available_percent': 15},
-    'agressive': {'target_ram_mb': 600, 'trim_enabled': True, 'trim_every_sec': 60, 'priority': 'BelowNormal', 'cores_per_instance': 2,
-                  'hard_limit': False, 'poll_ms': 350, 'minimize_on_launch': False, 'apply_graphics_flags': False,
-                  'memory_priority': 'Low', 'adaptive_trim': True, 'pressure_trim_available_percent': 20},
-    'extreme': {'target_ram_mb': 450, 'trim_enabled': True, 'trim_every_sec': 30, 'priority': 'BelowNormal', 'cores_per_instance': 1,
-                'hard_limit': False, 'poll_ms': 250, 'minimize_on_launch': False, 'apply_graphics_flags': False,
-                'memory_priority': 'VeryLow', 'adaptive_trim': True, 'pressure_trim_available_percent': 25},
-}
+# The heartbeat (data/runtime-status.json) is a contract with the engine: contracts/runtime-status.json.
+# An engine from before schemaVersion existed writes none; a newer one is still read, with a notice.
+HEARTBEAT_SCHEMA_VERSION = 1
+# What /api/state passes on to the page. A new heartbeat key the page needs is added here and in the contract.
+HEARTBEAT_VIEW_KEYS = (
+    'schemaVersion', 'version', 'pid', 'uptimeSec', 'trims', 'totals', 'settings', 'systemMemory', 'totalPhysicalMB', 'clients',
+    'accounts', 'pending', 'quarantined', 'suspendedAccounts', 'alerts', 'voltControlAvailable',
+    'recoveryJournalHealthy', 'missingRecoveryBlocked', 'expectedAccounts', 'missingAccounts', 'pendingRecoveries',
+    'health', 'recovery', 'logFailed', 'updateAvailable', 'accountProvider', 'accountProviderNotice', 'remoteSession',
+    'robloxVersion')
 
-# (kind, min, max) for numbers; ('bool',) and ('enum', values) otherwise. Ranges
-# mirror the engine validators so a saved file is never rejected on reload.
+# Config rules, presets and account-vault settings come from contracts/config-schema.json, the one
+# source: the blocks below are generated from it, and tests check the engine and the page against it.
+# Rules are (kind, min, max) for numbers, ('bool',) and ('enum', values) otherwise; ranges match the
+# engine validators so a saved file is never rejected on reload. TOP_LEVEL holds only real preset
+# names (the engine's -Mode ValidateSet). RESTART_KEYS need a saver restart; everything else in
+# settings/health/recovery is applied by the running saver. accounts.provider: who launches and
+# relaunches clients (auto = Arkuzo once data/accounts.json has an account, otherwise Volt).
+# BEGIN GENERATED config-schema: written by build/bundle.ps1 from contracts/config-schema.json. Edit the schema, then run build/bundle.ps1.
+PRESETS = {
+    'normal': {
+        'target_ram_mb': 850, 'trim_enabled': True, 'trim_every_sec': 120, 'priority': 'BelowNormal', 'cores_per_instance': 4,
+        'hard_limit': False, 'poll_ms': 500, 'minimize_on_launch': False, 'apply_graphics_flags': False, 'memory_priority': 'BelowNormal',
+        'adaptive_trim': True, 'pressure_trim_available_percent': 15,
+    },
+    'agressive': {
+        'target_ram_mb': 600, 'trim_enabled': True, 'trim_every_sec': 60, 'priority': 'BelowNormal', 'cores_per_instance': 2,
+        'hard_limit': False, 'poll_ms': 350, 'minimize_on_launch': False, 'apply_graphics_flags': False, 'memory_priority': 'Low',
+        'adaptive_trim': True, 'pressure_trim_available_percent': 20,
+    },
+    'extreme': {
+        'target_ram_mb': 450, 'trim_enabled': True, 'trim_every_sec': 30, 'priority': 'BelowNormal', 'cores_per_instance': 1,
+        'hard_limit': False, 'poll_ms': 250, 'minimize_on_launch': False, 'apply_graphics_flags': False, 'memory_priority': 'VeryLow',
+        'adaptive_trim': True, 'pressure_trim_available_percent': 25,
+    },
+}
 SCHEMA = {
     'settings': {
-        'target_ram_mb': ('int', 128, 32768), 'trim_every_sec': ('int', 1, 120), 'cores_per_instance': ('int', 1, 64),
-        'poll_ms': ('int', 250, 10000), 'pressure_trim_available_percent': ('int', 5, 60),
-        'trim_enabled': ('bool',), 'adaptive_trim': ('bool',), 'hard_limit': ('bool',), 'minimize_on_launch': ('bool',),
+        'target_ram_mb': ('int', 128, 32768),
+        'trim_every_sec': ('int', 1, 120),
+        'cores_per_instance': ('int', 1, 64),
+        'poll_ms': ('int', 250, 10000),
+        'pressure_trim_available_percent': ('int', 5, 60),
+        'trim_enabled': ('bool',),
+        'adaptive_trim': ('bool',),
+        'hard_limit': ('bool',),
+        'minimize_on_launch': ('bool',),
         'apply_graphics_flags': ('bool',),
         'priority': ('enum', ('Idle', 'BelowNormal', 'Normal')),
         'memory_priority': ('enum', ('VeryLow', 'Low', 'Medium', 'BelowNormal', 'Normal')),
     },
     'health': {
-        'enabled': ('bool',), 'private_limit_mb': ('int', 1024, 16384), 'hang_timeout_sec': ('int', 60, 900),
-        'warmup_sec': ('int', 60, 900), 'pressure_percent': ('int', 60, 98), 'pressure_min_private_mb': ('int', 1024, 16384),
-        'cooldown_sec': ('int', 30, 300), 'max_recycles_per_hour': ('int', 1, 60), 'trim_spacing_sec': ('int', 1, 30),
-        'startup_error_timeout_sec': ('int', 0, 300), 'disconnect_timeout_sec': ('int', 0, 300),
+        'enabled': ('bool',),
+        'private_limit_mb': ('int', 1024, 16384),
+        'hang_timeout_sec': ('int', 60, 900),
+        'warmup_sec': ('int', 60, 900),
+        'pressure_percent': ('int', 60, 98),
+        'pressure_min_private_mb': ('int', 1024, 16384),
+        'cooldown_sec': ('int', 30, 300),
+        'max_recycles_per_hour': ('int', 1, 60),
+        'trim_spacing_sec': ('int', 1, 30),
+        'startup_error_timeout_sec': ('int', 0, 300),
+        'disconnect_timeout_sec': ('int', 0, 300),
         'private_limit_sustain_sec': ('int', 0, 300),
-        'farm_freeze_enabled': ('bool',), 'farm_freeze_confirm_sec': ('int', 20, 120), 'farm_freeze_min_clients': ('int', 3, 50),
-        'farm_freeze_onset_window_sec': ('int', 5, 60), 'farm_freeze_max_cpu_percent': ('int', 1, 10),
-        'farm_freeze_spacing_sec': ('int', 10, 60), 'farm_freeze_refreeze_sec': ('int', 0, 86400),
-        'farm_freeze_remote_confirm_sec': ('int', 10, 120), 'farm_freeze_remote_window_sec': ('int', 10, 300),
-        'remote_hold_max_sec': ('int', 0, 3600), 'keep_display_awake': ('bool',),
+        'farm_freeze_enabled': ('bool',),
+        'farm_freeze_confirm_sec': ('int', 20, 120),
+        'farm_freeze_min_clients': ('int', 3, 50),
+        'farm_freeze_onset_window_sec': ('int', 5, 60),
+        'farm_freeze_max_cpu_percent': ('int', 1, 10),
+        'farm_freeze_spacing_sec': ('int', 10, 60),
+        'farm_freeze_refreeze_sec': ('int', 0, 86400),
+        'farm_freeze_remote_confirm_sec': ('int', 10, 120),
+        'farm_freeze_remote_window_sec': ('int', 10, 300),
+        'remote_hold_max_sec': ('int', 0, 3600),
+        'keep_display_awake': ('bool',),
     },
     'recovery': {
-        'enabled': ('bool',), 'restore_missing': ('bool',), 'restore_wait_sec': ('int', 90, 900),
-        'relaunch_delay_sec': ('int', 30, 120), 'retry_base_sec': ('int', 90, 900), 'retry_max_sec': ('int', 180, 3600),
-        'retry_max_per_hour': ('int', 1, 500), 'ready_stable_sec': ('int', 30, 300),
-        'abandon_after_retries': ('int', 1, 100), 'abandon_after_sec': ('int', 900, 86400), 'quarantine_sec': ('int', 0, 86400),
+        'enabled': ('bool',),
+        'restore_missing': ('bool',),
+        'restore_wait_sec': ('int', 90, 900),
+        'relaunch_delay_sec': ('int', 30, 120),
+        'retry_base_sec': ('int', 90, 900),
+        'retry_max_sec': ('int', 180, 3600),
+        'retry_max_per_hour': ('int', 1, 500),
+        'ready_stable_sec': ('int', 30, 300),
+        'abandon_after_retries': ('int', 1, 100),
+        'abandon_after_sec': ('int', 900, 86400),
+        'quarantine_sec': ('int', 0, 86400),
     },
-    # Who launches and relaunches clients: Arkuzo's own account manager or Volt's.
-    # auto = Arkuzo once data/accounts.json has an account, otherwise Volt.
-    'accounts': {'provider': ('enum', ('auto', 'arkuzo', 'volt'))},
+    'accounts': {
+        'provider': ('enum', ('auto', 'arkuzo', 'volt')),
+    },
 }
-# The engine's -Mode ValidateSet only accepts real preset names.
 TOP_LEVEL = {'selected_preset': ('enum', ('normal', 'agressive', 'extreme')), 'config_lock': ('bool',)}
-# Everything else in settings/health/recovery is applied by the running saver.
-RESTART_KEYS = {'hard_limit', 'apply_graphics_flags'}
+RESTART_KEYS = {'apply_graphics_flags', 'hard_limit'}
+# END GENERATED config-schema
 
 # Diagnostic events worth showing, with their feed category.
 EVENT_KINDS = {
@@ -126,7 +184,10 @@ EVENT_KINDS = {
     'WARNING': 'warning', 'CONFIG_RELOADED': 'saver', 'SETTINGS_APPLIED_LIVE': 'saver', 'TRIM_NOW_REQUESTED': 'memory',
     'ORPHAN_CRASH_HANDLER_CLOSED': 'client', 'SYSTEM_RESOURCE_EXHAUSTION': 'error',
     'NATIVE_LAUNCH_REQUEST': 'recovery', 'NATIVE_LAUNCH_RESULT': 'recovery', 'NATIVE_CLIENT_CLOSED': 'client',
-    'NATIVE_COOKIE_DEAD': 'recovery', 'NATIVE_ACCOUNT_MODERATED': 'recovery','ACCOUNT_PROVIDER': 'saver', 'NATIVE_LAUNCH_BLOCKED': 'warning',
+    'NATIVE_COOKIE_DEAD': 'recovery', 'NATIVE_ACCOUNT_MODERATED': 'recovery',
+    'NATIVE_LAUNCH_STARTED': 'recovery', 'NATIVE_LAUNCH_FAILED': 'recovery', 'NATIVE_LAUNCH_EXITED': 'recovery',
+    'LOG_WRITE_RECOVERED': 'saver', 'LOG_RETENTION': 'saver',
+    'ROBLOX_SAVED_LOGIN_SET_ASIDE': 'recovery', 'ACCOUNT_PROVIDER': 'saver', 'NATIVE_LAUNCH_BLOCKED': 'warning',
     'REMOTE_SESSION_CHANGED': 'saver', 'KEEP_AWAKE': 'saver',
 }  # Individual trims would flood the feed; the heartbeat carries their count.
 
@@ -356,7 +417,9 @@ COOKIE_NAME = '.ROBLOSECURITY'
 ROBLOX_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36'
 TRACKER = re.compile(r'\A[1-9][0-9]{9,15}\Z')
 DIGITS = re.compile(r'\A[1-9][0-9]{0,18}\Z')
+ROBLOX_VERSION = re.compile(r'\Aversion-[0-9a-f]{16}\Z')
 
+# BEGIN GENERATED vault-settings: written by build/bundle.ps1 from contracts/config-schema.json. Edit the schema, then run build/bundle.ps1.
 VAULT_SETTINGS = {
     # name: (rule, default). Rules use the same validate_value as config edits.
     'defaultPlaceId': (('placeid',), ''),
@@ -369,21 +432,24 @@ VAULT_SETTINGS = {
     'sharedPrivateServerId': (('serverid',), None),
     'multiInstance': (('bool',), True),
     'launchMethod': (('enum', ('direct', 'protocol')), 'direct'),
+    'robloxVersion': (('robloxversion',), 'auto'),
+    'robloxVersionFallback': (('bool',), False),
+    'robloxVersionsDir': (('folder',), ''),
     'cookieCheckMinutes': (('int', 0, 1440), 60),
-    # Window layout of Arkuzo-launched clients (the engine arranges them).
     'arrangeWindows': (('bool',), True),
     'arrangeLayout': (('enum', ('auto', 'grid', 'cascade')), 'auto'),
     'arrangePerRow': (('int', 1, 12), 2),
-    'arrangeWidth': (('int', 160, 1920), 320),
-    'arrangeHeight': (('int', 120, 1440), 240),
+    'arrangeWidth': (('int', 160, 1920), 800),
+    'arrangeHeight': (('int', 120, 1440), 622),
     'arrangeGap': (('int', 0, 40), 4),
     'arrangeCorner': (('enum', ('top-left', 'top-right', 'bottom-left', 'bottom-right')), 'top-left'),
     'arrangeMonitor': (('int', 0, 8), 0),
     'arrangeOrder': (('enum', ('fixed', 'name', 'launch')), 'fixed'),
     'arrangeMode': (('enum', ('keep', 'once')), 'keep'),
     'arrangeVisibility': (('enum', ('normal', 'background', 'minimized')), 'normal'),
-    'arrangeRequestedAtMs': (('int', 0, 2 ** 53), 0),
+    'arrangeRequestedAtMs': (('int', 0, 9007199254740992), 0),
 }
+# END GENERATED vault-settings
 ACCOUNT_FIELDS = {
     'alias': 40, 'group': 40, 'notes': 500,
 }
@@ -501,6 +567,12 @@ def _validate_setting(name, value, vault):
         if not any(s.get('id') == value for s in vault.get('privateServers') or []):
             raise VaultError('Unknown private server')
         return value
+    if rule[0] == 'robloxversion':
+        if value == 'auto' or (isinstance(value, str) and ROBLOX_VERSION.match(value)):
+            return value
+        raise VaultError('Roblox version must be "auto" or version- followed by 16 hex digits')
+    if rule[0] == 'folder':
+        return validate_versions_dir(value)
     try:
         return validate_value(rule, value, name)
     except ConfigError as exc:
@@ -1378,11 +1450,22 @@ def summarize_event(record: dict, names: dict) -> dict | None:
         text = f"Launching {who()}" + (f" (attempt {data.get('attempt')})" if data.get('attempt') else '')
     elif kind == 'NATIVE_LAUNCH_RESULT':
         if data.get('requestAccepted'):
-            level, text = 'good', f"{who()} started; waiting until it is in game"
-        else:
-            level, text = 'warning', f"{who()} not launched: {data.get('reason') or 'unknown reason'}"
+            return None  # Only the ticket was requested; NATIVE_LAUNCH_STARTED / _FAILED follow.
+        level, text = 'warning', f"{who()} not launched: {data.get('reason') or 'unknown reason'}"
+    elif kind == 'NATIVE_LAUNCH_STARTED':
+        level, text = 'good', f"{who()} started; waiting until it is in game"
+    elif kind == 'NATIVE_LAUNCH_FAILED':
+        level, text = 'warning', f"{who()} not launched: {data.get('reason') or 'unknown reason'}"
+    elif kind == 'NATIVE_LAUNCH_EXITED':
+        level, text = 'warning', f"{who()} closed before it was in game; relaunching after the relaunch delay"
+    elif kind == 'LOG_WRITE_RECOVERED':
+        text = f"Saver logging works again after {data.get('failures')} failed write(s)"
+    elif kind == 'LOG_RETENTION':
+        text = f"Removed {data.get('deletedFiles')} old saver log file(s) ({data.get('deletedMB')} MB); kept {data.get('keptSessions')} sessions"
     elif kind == 'NATIVE_COOKIE_DEAD':
         level, text = 'critical', f"{who()} is signed out (Roblox rejected its cookie); sign it in again"
+    elif kind == 'ROBLOX_SAVED_LOGIN_SET_ASIDE':
+        level, text = 'warning', "Signed the Roblox app out on this PC: its saved login makes launches fail (HTTP 403)"
     elif kind == 'NATIVE_ACCOUNT_MODERATED':
         level, text = 'critical', f"{who()} is moderated by Roblox; it is not launched until a cookie check finds it alive again"
     elif kind == 'NATIVE_CLIENT_CLOSED':
@@ -1507,7 +1590,7 @@ class LogTail:
 
 # ------------------------------------------------------------- supervisor
 def restart_delay(consecutive_failures: int) -> int:
-    return int(min(120, 5 * 2 ** max(0, consecutive_failures - 1)))
+    return RESTART_FLOOR_SEC if consecutive_failures <= 1 else RESTART_MAX_SEC
 
 
 class Supervisor:
@@ -1701,7 +1784,7 @@ class Supervisor:
         autopilot = bool(self.prefs.get('autopilot', True))
         self.state = 'restarting' if autopilot and not self.crash_loop else 'crashed'
         if self.crash_loop:
-            message += ' Repeated failures: retrying every 10 minutes; see the saver log.' if autopilot else ' Repeated failures.'
+            message += f' Repeated failures: retrying every {CRASH_LOOP_RETRY_SEC} s; see the saver log.' if autopilot else ' Repeated failures.'
         elif not autopilot:
             message += ' Autopilot is off.'
         self.message = message
@@ -1753,8 +1836,12 @@ def derive_issues(hb, age, supervisor_state) -> list:
         else:
             add('warning', 'Saver is not running: figures below are its last report',
                 time.strftime('Last report %H:%M:%S', time.localtime(time.time() - age)) + '. Clients are not being managed or recovered.')
+    schema = hb.get('schemaVersion')
+    if isinstance(schema, int) and not isinstance(schema, bool) and schema > HEARTBEAT_SCHEMA_VERSION:
+        add('warning', 'The saver is newer than this Control Center',
+            'Some figures may be missing or wrong. Start ArkuzoMemorySaver.exe again so both run the same version.')
     if hb.get('logFailed'):
-        add('critical', 'Saver audit logging failed', 'Destructive recovery is blocked until the saver restarts.')
+        add('critical', 'Saver audit logging failed', 'Closures wait until a log write succeeds; the saver retries in a new log file every few seconds.')
     if not hb.get('recoveryJournalHealthy'):
         add('critical', 'Recovery journal is not healthy', 'Recovery is blocked; check data/recovery-state.json.')
     if not (hb.get('recovery') or {}).get('enabled'):
@@ -1888,6 +1975,759 @@ def leave_remote_desktop(session=None, runner=subprocess.run) -> str:
     return 'moved to console'
 
 
+# ------------------------------------------------------------- Roblox versions
+# The Roblox tab (docs/roblox-versions.md). weao.gg is only a data source for version strings and
+# exploit status: every version is checked against ROBLOX_VERSION, the links in its rows are dropped
+# and nothing it names is downloaded. Roblox builds come only from Roblox's setup CDN, are checked
+# against the package manifest's sizes and MD5s, and are installed atomically: extracted into a
+# staging folder beside Versions\, completed with AppSettings.xml, then renamed into
+# Versions\version-<hash> in one step. A failed or cancelled install never reaches Versions\.
+WEAO_API = 'https://weao.gg/api'
+WEAO_UA = 'WEAO-3PService'  # weao.gg answers 403 to Python's default user agent.
+ROBLOX_CLIENT_VERSION_URL = 'https://clientsettings.roblox.com/v2/client-version/WindowsPlayer'
+ROBLOX_SETUP_BASES = ('https://setup.rbxcdn.com/channel/common/', 'https://setup-aws.rbxcdn.com/channel/common/',
+                      'https://setup-ak.rbxcdn.com/channel/common/')
+WEB_HOSTS = {'weao.gg', 'clientsettings.roblox.com', 'setup.rbxcdn.com', 'setup-aws.rbxcdn.com', 'setup-ak.rbxcdn.com'}
+# Bloxstrap's package map for the Windows player (folders relative to the version folder).
+ROBLOX_PACKAGE_DIRS = {
+    'RobloxApp.zip': '', 'Libraries.zip': '', 'redist.zip': '', 'WebView2.zip': '',
+    'shaders.zip': 'shaders', 'ssl.zip': 'ssl',
+    'content-avatar.zip': 'content/avatar', 'content-configs.zip': 'content/configs', 'content-fonts.zip': 'content/fonts',
+    'content-sky.zip': 'content/sky', 'content-sounds.zip': 'content/sounds', 'content-textures2.zip': 'content/textures',
+    'content-models.zip': 'content/models',
+    'content-textures3.zip': 'PlatformContent/pc/textures', 'content-terrain.zip': 'PlatformContent/pc/terrain',
+    'content-platform-fonts.zip': 'PlatformContent/pc/fonts',
+    'content-platform-dictionaries.zip': 'PlatformContent/pc/shared_compression_dictionaries',
+    'extracontent-luapackages.zip': 'ExtraContent/LuaPackages', 'extracontent-translations.zip': 'ExtraContent/translations',
+    'extracontent-models.zip': 'ExtraContent/models', 'extracontent-textures.zip': 'ExtraContent/textures',
+    'extracontent-places.zip': 'ExtraContent/places',
+}
+# Roblox's own installer and launcher are never put into an Arkuzo folder (nothing there can update the
+# build in place); the WebView2 runtime installer only installs WebView2 (Bloxstrap skips it too).
+ROBLOX_SKIPPED_PACKAGES = {'WebView2RuntimeInstaller.zip', 'RobloxPlayerInstaller.exe', 'RobloxPlayerLauncher.exe'}
+ROBLOX_APP_SETTINGS = ('<?xml version="1.0" encoding="UTF-8"?>\r\n<Settings>\r\n\t<ContentFolder>content</ContentFolder>\r\n'
+                       '\t<BaseUrl>http://www.roblox.com</BaseUrl>\r\n</Settings>\r\n')
+ROBLOX_INSTALL_MARKER = '.arkuzo-install.json'
+ROBLOX_STAGING_STALE_SEC = 1800  # A staging folder untouched this long belongs to an install that died.
+WEAO_CACHE_SEC = 300
+WEAO_REFRESH_MIN_SEC = 15
+EXPLOIT_ID = re.compile(r'\A[0-9A-Za-z_-]{1,64}\Z')
+BUILD_NUMBER = re.compile(r'\A[0-9]{1,6}(?:\.[0-9]{1,9}){1,3}\Z')
+
+
+class WebError(Exception):
+    """A request to weao.gg or Roblox that failed. status: HTTP status, 0 = no answer, -1 = too large."""
+
+    def __init__(self, status: int):
+        super().__init__(f'HTTP {status}')
+        self.status = status
+
+
+class InstallCancelled(Exception):
+    pass
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None  # urllib then raises HTTPError for the 30x: a redirect is never followed.
+
+
+def url_allowed(url: str) -> bool:
+    """Only HTTPS to Roblox's setup CDN, Roblox's version service and weao.gg. Tests swap this."""
+    parsed = urllib.parse.urlparse(url)
+    return parsed.scheme == 'https' and (parsed.hostname or '') in WEB_HOSTS and parsed.port in (None, 443) and not parsed.username
+
+
+def web_open(url: str, headers=None, timeout=20.0):
+    """Open an allowed URL without following redirects; the caller closes the response."""
+    if not url_allowed(url):
+        raise WebError(0)
+    merged = {'User-Agent': ROBLOX_UA, 'Accept': '*/*'}
+    merged.update(headers or {})
+    request = urllib.request.Request(url, headers=merged)
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        return opener.open(request, timeout=timeout)
+    except urllib.error.HTTPError as err:
+        err.close()
+        raise WebError(err.code)
+    except (OSError, ValueError):
+        raise WebError(0)
+
+
+def web_get(url: str, limit: int, headers=None, timeout=20.0) -> bytes:
+    response = web_open(url, headers, timeout)
+    try:
+        body = response.read(limit + 1)
+    except (OSError, ValueError):
+        raise WebError(0)
+    finally:
+        response.close()
+    if len(body) > limit:
+        raise WebError(-1)
+    return body
+
+
+def _text(value, limit: int) -> str:
+    """A display string from untrusted data: plain text, no control characters, bounded."""
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        return ''
+    return re.sub(r'[\x00-\x1f\x7f]+', ' ', str(value)).strip()[:limit]
+
+
+def weao_get(path: str):
+    return json.loads(web_get(WEAO_API + path, 2097152, {'User-Agent': WEAO_UA, 'Accept': 'application/json'}).decode('utf-8'))
+
+
+def parse_weao_versions(raw) -> dict:
+    """The Windows build of /versions/current, /past or /future, validated; {} when there is none."""
+    if not isinstance(raw, dict):
+        return {}
+    version = raw.get('Windows')
+    if not isinstance(version, str) or not ROBLOX_VERSION.match(version):
+        return {}
+    detail = raw.get('WindowsResponse') if isinstance(raw.get('WindowsResponse'), dict) else {}
+    build = detail.get('version')
+    return {'version': version, 'date': _text(raw.get('WindowsDate'), 40),
+            'build': build if isinstance(build, str) and BUILD_NUMBER.match(build) else None}
+
+
+def _percent(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 100:
+        return None
+    return int(value)
+
+
+def parse_weao_exploits(raw) -> list:
+    """weao.gg's exploit list as plain, validated rows. A row is a version source only when it is
+    a Windows exploit that names a valid build and is still listed (not hidden)."""
+    rows, seen = [], set()
+    if not isinstance(raw, list):
+        return rows
+    for item in raw[:500]:
+        if not isinstance(item, dict):
+            continue
+        ident, title = item.get('_id'), _text(item.get('title'), 60)
+        if not isinstance(ident, str) or not EXPLOIT_ID.match(ident) or ident in seen or not title:
+            continue
+        seen.add(ident)
+        platform, listed = _text(item.get('platform'), 20), item.get('rbxversion')
+        windows = platform == 'Windows'
+        build = listed if windows and isinstance(listed, str) and ROBLOX_VERSION.match(listed) else None
+        hidden = item.get('hidden') is True
+        reason = '' if build and not hidden else (
+            'Not a Windows exploit' if not windows else 'No longer listed on weao.gg' if hidden and build else 'Lists no valid Roblox build')
+        rows.append({'id': ident, 'title': title, 'version': _text(item.get('version'), 40), 'updatedDate': _text(item.get('updatedDate'), 60),
+                     'platform': platform, 'type': _text(item.get('extype'), 20), 'robloxVersion': build, 'listedVersion': _text(listed, 40),
+                     'updated': item.get('updateStatus') is True, 'detected': item.get('detected') is True, 'free': item.get('free') is True,
+                     'beta': item.get('beta') is True, 'hidden': hidden, 'multiInstance': item.get('multiInject') is True,
+                     'unc': _percent(item.get('uncPercentage')), 'sunc': _percent(item.get('suncPercentage')),
+                     'usable': bool(build) and not hidden, 'reason': reason})
+    rows.sort(key=lambda r: (not r['usable'], not r['updated'], r['title'].lower(), r['platform']))
+    return rows
+
+
+def exploit_build(exploits: list, ids, current: str | None = None) -> dict:
+    """The one Roblox build every selected exploit supports, or why there is none."""
+    if not isinstance(ids, list) or not ids or len(ids) > 60:
+        raise VaultError('Select at least one exploit')
+    by_id = {e['id']: e for e in exploits}
+    chosen = []
+    for ident in ids:
+        row = by_id.get(ident) if isinstance(ident, str) else None
+        if row is None:
+            raise VaultError('Unknown exploit: refresh the list')
+        if row not in chosen:
+            chosen.append(row)
+    result = {'version': None, 'reason': '', 'conflict': [], 'current': False, 'notes': [], 'exploits': [e['title'] for e in chosen]}
+    refused = [e for e in chosen if not e['usable']]
+    if refused:
+        result['reason'] = '; '.join(f"{e['title']} ({e['platform'] or 'unknown platform'}): {e['reason']}" for e in refused)
+        return result
+    builds = {}
+    for e in chosen:
+        builds.setdefault(e['robloxVersion'], []).append(e['title'])
+    if len(builds) > 1:
+        result['reason'] = 'The selected exploits support different Roblox builds, and a client runs one build. Pick exploits that agree.'
+        result['conflict'] = [{'version': v, 'exploits': names} for v, names in builds.items()]
+        return result
+    version = next(iter(builds))
+    result.update(version=version, current=bool(current) and version == current)
+    stale = [e['title'] for e in chosen if not e['updated']]
+    if current and version != current:
+        result['notes'].append(f'This is not Roblox\'s current build ({current}). Roblox can refuse joins from an outdated build at any time.')
+    if stale:
+        result['notes'].append(', '.join(stale) + (' is' if len(stale) == 1 else ' are') + ' not updated for Roblox\'s current build yet (weao.gg).')
+    return result
+
+
+def parse_package_manifest(text: str) -> list:
+    """Roblox's <version>-rbxPkgManifest.txt: "v0", then name, MD5, packed size, size per package."""
+    lines = [line.strip() for line in str(text).replace('\r', '').split('\n')]
+    while lines and not lines[-1]:
+        lines.pop()
+    if not lines or lines[0] != 'v0':
+        raise VaultError('Roblox sent a package manifest this Arkuzo version does not understand')
+    body, packages, seen = lines[1:], [], set()
+    if not body or len(body) % 4:
+        raise VaultError('Roblox sent a damaged package manifest')
+    for i in range(0, len(body), 4):
+        name, md5, packed, size = body[i:i + 4]
+        if not re.match(r'\A[A-Za-z0-9][A-Za-z0-9._-]{0,79}\Z', name) or not re.match(r'\A[0-9a-f]{32}\Z', md5) \
+                or not re.match(r'\A[0-9]{1,11}\Z', packed) or not re.match(r'\A[0-9]{1,11}\Z', size) or name in seen:
+            raise VaultError('Roblox sent a damaged package manifest')
+        seen.add(name)
+        packages.append({'name': name, 'md5': md5, 'packed': int(packed), 'size': int(size)})
+    return packages
+
+
+def plan_packages(packages: list) -> list:
+    """The packages to install, in manifest order. A package Arkuzo does not know stops the install:
+    leaving it out could produce a build that starts and then fails."""
+    plan = []
+    for package in packages:
+        if package['name'] in ROBLOX_SKIPPED_PACKAGES:
+            continue
+        if package['name'] not in ROBLOX_PACKAGE_DIRS:
+            raise VaultError(f"Roblox added a package this Arkuzo version does not know ({package['name']}); update Arkuzo")
+        plan.append(dict(package, folder=ROBLOX_PACKAGE_DIRS[package['name']]))
+    if not any(p['name'] == 'RobloxApp.zip' for p in plan):
+        raise VaultError('This build has no Windows player (RobloxApp.zip)')
+    if sum(p['packed'] for p in plan) > 2 << 30 or sum(p['size'] for p in plan) > 4 << 30:
+        raise VaultError('Roblox declared an implausibly large build')
+    return plan
+
+
+def parse_file_manifest(text: str) -> dict:
+    """<version>-rbxManifest.txt: relative path and MD5 per file. Keys are lower-case with forward slashes."""
+    lines = [line.strip() for line in str(text).replace('\r', '').split('\n') if line.strip()]
+    files = {}
+    for i in range(0, len(lines) - 1, 2):
+        if re.match(r'\A[0-9a-f]{32}\Z', lines[i + 1]):
+            files[lines[i].replace('\\', '/').lower()] = lines[i + 1]
+    return files
+
+
+def file_md5(path: Path) -> str:
+    digest = hashlib.md5()
+    with open(path, 'rb') as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def extract_package(archive_path: Path, target: Path, limit: int, cancel=None) -> int:
+    """Unpack one package into target. Every entry must land inside target, and the package may not
+    unpack to more than limit bytes. Returns the bytes written."""
+    base = os.path.realpath(str(target))
+    os.makedirs(base, exist_ok=True)
+    written = 0
+    with zipfile.ZipFile(str(archive_path)) as archive:
+        for info in archive.infolist():
+            name = info.filename.replace('\\', '/')
+            if name.endswith('/'):
+                continue
+            parts = [p for p in name.split('/') if p not in ('', '.')]
+            dest = os.path.realpath(os.path.join(base, *parts)) if parts else base
+            try:
+                inside = os.path.commonpath([base, dest]) == base and dest != base
+            except ValueError:
+                inside = False
+            if not inside or ':' in name:
+                raise VaultError('A Roblox package holds a path outside its folder; install stopped')
+            written += info.file_size
+            if written > limit:
+                raise VaultError('A Roblox package unpacks larger than Roblox declared; install stopped')
+            if cancel is not None and cancel.is_set():
+                raise InstallCancelled()
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            with archive.open(info) as source, open(dest, 'wb') as out:
+                shutil.copyfileobj(source, out, 1 << 20)
+            # Roblox's own file times: the saver's Auto choice ranks builds by the player's file time,
+            # so an old build installed today must not look like the newest one.
+            try:
+                stamp = time.mktime(tuple(info.date_time) + (0, 0, -1))
+                os.utime(dest, (stamp, stamp))
+            except (OverflowError, ValueError, OSError):
+                pass
+    return written
+
+
+def fetch_setup_file(name: str, limit: int) -> bytes:
+    """A file from Roblox's setup CDN, trying the mirrors in turn. Roblox answers 403 for a build it does not have."""
+    missing = 0
+    for base in ROBLOX_SETUP_BASES:
+        try:
+            return web_get(base + name, limit, timeout=30.0)
+        except WebError as err:
+            if err.status in (403, 404):
+                missing += 1
+    if missing == len(ROBLOX_SETUP_BASES):
+        raise FileNotFoundError(name)
+    raise VaultError('Roblox\'s CDN did not answer; try again later')
+
+
+def download_package(version: str, package: dict, folder: Path, cancel, on_bytes) -> Path:
+    """Download one package, checking its size and MD5; the mirrors are tried in turn."""
+    folder.mkdir(parents=True, exist_ok=True)
+    path, why = folder / package['name'], 'no answer'
+    for base in ROBLOX_SETUP_BASES:
+        digest, got = hashlib.md5(), 0
+        try:
+            response = web_open(base + version + '-' + package['name'], timeout=30.0)
+            try:
+                with open(path, 'wb') as out:
+                    while True:
+                        if cancel.is_set():
+                            raise InstallCancelled()
+                        chunk = response.read(1 << 16)
+                        if not chunk:
+                            break
+                        got += len(chunk)
+                        if got > package['packed']:
+                            raise WebError(-1)
+                        digest.update(chunk)
+                        out.write(chunk)
+                        on_bytes(got)
+            finally:
+                response.close()
+        except WebError as err:
+            why = 'larger than declared' if err.status == -1 else f'HTTP {err.status}' if err.status else 'no answer'
+            continue
+        except OSError:
+            why = 'no answer'
+            continue
+        if got == package['packed'] and digest.hexdigest() == package['md5']:
+            return path
+        why = 'checksum mismatch'
+    raise VaultError(f"Could not download {package['name']} from Roblox's CDN ({why})")
+
+
+def _is_reparse(path: Path) -> bool:
+    try:
+        return bool(getattr(os.lstat(str(path)), 'st_file_attributes', 0) & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0x400)) or path.is_symlink()
+    except OSError:
+        return True
+
+
+def clean_staging(staging: Path, now: float | None = None) -> None:
+    """Delete staging folders of installs that died (untouched for ROBLOX_STAGING_STALE_SEC)."""
+    now = time.time() if now is None else now
+    try:
+        entries = list(staging.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            touched = max(entry.stat().st_mtime, (entry / '.busy').stat().st_mtime if (entry / '.busy').exists() else 0)
+        except OSError:
+            continue
+        if now - touched > ROBLOX_STAGING_STALE_SEC and entry.is_dir() and not _is_reparse(entry):
+            shutil.rmtree(str(entry), ignore_errors=True)
+
+
+def roblox_build_complete(folder: Path) -> bool:
+    return (folder / 'RobloxPlayerBeta.exe').is_file() and (folder / 'AppSettings.xml').is_file()
+
+
+def install_roblox_build(version: str, root: Path, progress, cancel) -> dict:
+    """Download, verify and install one build into root\\Versions\\<version> (docs/roblox-versions.md)."""
+    if not isinstance(version, str) or not ROBLOX_VERSION.match(version):
+        raise VaultError('Roblox version must be version- followed by 16 hex digits')
+    versions, staging = root / 'Versions', root / '.staging'
+    final = versions / version
+    if roblox_build_complete(final):
+        raise VaultError(f'{version} is already installed')
+    if final.exists():
+        raise VaultError(f'{final} exists but is not a complete build; remove it first')
+    progress(phase='Reading the build manifest from Roblox')
+    try:
+        packages = parse_package_manifest(fetch_setup_file(version + '-rbxPkgManifest.txt', 1048576).decode('utf-8', 'replace'))
+    except FileNotFoundError:
+        raise VaultError(f'{version} is not on Roblox\'s CDN (unknown or withdrawn build)')
+    plan = plan_packages(packages)
+    try:
+        files = parse_file_manifest(fetch_setup_file(version + '-rbxManifest.txt', 16777216).decode('utf-8', 'replace'))
+    except FileNotFoundError:
+        files = {}
+    versions.mkdir(parents=True, exist_ok=True)
+    staging.mkdir(parents=True, exist_ok=True)
+    clean_staging(staging)
+    packed, unpacked = sum(p['packed'] for p in plan), sum(p['size'] for p in plan)
+    free = shutil.disk_usage(str(staging)).free
+    if free < packed + unpacked + (128 << 20):
+        raise VaultError(f'Not enough free disk space: {(packed + unpacked) >> 20} MB needed, {free >> 20} MB free')
+    work = Path(tempfile.mkdtemp(prefix='install-', dir=str(staging)))
+    busy, downloads, target = work / '.busy', work / 'downloads', work / 'build'
+    try:
+        done, written = 0, 0
+        for package in plan:
+            if cancel.is_set():
+                raise InstallCancelled()
+            busy.write_text(package['name'], encoding='ascii')
+            progress(phase=f"Downloading {package['name']}", done=done, total=packed)
+            path = download_package(version, package, downloads, cancel, lambda n, base=done: progress(done=base + n))
+            done += package['packed']
+            progress(phase=f"Unpacking {package['name']}", done=done)
+            written += extract_package(path, target / package['folder'], package['size'] + (package['size'] >> 4) + (1 << 20), cancel)
+            path.unlink()
+        player = target / 'RobloxPlayerBeta.exe'
+        if not player.is_file():
+            raise VaultError('The build has no RobloxPlayerBeta.exe; install stopped')
+        expected = files.get('robloxplayerbeta.exe')
+        if expected and file_md5(player) != expected:
+            raise VaultError('RobloxPlayerBeta.exe does not match Roblox\'s file manifest; install stopped')
+        if cancel.is_set():
+            raise InstallCancelled()
+        marker = {'version': version, 'installedUtc': dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+                  'bytes': written, 'packages': [p['name'] for p in plan], 'source': 'setup.rbxcdn.com'}
+        (target / ROBLOX_INSTALL_MARKER).write_text(json.dumps(marker, indent=2), encoding='utf-8')
+        # AppSettings.xml last: it is what makes a folder a complete build for the saver.
+        (target / 'AppSettings.xml').write_bytes(ROBLOX_APP_SETTINGS.encode('utf-8'))
+        progress(phase='Moving the build into place')
+        try:
+            os.rename(str(target), str(final))  # Same volume: one step, so Versions\ never holds half a build.
+        except OSError:
+            raise VaultError(f'Could not move the build into {versions} (another install of {version} finished first?)')
+        return marker
+    finally:
+        shutil.rmtree(str(work), ignore_errors=True)
+
+
+def default_roblox_root() -> Path:
+    return Path(os.environ.get('LOCALAPPDATA') or Path.home() / 'AppData' / 'Local') / 'Arkuzo' / 'Roblox'
+
+
+def _roblox_own_roots() -> list:
+    """Install folders of Roblox and of other bootstrappers (never written or cleaned by Arkuzo)."""
+    roots = []
+    for name in ('LOCALAPPDATA', 'ProgramFiles', 'ProgramFiles(x86)'):
+        base = os.environ.get(name)
+        if base:
+            roots.append(os.path.normcase(os.path.normpath(os.path.join(base, 'Roblox'))))
+    local = os.environ.get('LOCALAPPDATA')
+    if local:
+        roots += [os.path.normcase(os.path.normpath(os.path.join(local, name))) for name in ('Bloxstrap', 'Fishstrap')]
+    return roots
+
+
+def validate_versions_dir(value) -> str:
+    """robloxVersionsDir: empty (the default folder) or an absolute local folder outside Roblox's own."""
+    if value in (None, ''):
+        return ''
+    if not isinstance(value, str) or len(value) > 200 or not re.match(r'\A[A-Za-z]:\\', value.strip().replace('/', '\\')):
+        raise VaultError('Roblox versions folder must be a full local path such as D:\\Arkuzo\\Roblox')
+    raw = value.strip().replace('/', '\\')
+    text = os.path.normpath(raw)
+    if '..' in raw.split('\\') or re.search(r'[<>"|?*\x00-\x1f]', text[2:]) or len(text) <= 3:
+        raise VaultError('Roblox versions folder is not a valid folder')
+    folded = os.path.normcase(text)
+    for own in _roblox_own_roots():
+        if folded == own or folded.startswith(own + os.sep):
+            raise VaultError('Roblox versions folder must not be inside Roblox\'s, Bloxstrap\'s or Fishstrap\'s own folder')
+    windir = os.path.normcase(os.environ.get('WINDIR') or 'C:\\Windows')
+    if folded == windir or folded.startswith(windir + os.sep):
+        raise VaultError('Roblox versions folder must not be inside Windows')
+    return text
+
+
+def roblox_root(setting: str) -> Path:
+    return Path(setting) if setting else default_roblox_root()
+
+
+def roblox_process_images():
+    """[(pid, image path)] of running RobloxPlayerBeta.exe processes, or None when they cannot be listed."""
+    if os.name != 'nt' or not WIN32.k:
+        return []
+    k = WIN32.k
+    try:
+        k.K32EnumProcesses.argtypes = [ctypes.POINTER(wintypes.DWORD), wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+        pids, needed = (wintypes.DWORD * 16384)(), wintypes.DWORD()
+        if not k.K32EnumProcesses(pids, ctypes.sizeof(pids), ctypes.byref(needed)):
+            return None
+    except (OSError, AttributeError):
+        return None
+    found = []
+    for pid in list(pids)[:needed.value // ctypes.sizeof(wintypes.DWORD)]:
+        if pid <= 4:
+            continue
+        handle = k.OpenProcess(WIN32.PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+        if not handle:
+            continue
+        try:
+            size, buf = wintypes.DWORD(1024), ctypes.create_unicode_buffer(1024)
+            if k.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)) and Path(buf.value).name.lower() == 'robloxplayerbeta.exe':
+                found.append((int(pid), buf.value))
+        finally:
+            k.CloseHandle(handle)
+    return found
+
+
+def _inside(path: str, folder: str) -> bool:
+    try:
+        a, b = os.path.normcase(os.path.realpath(path)), os.path.normcase(os.path.realpath(folder))
+        return os.path.commonpath([a, b]) == b
+    except (ValueError, OSError):
+        return False
+
+
+def _folder_bytes(folder: Path) -> int:
+    total = 0
+    for dirpath, _dirs, names in os.walk(str(folder)):
+        for name in names:
+            try:
+                total += os.path.getsize(os.path.join(dirpath, name))
+            except OSError:
+                pass
+    return total
+
+
+def roblox_build_sources(root: Path) -> list:
+    """(label, Versions folder, managed) for every place a Windows player build can live."""
+    sources = [('Arkuzo', root / 'Versions', True)]
+    local = os.environ.get('LOCALAPPDATA')
+    if local:
+        sources += [('Roblox', Path(local) / 'Roblox' / 'Versions', False), ('Bloxstrap', Path(local) / 'Bloxstrap' / 'Versions', False),
+                    ('Fishstrap', Path(local) / 'Fishstrap' / 'Versions', False)]
+    for name in ('ProgramFiles', 'ProgramFiles(x86)'):
+        if os.environ.get(name):
+            sources.append(('Roblox (all users)', Path(os.environ[name]) / 'Roblox' / 'Versions', False))
+    return sources
+
+
+class RobloxBuilds:
+    """Installed builds in every known folder, with size and the clients using them."""
+
+    def __init__(self):
+        self.sizes = {}  # path -> (mtime, bytes)
+
+    def _size(self, folder: Path) -> int | None:
+        marker = read_json(folder / ROBLOX_INSTALL_MARKER)
+        if isinstance(marker, dict) and isinstance(marker.get('bytes'), int):
+            return marker['bytes']
+        try:
+            mtime = folder.stat().st_mtime
+        except OSError:
+            return None
+        cached = self.sizes.get(str(folder))
+        if not cached or cached[0] != mtime:
+            cached = (mtime, _folder_bytes(folder))
+            self.sizes[str(folder)] = cached
+        return cached[1]
+
+    def list(self, root: Path, images) -> list:
+        builds, seen = [], set()
+        for label, folder, managed in roblox_build_sources(root):
+            try:
+                children = sorted(folder.iterdir()) if folder.is_dir() else []
+            except OSError:
+                children = []
+            for child in children:
+                key = os.path.normcase(str(child))
+                if key in seen or not child.is_dir() or not ROBLOX_VERSION.match(child.name) or _is_reparse(child):
+                    continue
+                exe = child / 'RobloxPlayerBeta.exe'
+                if not exe.is_file():
+                    continue
+                seen.add(key)
+                users = [pid for pid, image in (images or []) if _inside(image, str(child))]
+                builds.append({'version': child.name, 'source': label, 'managed': managed, 'path': str(child),
+                               'complete': roblox_build_complete(child),
+                               'bytes': self._size(child) if managed else None, 'clients': len(users)})
+        return builds
+
+
+def remove_roblox_build(root: Path, version: str, pinned: str, images) -> None:
+    """Delete an Arkuzo-installed build that no client runs and that is not pinned."""
+    if not isinstance(version, str) or not ROBLOX_VERSION.match(version):
+        raise VaultError('Roblox version must be version- followed by 16 hex digits')
+    if version == pinned:
+        raise VaultError('This build is pinned: choose Auto or another build first')
+    versions = root / 'Versions'
+    folder = versions / version
+    if not folder.is_dir() or _is_reparse(folder) or os.path.normcase(os.path.dirname(os.path.realpath(str(folder)))) != os.path.normcase(os.path.realpath(str(versions))):
+        raise VaultError('Only builds Arkuzo installed can be removed here')
+    if images is None:
+        raise VaultError('Could not check which builds running clients use; try again')
+    if any(_inside(image, str(folder)) for _pid, image in images):
+        raise VaultError('A running client uses this build: close it first')
+    staging = root / '.staging'
+    staging.mkdir(parents=True, exist_ok=True)
+    trash = staging / ('remove-' + secrets.token_hex(4))
+    try:
+        os.rename(str(folder), str(trash))  # Fails while any process holds a file in it.
+    except OSError:
+        raise VaultError('The build is in use by a running program; close it first')
+    shutil.rmtree(str(trash), ignore_errors=True)
+
+
+def fetch_roblox_catalog() -> dict:
+    """Roblox's current build, weao.gg's current, past and future builds and its exploit list."""
+    out = {'fetchedAt': time.time(), 'errors': [], 'roblox': None, 'weao': {}, 'exploits': []}
+    try:
+        raw = json.loads(web_get(ROBLOX_CLIENT_VERSION_URL, 65536, {'Accept': 'application/json'}).decode('utf-8'))
+        version, build = (raw.get('clientVersionUpload'), raw.get('version')) if isinstance(raw, dict) else (None, None)
+        if isinstance(version, str) and ROBLOX_VERSION.match(version):
+            out['roblox'] = {'version': version, 'build': build if isinstance(build, str) and BUILD_NUMBER.match(build) else None}
+        else:
+            out['errors'].append('Roblox\'s version service sent an unexpected answer')
+    except (WebError, ValueError, UnicodeDecodeError):
+        out['errors'].append('Roblox\'s version service did not answer')
+    for key in ('current', 'past', 'future'):
+        try:
+            out['weao'][key] = parse_weao_versions(weao_get('/versions/' + key))
+        except (WebError, ValueError, UnicodeDecodeError) as err:
+            out['weao'][key] = {}
+            if key == 'current':
+                out['errors'].append('weao.gg did not answer' + (f' (HTTP {err.status})' if isinstance(err, WebError) and err.status > 0 else ''))
+    try:
+        out['exploits'] = parse_weao_exploits(weao_get('/status/exploits'))
+    except (WebError, ValueError, UnicodeDecodeError):
+        out['errors'].append('weao.gg\'s exploit list did not load')
+    return out
+
+
+class RobloxVersions:
+    """The Roblox tab: catalog (cached), installed builds, the one install that may run, the pin."""
+
+    def __init__(self, data: Path, feed=None):
+        self.data, self.feed = data, feed
+        self.builds = RobloxBuilds()
+        self.catalog_lock, self.status_lock = threading.Lock(), threading.Lock()
+        self.catalog_data, self.catalog_at = None, 0.0
+        self.thread, self.cancel_event = None, threading.Event()
+        self.status = {'state': 'idle'}
+
+    def settings(self) -> dict:
+        try:
+            return load_vault(self.data)['settings']
+        except (OSError, VaultError):
+            return empty_vault()['settings']
+
+    def root(self, settings=None) -> Path:
+        return roblox_root((settings or self.settings()).get('robloxVersionsDir') or '')
+
+    def catalog(self, refresh=False, cached_only=False) -> dict | None:
+        if cached_only:
+            return self.catalog_data  # Never waits for a fetch in flight (install progress polls this).
+        # One fetch at a time: concurrent requests wait for it and share its answer.
+        with self.catalog_lock:
+            age = time.time() - self.catalog_at
+            if (self.catalog_data and age < WEAO_CACHE_SEC and not (refresh and age >= WEAO_REFRESH_MIN_SEC)):
+                return self.catalog_data
+            self.catalog_data, self.catalog_at = fetch_roblox_catalog(), time.time()
+            return self.catalog_data
+
+    @staticmethod
+    def current_version(catalog) -> str | None:
+        if not catalog:
+            return None
+        return (catalog.get('roblox') or {}).get('version') or ((catalog.get('weao') or {}).get('current') or {}).get('version')
+
+    def progress(self) -> dict:
+        with self.status_lock:
+            return dict(self.status)
+
+    def _set(self, **changes):
+        with self.status_lock:
+            self.status.update(changes)
+
+    def view(self, refresh=False, cached_only=False, heartbeat=None) -> dict:
+        settings = self.settings()
+        root = self.root(settings)
+        catalog = self.catalog(refresh, cached_only)
+        images = roblox_process_images()
+        builds = self.builds.list(root, images)
+        current = self.current_version(catalog)
+        pinned = settings.get('robloxVersion') or 'auto'
+        numbers = {}
+        for known in [((catalog or {}).get('weao') or {}).get(k) or {} for k in ('future', 'past', 'current')] + [(catalog or {}).get('roblox') or {}]:
+            if known.get('version') and known.get('build'):
+                numbers[known['version']] = known['build']
+        for build in builds:
+            build.update(current=build['version'] == current, pinned=build['version'] == pinned, build=numbers.get(build['version']),
+                         removable=build['managed'] and build['version'] != pinned and not build['clients'])
+        hb = heartbeat if isinstance(heartbeat, dict) else {}
+        return {'catalog': catalog, 'current': current, 'builds': builds, 'install': self.progress(), 'root': str(root),
+                'defaultRoot': str(default_roblox_root()), 'selection': {'version': pinned, 'fallback': bool(settings.get('robloxVersionFallback')),
+                'dir': settings.get('robloxVersionsDir') or '', 'launchMethod': settings.get('launchMethod')},
+                'engine': hb.get('robloxVersion'), 'provider': hb.get('accountProvider'), 'clientsListed': images is not None}
+
+    def start_install(self, version) -> dict:
+        if version == 'latest':
+            version = self.current_version(self.catalog())
+            if not version:
+                raise VaultError('Could not find Roblox\'s current build; try again later')
+        if not isinstance(version, str) or not ROBLOX_VERSION.match(version):
+            raise VaultError('Roblox version must be version- followed by 16 hex digits')
+        root = self.root()
+        with self.status_lock:
+            if self.thread is not None and self.thread.is_alive():
+                raise VaultError('An install is already running')
+            self.cancel_event = threading.Event()
+            self.status = {'state': 'running', 'version': version, 'phase': 'Starting', 'done': 0, 'total': 0, 'message': '',
+                           'startedAt': time.time(), 'finishedAt': None}
+            self.thread = threading.Thread(target=self._run, args=(version, root, self.cancel_event), daemon=True, name='roblox-install')
+            self.thread.start()
+        return self.progress()
+
+    def cancel(self) -> dict:
+        with self.status_lock:
+            running = self.thread is not None and self.thread.is_alive()
+        if not running:
+            raise VaultError('No install is running')
+        self.cancel_event.set()
+        return self.progress()
+
+    def _note(self, text: str, level: str):
+        if self.feed is not None:
+            try:
+                self.feed.add({'t': time.time(), 'kind': 'SUPERVISOR', 'category': 'saver', 'level': level, 'text': text})
+            except Exception:
+                pass
+
+    def _run(self, version: str, root: Path, cancel):
+        try:
+            install_roblox_build(version, root, self._set, cancel)
+            self._set(state='done', phase='Installed', message=f'{version} installed', finishedAt=time.time())
+            self._note(f'Roblox {version} installed in {root / "Versions"}', 'info')
+        except InstallCancelled:
+            self._set(state='cancelled', phase='Cancelled', message='Install cancelled; nothing was installed', finishedAt=time.time())
+        except VaultError as exc:
+            self._set(state='failed', phase='Failed', message=str(exc), finishedAt=time.time())
+            self._note(f'Roblox {version} not installed: {exc}', 'warning')
+        except Exception as exc:  # Disk full, access denied...: the type only.
+            self._set(state='failed', phase='Failed', message=f'Install failed ({type(exc).__name__})', finishedAt=time.time())
+            self._note(f'Roblox {version} not installed ({type(exc).__name__})', 'warning')
+
+    def remove(self, version) -> dict:
+        settings = self.settings()
+        with self.status_lock:
+            if self.thread is not None and self.thread.is_alive() and self.status.get('version') == version:
+                raise VaultError('This build is being installed')
+        remove_roblox_build(self.root(settings), version, settings.get('robloxVersion') or 'auto', roblox_process_images())
+        self._note(f'Roblox {version} removed', 'info')
+        return {'removed': version}
+
+    def select(self, version, fallback=None) -> dict:
+        if version != 'auto':
+            if not isinstance(version, str) or not ROBLOX_VERSION.match(version):
+                raise VaultError('Roblox version must be "auto" or version- followed by 16 hex digits')
+            settings = self.settings()
+            if not any(b['version'] == version and b['complete'] for b in self.builds.list(self.root(settings), [])):
+                raise VaultError(f'{version} is not installed: install it first')
+        changes = {'robloxVersion': version}
+        if isinstance(fallback, bool):
+            changes['robloxVersionFallback'] = fallback
+        return update_vault_settings(self.data, changes)
+
+    def exploits(self, ids) -> dict:
+        catalog = self.catalog()
+        if not catalog or not catalog.get('exploits'):
+            raise VaultError('weao.gg\'s exploit list is not loaded; refresh')
+        return exploit_build(catalog['exploits'], ids, self.current_version(catalog))
+
+
 # ------------------------------------------------------------- application
 class App:
     def __init__(self, data: Path, port: int):
@@ -1911,6 +2751,7 @@ class App:
         self.close_pending = False  # A window closed while other registrations remained.
         self.pages_lock = threading.Lock()
         self.cookies = CookieChecker(data)
+        self.roblox = RobloxVersions(data, self.feed)
         self.login = BrowserLogin(data, find_edge())
         # A sign-in window cut off by a crash leaves a signed-in throwaway profile behind.
         shutil.rmtree(data / 'browser-login', ignore_errors=True)
@@ -1959,36 +2800,59 @@ class App:
         return {a.get('accountId'): a.get('username') for a in hb.get('accounts') or [] if a.get('accountId') and a.get('username')}
 
     def loop(self):
+        # Nothing in a pass may end this thread: it is the only thing that restarts the saver.
         while not self.stop_event.is_set():
-            now = time.time()
-            if self.window_close_due(now):
-                # Closing the window exits like Stop farm & quit, saver included. Only a window
-                # that polls during the stop counts as reopened; stale ids are forgotten here.
-                with self.pages_lock:
-                    self.pages.clear()
-                    self.close_at = None
-                    self.close_pending = False
-                was_running = self.supervisor.state in ('running', 'starting', 'restarting', 'external')
-                self.supervisor.stop()
-                with self.pages_lock:
-                    reopened = bool(self.pages)
-                if not reopened:
-                    self.shutdown()
+            try:
+                now = time.time()
+                if self.close_window_pass(now):
                     return
-                if was_running:
-                    self.supervisor.start()  # A window came back while the saver stopped: carry on.
+                self.step(now)
+            except Exception as exc:
+                try:
+                    self.supervisor.message = f'Supervisor error: {type(exc).__name__}'
+                except Exception:
+                    pass
+            finally:
+                self.stop_event.wait(2.0)
+
+    def close_window_pass(self, now: float) -> bool:
+        """True when the last window closed and the Control Center shut down."""
+        if not self.window_close_due(now):
+            return False
+        # Closing the window exits like Stop farm & quit, saver included. Only a window
+        # that polls during the stop counts as reopened; stale ids are forgotten here.
+        with self.pages_lock:
+            self.pages.clear()
+            self.close_at = None
+            self.close_pending = False
+        was_running = self.supervisor.state in ('running', 'starting', 'restarting', 'external')
+        self.supervisor.stop()
+        with self.pages_lock:
+            reopened = bool(self.pages)
+        if not reopened:
+            self.shutdown()
+            return True
+        if was_running:
+            self.supervisor.start()  # A window came back while the saver stopped: carry on.
+        return False
+
+    def step(self, now: float):
+        """One pass of the supervisor loop. No part of it may end the loop: this thread is
+        the only thing that restarts the saver, and the page keeps answering without it."""
+        try:
             self.heartbeat = read_json(self.data / 'runtime-status.json', retry_missing=True)
+        except Exception:
+            self.heartbeat = None
+        try:
+            self.supervisor.tick(self.heartbeat, now)
+        except Exception as exc:  # The supervisor must outlive any single failure.
+            self.supervisor.message = f'Supervisor error: {type(exc).__name__}'
+        # A malformed log line, heartbeat value or vault must not stop supervision either.
+        for part in (lambda: self.feed.poll(self.names()), lambda: self.cookies.tick(now), lambda: self._sample(now)):
             try:
-                self.supervisor.tick(self.heartbeat, now)
-            except Exception as exc:  # The supervisor must outlive any single failure.
-                self.supervisor.message = f'Supervisor error: {type(exc).__name__}'
-            self.feed.poll(self.names())
-            try:
-                self.cookies.tick(now)
-            except Exception:  # A cookie check must never stop the supervisor loop.
+                part()
+            except Exception:
                 pass
-            self._sample(now)
-            self.stop_event.wait(2.0)
 
     def _sample(self, now):
         hb = self.heartbeat
@@ -2041,11 +2905,7 @@ class App:
         sup = self.supervisor.snapshot(now)
         view = None
         if hb:
-            view = {k: hb.get(k) for k in (
-                'version', 'pid', 'uptimeSec', 'trims', 'totals', 'settings', 'systemMemory', 'totalPhysicalMB', 'clients',
-                'accounts', 'pending', 'quarantined', 'suspendedAccounts', 'alerts', 'voltControlAvailable',
-                'recoveryJournalHealthy', 'missingRecoveryBlocked', 'expectedAccounts', 'missingAccounts', 'pendingRecoveries',
-                'health', 'recovery', 'logFailed', 'updateAvailable', 'accountProvider', 'accountProviderNotice', 'remoteSession')}
+            view = {k: hb.get(k) for k in HEARTBEAT_VIEW_KEYS}
             view['pagefile'] = {k: (hb.get('pagefile') or {}).get(k) for k in ('status', 'reason', 'pendingReboot')}
         return {
             'app': APP_ID, 'version': self.version, 'instance': self.instance, 'windows': sum(1 for seen in list(self.pages.values()) if now - seen <= PAGE_STALE_SEC),
@@ -2113,6 +2973,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send(self, code, body, content_type='application/json; charset=utf-8'):
         raw = body if isinstance(body, bytes) else json.dumps(body, ensure_ascii=False).encode('utf-8')
+        self._responded = True
         self.send_response(code)
         self.send_header('Content-Type', content_type)
         self.send_header('Content-Length', str(len(raw)))
@@ -2127,43 +2988,91 @@ class Handler(BaseHTTPRequestHandler):
         host = (self.headers.get('Host') or '').lower()
         return host in (f'127.0.0.1:{self.app.port}', f'localhost:{self.app.port}')
 
+    def _guarded(self, handler):
+        """Any unexpected error becomes a JSON 500 instead of a dropped connection. The body and
+        the activity feed name the error type only: a message could quote a token or cookie."""
+        self._responded = False
+        try:
+            handler()
+        except Exception as exc:
+            name = type(exc).__name__
+            try:
+                path = urllib.parse.urlparse(self.path).path[:80]
+                self.app.feed.add({'t': time.time(), 'kind': 'SUPERVISOR', 'category': 'error', 'level': 'warning',
+                                   'text': f'Control Center request {path} failed ({name})'})
+            except Exception:
+                pass
+            if not self._responded:
+                try:
+                    self._send(500, {'error': f'Internal error ({name})'})
+                except Exception:
+                    pass
+
     def do_GET(self):
+        self._guarded(self._get)
+
+    def do_POST(self):
+        self._guarded(self._post)
+
+    # ---- Routes (GET_ROUTES, POST_ROUTES below the class). Every request is checked for a
+    # loopback Host first. GET routes need no token: the page itself carries it (GET / writes it
+    # in), so the token stops other web origins, not other programs of this Windows user
+    # (docs/architecture.md, section 3). POST routes need the X-Arkuzo-Token header; the close
+    # beacon may carry it in its body instead, because a closing window can only send a beacon,
+    # which has no headers. An unknown POST path is answered 404 only after a valid token.
+    AUTH_TOKEN, AUTH_BEACON = 'token', 'beacon'
+
+    def _get(self):
         if not self._host_ok():
             return self._send(403, {'error': 'forbidden'})
         url = urllib.parse.urlparse(self.path)
-        query = urllib.parse.parse_qs(url.query)
-        if url.path in ('/', '/index.html'):
-            try:
-                html = UI_FILE.read_text(encoding='utf-8').replace('__ARKUZO_TOKEN__', self.app.token)
-            except OSError:
-                return self._send(500, b'Arkuzo-Control-Center.html is missing next to the Control Center.', 'text/plain; charset=utf-8')
-            return self._send(200, html.encode('utf-8'), 'text/html; charset=utf-8')
-        if url.path == '/api/ping':
-            return self._send(200, {'app': APP_ID, 'version': self.app.version, 'instance': self.app.instance})
-        if url.path == '/api/state':
-            # A page still showing a replaced Control Center polls once before it reloads;
-            # it must not count as an open window here, or closing the real one never quits.
-            if (query.get('inst') or [''])[0] in ('', self.app.instance):
-                self.app.page_seen((query.get('page') or [''])[0][:64])
-            try:
-                since = float((query.get('since') or ['0'])[0])
-                events = int((query.get('events') or ['0'])[0])
-            except ValueError:
-                since, events = 0.0, 0
-            return self._send(200, self.app.state(since, events))
-        if url.path == '/api/vault':
-            return self._send(200, self.app.vault_view())
-        if url.path == '/api/avatar':
-            uid = (query.get('userId') or [''])[0]
-            png = avatar_png(self.app.data, uid) if DIGITS.match(uid) else None
-            return self._send(200, png, 'image/png') if png else self._send(404, {'error': 'no avatar'})
-        if url.path == '/api/config':
-            config = read_json(self.app.data / 'config.json')
-            return self._send(200, {'config': config, 'presets': PRESETS, 'schema': {s: {k: list(v) for k, v in rules.items()} for s, rules in SCHEMA.items()},
-                                    'restartKeys': sorted(RESTART_KEYS)})
-        return self._send(404, {'error': 'not found'})
+        route = GET_ROUTES.get(url.path)
+        if route is None:
+            return self._send(404, {'error': 'not found'})
+        return route(self, urllib.parse.parse_qs(url.query))
 
-    def do_POST(self):
+    def _get_page(self, query):
+        try:
+            html = UI_FILE.read_text(encoding='utf-8').replace('__ARKUZO_TOKEN__', self.app.token)
+        except OSError:
+            return self._send(500, b'Arkuzo-Control-Center.html is missing next to the Control Center.', 'text/plain; charset=utf-8')
+        return self._send(200, html.encode('utf-8'), 'text/html; charset=utf-8')
+
+    def _get_ping(self, query):
+        return self._send(200, {'app': APP_ID, 'version': self.app.version, 'instance': self.app.instance})
+
+    def _get_state(self, query):
+        # A page still showing a replaced Control Center polls once before it reloads;
+        # it must not count as an open window here, or closing the real one never quits.
+        if (query.get('inst') or [''])[0] in ('', self.app.instance):
+            self.app.page_seen((query.get('page') or [''])[0][:64])
+        try:
+            since = float((query.get('since') or ['0'])[0])
+            events = int((query.get('events') or ['0'])[0])
+        except ValueError:
+            since, events = 0.0, 0
+        return self._send(200, self.app.state(since, events))
+
+    def _get_vault(self, query):
+        return self._send(200, self.app.vault_view())
+
+    def _get_avatar(self, query):
+        uid = (query.get('userId') or [''])[0]
+        png = avatar_png(self.app.data, uid) if DIGITS.match(uid) else None
+        return self._send(200, png, 'image/png') if png else self._send(404, {'error': 'no avatar'})
+
+    def _get_roblox(self, query):
+        # refresh=1 refetches weao.gg (at most every WEAO_REFRESH_MIN_SEC); cached=1 never goes to the
+        # network (the page polls it while an install runs).
+        flag = lambda name: (query.get(name) or [''])[0] == '1'  # noqa: E731
+        return self._send(200, self.app.roblox.view(refresh=flag('refresh'), cached_only=flag('cached'), heartbeat=self.app.heartbeat))
+
+    def _get_config(self, query):
+        config = read_json(self.app.data / 'config.json')
+        return self._send(200, {'config': config, 'presets': PRESETS, 'schema': {s: {k: list(v) for k, v in rules.items()} for s, rules in SCHEMA.items()},
+                                'restartKeys': sorted(RESTART_KEYS)})
+
+    def _post(self):
         try:
             length = int(self.headers.get('Content-Length') or 0)
         except ValueError:
@@ -2180,110 +3089,205 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             body = None
         app, path = self.app, urllib.parse.urlparse(self.path).path
+        handler, auth = post_route(path)
         token = self.headers.get('X-Arkuzo-Token', '')
-        if not token and path == '/api/window-closed' and body:
-            token = str(body.get('token') or '')  # A closing window can only send a beacon, which has no headers.
+        if not token and auth == self.AUTH_BEACON and body:
+            token = str(body.get('token') or '')
         if not secrets.compare_digest(token.encode('utf-8', 'replace'), app.token.encode('ascii')):
             return self._send(403, {'error': 'forbidden'})
         if body is None:
             return self._send(400, {'error': 'Invalid JSON'})
+        if handler is None:
+            return self._send(404, {'error': 'not found'})
         try:
-            if path == '/api/window-closed':
-                app.page_closed(str(body.get('page') or '')[:64])
-                return self._send(200, {'result': 'noted'})
-            if path == '/api/saver/start':
-                return self._send(200, {'result': app.supervisor.start()})
-            if path == '/api/saver/stop':
-                return self._send(200, {'result': app.supervisor.stop()})
-            if path == '/api/saver/restart':
-                app.supervisor.stop()
-                return self._send(200, {'result': app.supervisor.start()})
-            if path == '/api/remote/leave':
-                return self._send(200, {'result': leave_remote_desktop()})
-            if path == '/api/remote/session':
-                return self._send(200, {'result': own_session()})
-            if path == '/api/trim-now':
-                (app.data / 'trim-now.signal').write_text('trim', encoding='ascii')
-                return self._send(200, {'result': 'requested'})
-            if path == '/api/config':
-                config = read_json(app.data / 'config.json')
-                if config is None:
-                    raise ConfigError('data/config.json is missing or invalid; fix it before editing here')
-                merged, restart = apply_config_changes(config, body.get('changes') or {})
-                backup_config(app.data)
-                write_json_atomic(app.data / 'config.json', merged)
-                return self._send(200, {'result': 'saved', 'restartRequired': restart, 'config': merged})
-            if path == '/api/accounts/recovery':
-                config = read_json(app.data / 'config.json')
-                if config is None:
-                    raise ConfigError('data/config.json is missing or invalid')
-                merged = set_account_recovery(config, str(body.get('accountId') or ''), bool(body.get('enabled')))
-                backup_config(app.data)
-                write_json_atomic(app.data / 'config.json', merged)
-                return self._send(200, {'result': 'saved'})
-            if path == '/api/prefs':
-                for key in ('autopilot', 'startSaverOnLaunch'):
-                    if isinstance(body.get(key), bool):
-                        app.prefs[key] = body[key]
-                if isinstance(body.get('autopilot'), bool) and body['autopilot']:
-                    app.supervisor.crash_loop = False
-                    app.supervisor.failures = 0
-                app.save_prefs()
-                if isinstance(body.get('startWithWindows'), bool):
-                    set_startup(body['startWithWindows'], app.data)
-                return self._send(200, {'result': 'saved', 'prefs': dict(app.prefs, startWithWindows=startup_enabled())})
-            if path.startswith('/api/vault/') or path.startswith('/api/farm/'):
-                return self._send(200, {'result': vault_action(app, path, body)})
-            if path == '/api/quit':
-                if body.get('stopSaver'):
-                    app.supervisor.stop()
-                threading.Thread(target=app.shutdown, daemon=True).start()
-                return self._send(200, {'result': 'bye'})
+            return self._send(200, handler(app, body, path))
         except (ConfigError, VaultError) as exc:
             return self._send(400, {'error': str(exc)})
         except OSError as exc:
             return self._send(500, {'error': f'{type(exc).__name__}: {exc.strerror or exc}'})
-        return self._send(404, {'error': 'not found'})
+
+
+# ---------------------------------------------------------------- POST handlers
+# Each takes (app, body, path) and returns the JSON reply; ConfigError/VaultError become 400.
+def post_window_closed(app, body, path):
+    app.page_closed(str(body.get('page') or '')[:64])
+    return {'result': 'noted'}
+
+
+def post_saver_start(app, body, path):
+    return {'result': app.supervisor.start()}
+
+
+def post_saver_stop(app, body, path):
+    return {'result': app.supervisor.stop()}
+
+
+def post_saver_restart(app, body, path):
+    app.supervisor.stop()
+    return {'result': app.supervisor.start()}
+
+
+def post_remote_leave(app, body, path):
+    return {'result': leave_remote_desktop()}
+
+
+def post_remote_session(app, body, path):
+    return {'result': own_session()}
+
+
+def post_trim_now(app, body, path):
+    (app.data / 'trim-now.signal').write_text('trim', encoding='ascii')
+    return {'result': 'requested'}
+
+
+def post_config(app, body, path):
+    config = read_json(app.data / 'config.json')
+    if config is None:
+        raise ConfigError('data/config.json is missing or invalid; fix it before editing here')
+    merged, restart = apply_config_changes(config, body.get('changes') or {})
+    backup_config(app.data)
+    write_json_atomic(app.data / 'config.json', merged)
+    return {'result': 'saved', 'restartRequired': restart, 'config': merged}
+
+
+def post_account_recovery(app, body, path):
+    config = read_json(app.data / 'config.json')
+    if config is None:
+        raise ConfigError('data/config.json is missing or invalid')
+    merged = set_account_recovery(config, str(body.get('accountId') or ''), bool(body.get('enabled')))
+    backup_config(app.data)
+    write_json_atomic(app.data / 'config.json', merged)
+    return {'result': 'saved'}
+
+
+def post_prefs(app, body, path):
+    for key in ('autopilot', 'startSaverOnLaunch'):
+        if isinstance(body.get(key), bool):
+            app.prefs[key] = body[key]
+    if isinstance(body.get('autopilot'), bool) and body['autopilot']:
+        app.supervisor.crash_loop = False
+        app.supervisor.failures = 0
+    app.save_prefs()
+    if isinstance(body.get('startWithWindows'), bool):
+        set_startup(body['startWithWindows'], app.data)
+    return {'result': 'saved', 'prefs': dict(app.prefs, startWithWindows=startup_enabled())}
+
+
+def post_vault(app, body, path):
+    return {'result': vault_action(app, path, body)}
+
+
+def post_roblox(app, body, path):
+    return {'result': ROBLOX_ROUTES[path](app, body)}
+
+
+def post_quit(app, body, path):
+    if body.get('stopSaver'):
+        app.supervisor.stop()
+    threading.Thread(target=app.shutdown, daemon=True).start()
+    return {'result': 'bye'}
+
+
+# ---------------------------------------------------------------- account and farm actions
+def vault_login_cancel(app, body):
+    app.login.cancel()
+    return app.login.snapshot()
+
+
+def vault_check(app, body):
+    ids = body.get('ids')
+    return {'checking': app.cookies.check(ids if isinstance(ids, list) else None)}
+
+
+def vault_remove(app, body):
+    remove_account(app.data, str(body.get('id') or ''))
+    return 'removed'
+
+
+def vault_server_remove(app, body):
+    remove_private_server(app.data, str(body.get('id') or ''))
+    return 'removed'
+
+
+def vault_farm_start(app, body):
+    settings = set_farm_running(app.data, True)
+    if app.supervisor.state not in ('running', 'starting', 'restarting', 'external'):
+        app.supervisor.start()  # The saver does the launching.
+    return settings
+
+
+# path -> action(app, body); post_vault wraps the result as {'result': ...}.
+VAULT_ROUTES = {
+    '/api/vault/add': lambda app, body: add_account(app.data, str(body.get('cookie') or '')),
+    '/api/vault/login': lambda app, body: app.login.start(),
+    '/api/vault/login/cancel': vault_login_cancel,
+    '/api/vault/check': vault_check,
+    '/api/vault/update': lambda app, body: update_account(app.data, str(body.get('id') or ''), body.get('fields')),
+    '/api/vault/remove': vault_remove,
+    '/api/vault/launch': lambda app, body: request_account_action(app.data, str(body.get('id') or ''), 'launch'),
+    '/api/vault/close': lambda app, body: request_account_action(app.data, str(body.get('id') or ''), 'close'),
+    '/api/vault/settings': lambda app, body: update_vault_settings(app.data, body.get('changes')),
+    '/api/vault/arrange': lambda app, body: update_vault_settings(app.data, {'arrangeRequestedAtMs': now_ms()}),
+    '/api/vault/servers/add': lambda app, body: add_private_server(app.data, str(body.get('name') or ''), str(body.get('link') or '')),
+    '/api/vault/servers/remove': vault_server_remove,
+    '/api/farm/start': vault_farm_start,
+    '/api/farm/stop': lambda app, body: set_farm_running(app.data, False),
+    '/api/farm/close-all': lambda app, body: close_all_clients(app.data),
+}
 
 
 def vault_action(app: App, path: str, body: dict):
-    data = app.data
-    if path == '/api/vault/add':
-        return add_account(data, str(body.get('cookie') or ''))
-    if path == '/api/vault/login':
-        return app.login.start()
-    if path == '/api/vault/login/cancel':
-        app.login.cancel()
-        return app.login.snapshot()
-    if path == '/api/vault/check':
-        ids = body.get('ids')
-        return {'checking': app.cookies.check(ids if isinstance(ids, list) else None)}
-    if path == '/api/vault/update':
-        return update_account(data, str(body.get('id') or ''), body.get('fields'))
-    if path == '/api/vault/remove':
-        remove_account(data, str(body.get('id') or ''))
-        return 'removed'
-    if path in ('/api/vault/launch', '/api/vault/close'):
-        return request_account_action(data, str(body.get('id') or ''), path.rsplit('/', 1)[1])
-    if path == '/api/vault/settings':
-        return update_vault_settings(data, body.get('changes'))
-    if path == '/api/vault/arrange':
-        return update_vault_settings(data, {'arrangeRequestedAtMs': now_ms()})
-    if path == '/api/vault/servers/add':
-        return add_private_server(data, str(body.get('name') or ''), str(body.get('link') or ''))
-    if path == '/api/vault/servers/remove':
-        remove_private_server(data, str(body.get('id') or ''))
-        return 'removed'
-    if path == '/api/farm/start':
-        settings = set_farm_running(data, True)
-        if app.supervisor.state not in ('running', 'starting', 'restarting', 'external'):
-            app.supervisor.start()  # The saver does the launching.
-        return settings
-    if path == '/api/farm/stop':
-        return set_farm_running(data, False)
-    if path == '/api/farm/close-all':
-        return close_all_clients(data)
-    raise VaultError('Unknown account action')
+    action = VAULT_ROUTES.get(path)
+    if action is None:
+        raise VaultError('Unknown account action')
+    return action(app, body)
+
+
+# ---------------------------------------------------------------- route table
+# GET: path -> Handler method, no token. POST: path -> (handler, auth).
+GET_ROUTES = {
+    '/': Handler._get_page,
+    '/index.html': Handler._get_page,
+    '/api/ping': Handler._get_ping,
+    '/api/state': Handler._get_state,
+    '/api/vault': Handler._get_vault,
+    '/api/avatar': Handler._get_avatar,
+    '/api/config': Handler._get_config,
+    '/api/roblox': Handler._get_roblox,
+}
+# The Roblox tab's actions (docs/roblox-versions.md); post_roblox wraps the result as {'result': ...}.
+ROBLOX_ROUTES = {
+    '/api/roblox/install': lambda app, body: app.roblox.start_install(body.get('version')),
+    '/api/roblox/install/cancel': lambda app, body: app.roblox.cancel(),
+    '/api/roblox/remove': lambda app, body: app.roblox.remove(body.get('version')),
+    '/api/roblox/select': lambda app, body: app.roblox.select(body.get('version'), body.get('fallback')),
+    '/api/roblox/exploits': lambda app, body: app.roblox.exploits(body.get('ids')),
+}
+POST_ROUTES = {
+    '/api/window-closed': (post_window_closed, Handler.AUTH_BEACON),
+    '/api/saver/start': (post_saver_start, Handler.AUTH_TOKEN),
+    '/api/saver/stop': (post_saver_stop, Handler.AUTH_TOKEN),
+    '/api/saver/restart': (post_saver_restart, Handler.AUTH_TOKEN),
+    '/api/remote/leave': (post_remote_leave, Handler.AUTH_TOKEN),
+    '/api/remote/session': (post_remote_session, Handler.AUTH_TOKEN),
+    '/api/trim-now': (post_trim_now, Handler.AUTH_TOKEN),
+    '/api/config': (post_config, Handler.AUTH_TOKEN),
+    '/api/accounts/recovery': (post_account_recovery, Handler.AUTH_TOKEN),
+    '/api/prefs': (post_prefs, Handler.AUTH_TOKEN),
+    '/api/quit': (post_quit, Handler.AUTH_TOKEN),
+}
+POST_ROUTES.update({path: (post_vault, Handler.AUTH_TOKEN) for path in VAULT_ROUTES})
+POST_ROUTES.update({path: (post_roblox, Handler.AUTH_TOKEN) for path in ROBLOX_ROUTES})
+
+
+def post_route(path: str):
+    """(handler, auth) for a POST path. Unknown paths need the token too, and an unknown path
+    under /api/vault/ or /api/farm/ stays a 400 "Unknown account action"."""
+    if path in POST_ROUTES:
+        return POST_ROUTES[path]
+    if path.startswith('/api/vault/') or path.startswith('/api/farm/'):
+        return post_vault, Handler.AUTH_TOKEN
+    return None, Handler.AUTH_TOKEN
 
 
 def work_area() -> list:

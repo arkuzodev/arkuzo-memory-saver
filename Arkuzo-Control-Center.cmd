@@ -1,6 +1,7 @@
 @echo off
 rem Opens the Arkuzo Control Center for this checkout. It supervises the saver
-rem (src\saver) against data\ and keeps running in the background if you close the window.
+rem (src\saver) against data\. Closing its window stops the saver and quits the Control Center;
+rem your Roblox clients keep running.
 setlocal
 set "PYW=pythonw.exe"
 where pythonw.exe >nul 2>nul || set "PYW=python.exe"

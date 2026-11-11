@@ -5,11 +5,12 @@ $root = Split-Path -Parent $PSScriptRoot
 $project = Join-Path $root 'src/launcher/App/Launcher.csproj'
 $tests = Join-Path $root 'tests/launcher/Launcher.Tests.csproj'
 $publish = Join-Path $root 'src/launcher/artifacts/publish'
+# The version comes from the VERSION file (src/launcher/Directory.Build.props reads it).
 # The launcher harness builds fixtures under TMPDIR, which only Git Bash sets.
 if (-not $env:TMPDIR) { $env:TMPDIR = [IO.Path]::GetTempPath() }
 & dotnet run --project $tests --configuration Release
 if ($LASTEXITCODE -ne 0) { throw "Launcher regression tests failed ($LASTEXITCODE)." }
-& dotnet publish $project --configuration Release --runtime win-x64 --self-contained true --output $publish --source 'https://api.nuget.org/v3/index.json' '-p:PublishSingleFile=true' '-p:IncludeNativeLibrariesForSelfExtract=true' '-p:EnableCompressionInSingleFile=true' '-p:DebugType=None' '-p:DebugSymbols=false' '-p:Version=2.3.0' '-p:AssemblyVersion=2.3.0.0' '-p:FileVersion=2.3.0.0'
+& dotnet publish $project --configuration Release --runtime win-x64 --self-contained true --output $publish --source 'https://api.nuget.org/v3/index.json' '-p:PublishSingleFile=true' '-p:IncludeNativeLibrariesForSelfExtract=true' '-p:EnableCompressionInSingleFile=true' '-p:DebugType=None' '-p:DebugSymbols=false'
 if ($LASTEXITCODE -ne 0) { throw "Launcher publish failed ($LASTEXITCODE)." }
 Copy-Item -LiteralPath (Join-Path $publish 'ArkuzoMemorySaver.exe') -Destination (Join-Path $root 'ArkuzoMemorySaver.exe') -Force
 Get-Item -LiteralPath (Join-Path $root 'ArkuzoMemorySaver.exe') | Select-Object FullName,Length

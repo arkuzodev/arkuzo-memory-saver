@@ -14,11 +14,11 @@ Arkuzo Memory Saver runs locally. The public launcher reads release metadata and
 
 SHA-256 values for each release are published in that release's **`SHA256SUMS.txt`**, **`ArkuzoMemorySaver-runtime.sha256`** and **`ArkuzoMemorySaver-controlcenter.sha256`** assets. The launcher validates runtime bytes and available GitHub asset digests before installation or repair. Use checksums from the exact release you downloaded, not a previous version.
 
-The **v2.4.0** release rebuilds the launcher, the runtime and the Control Center add-on (Roblox build manager, non-overlapping window layout, account bulk actions, rollback-capable launcher). All 1.x releases are deprecated. Earlier VirusTotal scans do not apply to these bytes; results for them follow after release:
-- **`ArkuzoMemorySaver.exe`:** SHA-256 `3bb9ef9b40fed1b6811e9cd416ae1da6b651fcbad75c3295f6f59e3ea1dae7eb`
-- **`ArkuzoMemorySaver-runtime.zip`:** SHA-256 `94186e60ebcd36fd5139a65cf11683c45bd4452da521c8bf1b0c77b151358765`
-- **`ArkuzoMemorySaver-controlcenter.zip`:** SHA-256 `7cc6e811d612edd9f3f7fb94427da6f8898fe086fa92b764bca83f6eed3f82f3`
-- **`ArkuzoMemorySaver-v2.4.0-win-x64.zip`:** SHA-256 `0db839e0133c35edd846b5d5229cb0177d1db80b10278a21b8a3b0487b539971`
+The **v2.4.1** release rebuilds the launcher, the runtime and the Control Center add-on (durable account backups and recovery, startup configuration grace, failed-build guard, saved-login 403 fix). All 1.x releases are deprecated. Earlier VirusTotal scans do not apply to these bytes; results for them follow after release:
+- **`ArkuzoMemorySaver.exe`:** SHA-256 `61884aa316c0a6ca67c35b730250c7d463f6e1a824722a65afc2058fb0aa1f80`
+- **`ArkuzoMemorySaver-runtime.zip`:** SHA-256 `f87d67925044de24b377c94152fb1f8f9df27ac631731af6fcdefa21ae4ad466`
+- **`ArkuzoMemorySaver-controlcenter.zip`:** SHA-256 `1551b2b2b71fc5294d5e57090655c90051214ee3bef93327773be357b5b5c984`
+- **`ArkuzoMemorySaver-v2.4.1-win-x64.zip`:** SHA-256 `ef653ab9efea6fff291ab37d74d4a62b144542f42219ecfc01286dfa32d05ac3`
 
 The Control Center listens only on `127.0.0.1`, rejects requests whose `Host` is not a loopback name, and requires a per-run token for every change.
 

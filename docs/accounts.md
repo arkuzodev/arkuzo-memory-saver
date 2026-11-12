@@ -120,9 +120,31 @@ A maximized window is un-maximized first. A window that is already in place is l
 
 To go back, set **Who launches clients** to *Volt*.
 
+## Backups and recovery
+
+Every save writes the list to the disk before it replaces the old file, so a crash leaves either the old list or the new one, never an empty file. On 11 Nov a crash during a save without this flush left 28 KB of zeros and lost every account. Copies are kept next to it:
+
+| File | What it holds |
+| --- | --- |
+| `data/accounts.json.bak` | The list as it was before the latest save. It is only replaced when that version reads correctly. |
+| `data/vault-backups/accounts-YYYYMMDD-HH.json` | The first save of each hour (UTC). The newest 72 are kept, plus one per day going back 7 days; older ones are deleted. |
+| `data/accounts.json.damaged-<time>` | A damaged list that was set aside. These are never deleted automatically. |
+
+The saver and the Control Center both keep these copies, by the same rules, under the same lock (`Local\ArkuzoAccountVault`).
+
+When `accounts.json` can't be read (all zeros, cut off, not JSON, or not a list of accounts):
+
+- The Control Center restores `.bak`, or else the newest good hourly copy, byte for byte. It keeps the damaged file and reports the restore in the Activity feed with the copy's age.
+- A restored copy can hold a sign-in that Roblox has since replaced; that account then shows as signed out. Sign it in again.
+- Launch, Close and Arrange requests saved in the copy are cleared, so an old request is not carried out again.
+- Until the restore, the saver reads the copy without changing anything: it launches nothing and ignores the copy's requests.
+- If no good copy exists, nothing is overwritten. The Accounts page offers **Start a new account list** (click twice within 4 seconds), which sets the damaged file aside and starts empty.
+
+The copies hold the same DPAPI-encrypted secrets as the list itself.
+
 ## Security
 
-- Cookies and private-server link codes are stored in `data/accounts.json`, encrypted with Windows DPAPI for your Windows user. Copying the file to another PC or user doesn't reveal them.
+- Cookies and private-server link codes are stored in `data/accounts.json` (and its backups, above), encrypted with Windows DPAPI for your Windows user. Copying the files to another PC or user doesn't reveal them.
 - No page, API response, log line, heartbeat or command line written by Arkuzo contains a cookie. The only place a cookie is sent is Roblox itself (`*.roblox.com`).
 - The launch ticket that Roblox issues for each launch goes on that client's command line, as with every Roblox launcher. It is short-lived and never logged.
 - **Anyone with a cookie can use the account.** Never paste a cookie someone else gives you, and never give yours away.

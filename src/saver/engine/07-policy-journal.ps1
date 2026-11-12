@@ -1,5 +1,8 @@
 ﻿function Get-ArkuzoHealthPolicy($Config) {
     $defaults = @{ enabled = $false; private_limit_mb = 4096; hang_timeout_sec = 120; warmup_sec = 90; pressure_percent = 85; pressure_min_private_mb = 2048; cooldown_sec = 60; max_recycles_per_hour = 60; trim_spacing_sec = 2; startup_error_timeout_sec = 40; disconnect_timeout_sec = 5; private_limit_sustain_sec = 60
+        # A new client is not touched (priority, affinity, memory priority, limits) before this age
+        # and a window: see Test-ArkuzoClientConfigReady.
+        config_grace_sec = 20
         # Farm-wide freeze fast path (see Get-ArkuzoFarmFreezeCandidate).
         farm_freeze_enabled = $true; farm_freeze_confirm_sec = 35; farm_freeze_min_clients = 3; farm_freeze_onset_window_sec = 15
         farm_freeze_max_cpu_percent = 5; farm_freeze_spacing_sec = 20; farm_freeze_refreeze_sec = 900
@@ -11,7 +14,7 @@
     if ($null -ne $Config) {
         foreach ($key in @($defaults.Keys)) { if ($null -ne $Config.$key) { $defaults[$key] = $Config.$key } }
     }
-    $ranges = @{ private_limit_mb = @(1024,16384); hang_timeout_sec = @(60,900); warmup_sec = @(60,900); pressure_percent = @(60,98); pressure_min_private_mb = @(1024,16384); cooldown_sec = @(30,300); max_recycles_per_hour = @(1,60); trim_spacing_sec = @(1,30); startup_error_timeout_sec = @(0,300); disconnect_timeout_sec = @(0,300); private_limit_sustain_sec = @(0,300)
+    $ranges = @{ private_limit_mb = @(1024,16384); hang_timeout_sec = @(60,900); warmup_sec = @(60,900); pressure_percent = @(60,98); pressure_min_private_mb = @(1024,16384); cooldown_sec = @(30,300); max_recycles_per_hour = @(1,60); trim_spacing_sec = @(1,30); startup_error_timeout_sec = @(0,300); disconnect_timeout_sec = @(0,300); private_limit_sustain_sec = @(0,300); config_grace_sec = @(10,300)
         farm_freeze_confirm_sec = @(20,120); farm_freeze_min_clients = @(3,50); farm_freeze_onset_window_sec = @(5,60); farm_freeze_max_cpu_percent = @(1,10); farm_freeze_spacing_sec = @(10,60); farm_freeze_refreeze_sec = @(0,86400)
         farm_freeze_remote_confirm_sec = @(10,120); farm_freeze_remote_window_sec = @(10,300); remote_hold_max_sec = @(0,3600) }
     foreach ($key in $ranges.Keys) {
@@ -81,10 +84,26 @@ function Test-ArkuzoLiveVoltParent($Parent) {
         return ($exited -is [bool] -and -not $exited)
     } catch { return $false }
 }
-function Save-ArkuzoAtomicJson([string]$Path, $Value) {
+function Write-ArkuzoDurableBytes([string]$Path, [byte[]]$Bytes, [switch]$Volatile, [switch]$CreateNew) {
+    # Writes and, unless -Volatile, flushes the bytes to the disk (FlushFileBuffers) before
+    # returning. A rename that reaches the NTFS journal while the data is still in the cache
+    # leaves a zero-filled file after a crash (11 Nov: accounts.json, 28 KB of NUL).
+    $mode = if ($CreateNew) { [IO.FileMode]::CreateNew } else { [IO.FileMode]::Create }
+    $options = if ($Volatile) { [IO.FileOptions]::None } else { [IO.FileOptions]::WriteThrough }
+    $stream = New-Object IO.FileStream($Path, $mode, [IO.FileAccess]::Write, [IO.FileShare]::None, 4096, $options)
+    try {
+        $stream.Write($Bytes, 0, $Bytes.Length)
+        if ($Volatile) { $stream.Flush() } else { $stream.Flush($true) }
+    } finally { $stream.Dispose() }
+}
+function Save-ArkuzoAtomicText([string]$Path, [string]$Text, [switch]$Volatile) {
+    Save-ArkuzoAtomicBytes $Path ((New-Object Text.UTF8Encoding($false)).GetBytes($Text)) -Volatile:$Volatile
+}
+function Save-ArkuzoAtomicBytes([string]$Path, [byte[]]$Bytes, [switch]$Volatile) {
+    # Temp file, flushed to the disk (unless -Volatile), then an atomic replace.
     $temp = $Path + '.' + $PID + '.tmp'
     try {
-        [IO.File]::WriteAllText($temp, ($Value | ConvertTo-Json -Depth 12), (New-Object Text.UTF8Encoding($false)))
+        Write-ArkuzoDurableBytes $temp $Bytes -Volatile:$Volatile
         $saved = $false
         for ($attempt = 0; $attempt -lt 5 -and -not $saved; $attempt++) {
             try {
@@ -97,6 +116,11 @@ function Save-ArkuzoAtomicJson([string]$Path, $Value) {
             }
         }
     } finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue } }
+}
+function Save-ArkuzoAtomicJson([string]$Path, $Value, [switch]$Volatile) {
+    # Durable by default (journal, vault, config.json). Only the heartbeat, rewritten every
+    # 2 s and regenerated after any restart, is written -Volatile.
+    Save-ArkuzoAtomicText $Path ($Value | ConvertTo-Json -Depth 12) -Volatile:$Volatile
 }
 function Save-ArkuzoRecoveryJournal {
     if (-not $ownsControllerMutex -or $script:recoveryJournalCorrupt) { throw 'Recovery journal not owned/healthy' }

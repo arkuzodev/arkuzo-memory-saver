@@ -43,6 +43,16 @@ try {
     $second = [IO.File]::ReadAllText($jar)
     Assert ((Clear-ArkuzoRobloxSavedLogin $dir) -and [IO.File]::ReadAllText($backup) -ceq $second) 'the newest saved login replaces the older backup'
 
+    # Current Roblox also serializes multiple records with tabs and no line breaks.
+    $flat = ".roblox.com`tTRUE`t/`tTRUE`t0`tRBXEventTrackerV2`ttracker`t.roblox.com`tTRUE`t/`tTRUE`t.ROBLOSECURITY`tfake-login"
+    $data = [Convert]::ToBase64String([Security.Cryptography.ProtectedData]::Protect([Text.Encoding]::UTF8.GetBytes($flat), $null, [Security.Cryptography.DataProtectionScope]::CurrentUser))
+    [IO.File]::WriteAllText($jar, (@{ CookiesVersion = '1'; CookiesData = $data } | ConvertTo-Json))
+    Assert (Clear-ArkuzoRobloxSavedLogin $dir) 'tab-only cookie records are recognized'
+    Assert (-not (Test-Path $jar) -and (Test-Path $backup)) 'tab-only saved login is backed up before launch'
+
+    Write-Jar $dir @('NOT.ROBLOSECURITY')
+    Assert (-not (Clear-ArkuzoRobloxSavedLogin $dir)) 'cookie-name substrings are not login cookies'
+
     # Unreadable files never block a launch and are never moved.
     [IO.File]::WriteAllText($jar, 'not json')
     Assert (-not (Clear-ArkuzoRobloxSavedLogin $dir) -and (Test-Path $jar)) 'a corrupt file is left alone, no error'

@@ -321,6 +321,42 @@ try {
     Register-ArkuzoNativeLaunchExit 611 @{ TrackerId = $TA; StartTicks = 5; RecoveryRequested = $false }
     Assert (-not $script:nativeLaunchExits.ContainsKey($A)) 'an account that is not queued is left to the missing-account check'
 
+    # --- Dead-build guard, end to end: a pinned build whose clients keep closing before they are
+    # in game gets 4 launches, then none; "fall back" launches the Auto build instead (11 Nov:
+    # version-93c5b49b03b84a46 was launched 16 times in a row).
+    $guardRoot = Join-Path $DataDirectory 'roblox-guard'
+    $badBuild = 'version-badbadbadbadbad0'; $goodBuild = 'version-600d600d600d600d'
+    foreach ($install in @(@($badBuild, 0), @($goodBuild, -3))) { # (not $b: PowerShell names ignore case, $B is an account)
+        $dir = [IO.Path]::Combine($guardRoot, 'Versions', $install[0]); [void][IO.Directory]::CreateDirectory($dir)
+        [IO.File]::WriteAllText((Join-Path $dir 'RobloxPlayerBeta.exe'), 'x'); [IO.File]::WriteAllText((Join-Path $dir 'AppSettings.xml'), '<Settings/>')
+        (Get-Item -LiteralPath (Join-Path $dir 'RobloxPlayerBeta.exe')).LastWriteTimeUtc = [datetime]::UtcNow.AddHours($install[1])
+    }
+    Reset-Engine; $script:robloxBuildGuard = $null; $script:nativeLaunchBuilds = @{}; $script:robloxVersionCheckedUtc = $null; $script:robloxVersionStatus = $null
+    New-Vault @{ robloxVersion = $badBuild; robloxVersionsDir = $guardRoot }; $script:roblox[(Fake-Cookie 'b')] = @{ }
+    $eb = New-ArkuzoPendingEntry $B $TB; $eb.createdUtc = [datetime]::UtcNow.AddSeconds(-30).ToString('o')
+    $script:recoveryPending = @{ $B = $eb }; $script:sessionObservedAccounts = @{ $B = $true }
+    function Starts-B { @($script:starts | Where-Object { $_.tracker -eq $TB }).Count }
+    for ($round = 1; $round -le 4; $round++) {
+        Step-Farm
+        Assert ((Starts-B) -eq $round -and $script:starts[-1].player.path -match [regex]::Escape($badBuild)) "round ${round}: launched on the pinned build"
+        $script:nativeLaunches[$B] = [datetime]::UtcNow.AddSeconds(-5)   # the client died at start
+        Step-Farm
+        $eb = $script:recoveryPending[$B]; $eb.closedUtc = [datetime]::UtcNow.AddSeconds(-9).ToString('o'); $script:nativeLastLaunchUtc = $null; $script:launchAttempts = @()
+    }
+    $exited = @($script:events | Where-Object { $_.kind -ceq 'NATIVE_LAUNCH_EXITED' })
+    Assert ($exited.Count -eq 4 -and $exited[0].data.robloxVersion -ceq $badBuild) 'each early exit names its build'
+    Assert (@($script:events | Where-Object { $_.kind -ceq 'ROBLOX_BUILD_FAILING' -and $_.data.version -ceq $badBuild }).Count -eq 1) 'the fourth marks the build failing'
+    $postsBefore = $script:posts.Count
+    Step-Farm; Step-Farm
+    Assert ((Starts-B) -eq 4 -and $script:posts.Count -eq $postsBefore) 'no fifth launch and no ticket request on the failing build'
+    Assert ($script:robloxVersionStatus.problem -match 'keeps closing at start' -and $script:recoveryPending.ContainsKey($B)) 'the Roblox tab shows why; the account stays queued'
+    $v = Vault; $v.settings | Add-Member -Force -NotePropertyName robloxVersionFallback -NotePropertyValue $true; Save-ArkuzoAtomicJson (Get-ArkuzoVaultPath) $v
+    $script:recoveryPending[$B].nextRetryUtc = $null; $script:nativeLastLaunchUtc = $null; $script:launchAttempts = @()
+    Step-Farm
+    Assert ((Starts-B) -eq 5 -and $script:starts[-1].player.path -match [regex]::Escape($goodBuild) -and $script:starts[-1].player.fallback) 'fall back on: the Auto build is launched, never the failing one'
+    Assert ($script:nativeLaunchBuilds[$B] -ceq $goodBuild) 'the fallback launch is attributed to its own build'
+    Remove-Item -LiteralPath $guardRoot -Recurse -Force
+
     # --- Close while a launch is in flight (B2): the stamp stays until nothing is left, the
     # ticket request is cancelled, a late ticket never starts a client, and no relaunch races it.
     Reset-Engine; New-Vault; $script:roblox[(Fake-Cookie 'b')] = @{ }

@@ -20,6 +20,7 @@
     "pressure_percent": 88,
     "pressure_min_private_mb": 4000,
     "warmup_sec": 90,
+    "config_grace_sec": 20,
     "hang_timeout_sec": 120,
     "startup_error_timeout_sec": 5,
     "disconnect_timeout_sec": 5,

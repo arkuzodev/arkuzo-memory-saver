@@ -92,6 +92,6 @@ function Write-ArkuzoRuntimeStatus {
                 softLimit=[bool]$script:SoftLimit;configLocked=[bool]$script:isConfigLocked}
             alerts=@(if ($null -ne $script:dashboardIssues) { foreach ($issue in @($script:dashboardIssues.GetEnumerator())) {
                 @{key=[string]$issue.Key;message=[string]$issue.Value.Message;ageSec=$(if ($null -ne $script:clock) { [math]::Round($script:clock.Elapsed.TotalSeconds - [double]$issue.Value.Time,1) } else { 0 })} } })
-        }
+        } -Volatile # Rewritten every 2 s: no flush to the disk (docs/architecture.md, 6).
     } catch { Warn-Throttled 'runtime-heartbeat' 'Runtime heartbeat could not be persisted. Watchdog must report degraded status.' }
 }

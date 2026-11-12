@@ -133,7 +133,31 @@ Review Volt's own visible error and supported account/session controls. Never re
 
 ### Every launch closes again with “WebLogin HTTP error, statusCode: 403”
 
-The Roblox client's own log (in `%LOCALAPPDATA%\Roblox\logs`) shows this when the Roblox desktop app has a saved login on this PC, for example after someone signed in to the app to read a moderation notice. A client launched with a ticket then loads that login and cannot sign in, on every account. The saver moves Roblox's `RobloxCookies.dat` aside before each launch when it holds a saved login (Activity: "Signed the Roblox app out on this PC"); the old file stays as `RobloxCookies.dat.arkuzo-saved-login` in `%LOCALAPPDATA%\Roblox\LocalStorage`. To read an account's notice, sign in on roblox.com in a browser instead of the Roblox app.
+The Roblox client's own log (in `%LOCALAPPDATA%\Roblox\logs`) shows this when the Roblox desktop app has a saved login on this PC, for example after someone signed in to the app to read a moderation notice. A client launched with a ticket then loads that login and cannot sign in, on every account. The saver moves Roblox's `RobloxCookies.dat` aside before each launch when it holds a saved login, including Roblox's tab-only cookie format (Activity: "Signed the Roblox app out on this PC"); the old file stays as `RobloxCookies.dat.arkuzo-saved-login` in `%LOCALAPPDATA%\Roblox\LocalStorage`. To read an account's notice, sign in on roblox.com in a browser instead of the Roblox app.
+
+### “Roblox build version-… keeps closing at start”
+
+Clients launched on that build closed before they reached the game 4 times in a row within 5 minutes, on any accounts (`ROBLOX_BUILD_FAILING` in the log). The usual causes are a build Roblox no longer accepts (outdated, or a test-channel build), or a build folder that Roblox's updater emptied. Launches stop using that build:
+
+- Pinned, *Fall back if missing* on: the saver launches the Auto build instead.
+- Pinned, fallback off: launches wait.
+- Auto: the saver launches the newest other installed build, or waits if there is none.
+
+To continue, install Roblox's current build on the Roblox tab and choose it (or Auto), or turn on *Fall back if missing*. The block lifts as soon as a client on that build reaches the game or another build is chosen. It is kept in memory only, so a saver restart starts the count again. Protocol launches in Auto mode go through Roblox's own launcher, which picks the build, so the guard cannot steer them.
+
+### The PC blue-screens while Roblox clients start (KMODE_EXCEPTION_NOT_HANDLED)
+
+On 10 and 11 Nov the development PC crashed three times with the same bugcheck: 0x1E, exception `0xC000010A` (`STATUS_PROCESS_IS_TERMINATING`), at the same address inside `ntoskrnl.exe`. Each time, a `RobloxPlayerBeta.exe` the saver had started 2–5 seconds earlier was exiting during startup, while another process was working on it. In each case the build was bad: a gutted install, a refused test build, and an outdated build.
+
+This looks like a Windows kernel bug that a client dying at start can trigger. Since this version the saver does not touch a new client before `health.config_grace_sec` (20 s) and a window, so no priority, affinity, memory priority or limits change during startup. It also stops relaunching a build whose clients keep closing at start (see above).
+
+If it happens again:
+
+- Note the time and look in the Activity feed or the newest `Arkuzo-*.log` for `NATIVE_LAUNCH_EXITED` just before it.
+- Install Roblox's current build.
+- Keep `C:\Windows\Minidump`.
+
+Other programs that inspect new processes can also be involved: security software, overlays, and the saver's own process-list queries, which read each client's command line through WMI. That last part is not ruled out.
 
 ### An account shows “Quarantined”
 
@@ -150,6 +174,21 @@ The saver exited eight times within 30 minutes. Autopilot keeps restarting it ev
 ### Audit writes fail or the recovery journal is invalid
 
 Destructive recovery must remain blocked while writes fail. A failed log write pauses logging for 5 s and then continues in a new log part (*Activity*: "Saver logging works again"); closures resume as soon as a write succeeds, without a saver restart. If it keeps failing, check available disk space and access to `data/`, and preserve the affected files for local diagnosis. Old sessions' logs are removed at each start beyond the newest 200 sessions or 300 MB. Stop the saver before restoring a known-good backup or moving the installation. Do not truncate the journal to clear an unresolved handoff or reset retry limits.
+
+### The account list is damaged (`accounts.json`)
+
+A crash or power loss while the list was being saved can leave `data/accounts.json` unreadable: all zeros, cut off, or not JSON. Before this version that meant every stored sign-in was gone (11 Nov). Now:
+
+- The Control Center restores the list by itself from `accounts.json.bak`, or else from the newest good copy in `data/vault-backups/`. It does this at start and whenever it reads the list, which is every 2 seconds.
+- The damaged file is kept as `accounts.json.damaged-<time>`.
+- The Activity feed says "Account list was damaged …; restored from … (… old)".
+- An account whose sign-in Roblox replaced after that copy was made can show as signed out. Sign it in again.
+
+Until then, the saver reads the backup without changing anything (`VAULT_READ_FROM_BACKUP`) and launches nothing.
+
+If no good copy exists, nothing is overwritten. The Accounts page shows the problem and a **Start a new account list** button; click it twice within 4 seconds. The damaged file moves to `accounts.json.damaged-<time>` and an empty list starts. Do this only when you don't want to repair the file by hand.
+
+The copies hold the same encrypted sign-ins as the list itself: they only work for your Windows user on this PC.
 
 ### Reporting an issue safely
 

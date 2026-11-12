@@ -90,7 +90,7 @@ function Save-ArkuzoConfigFile([string]$Path, [string]$Preset = 'normal', $Custo
     if (-not [string]::IsNullOrEmpty($parent) -and -not (Test-Path -LiteralPath $parent)) {
         New-Item -ItemType Directory -Path $parent -Force | Out-Null
     }
-    [System.IO.File]::WriteAllText($Path, $json, [System.Text.Encoding]::UTF8)
+    Save-ArkuzoAtomicText $Path $json # Flushed to the disk, then renamed into place.
     return $configObj
 }
 

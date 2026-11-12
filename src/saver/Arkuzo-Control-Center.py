@@ -130,6 +130,7 @@ SCHEMA = {
         'private_limit_mb': ('int', 1024, 16384),
         'hang_timeout_sec': ('int', 60, 900),
         'warmup_sec': ('int', 60, 900),
+        'config_grace_sec': ('int', 10, 300),
         'pressure_percent': ('int', 60, 98),
         'pressure_min_private_mb': ('int', 1024, 16384),
         'cooldown_sec': ('int', 30, 300),
@@ -189,6 +190,7 @@ EVENT_KINDS = {
     'LOG_WRITE_RECOVERED': 'saver', 'LOG_RETENTION': 'saver',
     'ROBLOX_SAVED_LOGIN_SET_ASIDE': 'recovery', 'ACCOUNT_PROVIDER': 'saver', 'NATIVE_LAUNCH_BLOCKED': 'warning',
     'REMOTE_SESSION_CHANGED': 'saver', 'KEEP_AWAKE': 'saver',
+    'VAULT_READ_FROM_BACKUP': 'error', 'ROBLOX_BUILD_FAILING': 'error', 'ROBLOX_BUILD_GUARD_RESET': 'saver',
 }  # Individual trims would flood the feed; the heartbeat carries their count.
 
 
@@ -258,18 +260,44 @@ def read_json(path: Path, retry_missing=False):
     return None
 
 
-def write_json_atomic(path: Path, value) -> None:
-    temp = path.with_name(path.name + f'.{os.getpid()}.tmp')
-    temp.write_text(json.dumps(value, indent=4, ensure_ascii=False), encoding='utf-8')
-    for attempt in range(5):
-        try:
-            os.replace(temp, path)
-            return
-        except PermissionError:
-            if attempt == 4:
-                temp.unlink(missing_ok=True)
-                raise
-            time.sleep(0.06)
+def write_bytes_durable(path: Path, data: bytes, exclusive: bool = False) -> None:
+    """Write data and flush it to the disk before returning. A rename the file system journals
+    while the data is still in the cache leaves a zero-filled file after a crash (11 Nov: the
+    blue screen during a vault save left accounts.json as 28 KB of NUL)."""
+    with open(path, 'xb' if exclusive else 'wb') as out:
+        out.write(data)
+        out.flush()
+        os.fsync(out.fileno())
+
+
+def write_bytes_atomic(path: Path, data: bytes, durable: bool = True) -> None:
+    """Temp file (flushed to the disk unless durable is False), then an atomic replace."""
+    temp = path.with_name(path.name + f'.{os.getpid()}.{threading.get_ident()}.tmp')
+    try:
+        if durable:
+            write_bytes_durable(temp, data)
+        else:
+            temp.write_bytes(data)
+        for attempt in range(5):
+            try:
+                os.replace(temp, path)
+                return
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.06)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def write_json_atomic(path: Path, value, durable: bool = True) -> None:
+    """Every JSON file the Control Center writes holds user state (vault, config, prefs, the
+    Roblox protocol backup), so all of them are flushed to the disk before the replace."""
+    write_bytes_atomic(path, json.dumps(value, indent=4, ensure_ascii=False).encode('utf-8'), durable)
+
+
+def copy_file_durable(source: Path, target: Path) -> None:
+    write_bytes_atomic(target, source.read_bytes())
 
 
 # ------------------------------------------------------------ process probes
@@ -634,28 +662,229 @@ def normalize_vault(raw) -> dict:
     return vault
 
 
+# Backups (docs/accounts.md). Every save keeps the content it replaces, when that is a valid
+# vault, as accounts.json.bak, and the first save of each UTC hour writes a snapshot
+# vault-backups/accounts-YYYYMMDD-HH.json. The newest VAULT_SNAPSHOT_KEEP snapshots are kept, and
+# beyond those the newest of each day of the last VAULT_SNAPSHOT_DAYS days. The engine
+# (Save-ArkuzoVaultFile) follows the same rules. A damaged accounts.json is restored from the
+# .bak, else from the newest valid snapshot; the damaged file is kept next to it.
+VAULT_BACKUP = VAULT_FILE + '.bak'
+VAULT_SNAPSHOT_DIR = 'vault-backups'
+VAULT_SNAPSHOT_NAME = re.compile(r'\Aaccounts-(\d{8})-(\d{2})\.json\Z')
+VAULT_SNAPSHOT_KEEP = 72
+VAULT_SNAPSHOT_DAYS = 7
+VAULT_DAMAGED = ('data/accounts.json is damaged and no valid backup was found, so it was left untouched. '
+                 'Start a new account list to set it aside (it is kept as accounts.json.damaged-...), or fix the file.')
+_vault_events: list = []  # Restores and resets waiting for the activity feed (App drains them).
+_vault_events_lock = threading.Lock()
+
+
+class VaultDamagedError(VaultError):
+    pass
+
+
+def parse_vault_bytes(raw: bytes):
+    """The vault in raw, or None when raw is not one: empty, all NUL (a crash before the data
+    reached the disk), truncated, not JSON, or not an object with an accounts list."""
+    try:
+        text = raw.decode('utf-8-sig')
+    except UnicodeDecodeError:
+        return None
+    if not text.strip('\x00 \t\r\n'):
+        return None
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(parsed, dict) or not isinstance(parsed.get('accounts'), list):
+        return None
+    return parsed
+
+
+def vault_snapshots(data: Path) -> list:
+    """Snapshot files, newest first (names sort by time)."""
+    folder = data / VAULT_SNAPSHOT_DIR
+    try:
+        return sorted((p for p in folder.iterdir() if VAULT_SNAPSHOT_NAME.match(p.name)), key=lambda p: p.name, reverse=True)
+    except OSError:
+        return []
+
+
+def vault_snapshots_to_remove(names, now_utc: dt.datetime) -> list:
+    """Pure: which snapshot names rotation deletes (the engine's Get-ArkuzoVaultSnapshotsToRemove)."""
+    valid = sorted((n for n in names if VAULT_SNAPSHOT_NAME.match(n)), reverse=True)
+    kept_days, remove = set(), []
+    for i, name in enumerate(valid):
+        day = name[9:17]
+        if i < VAULT_SNAPSHOT_KEEP:
+            kept_days.add(day)
+            continue
+        try:
+            recent = (now_utc.date() - dt.datetime.strptime(day, '%Y%m%d').date()).days <= VAULT_SNAPSHOT_DAYS
+        except ValueError:
+            recent = False
+        if recent and day not in kept_days:
+            kept_days.add(day)
+            continue
+        remove.append(name)
+    return remove
+
+
+def save_vault_snapshot(data: Path, raw: bytes, now_utc: dt.datetime | None = None) -> bool:
+    now_utc = now_utc or dt.datetime.now(dt.timezone.utc)
+    folder = data / VAULT_SNAPSHOT_DIR
+    folder.mkdir(exist_ok=True)
+    target = folder / ('accounts-' + now_utc.strftime('%Y%m%d-%H') + '.json')
+    if target.exists():
+        return False
+    write_bytes_atomic(target, raw)
+    for name in vault_snapshots_to_remove([p.name for p in folder.iterdir()], now_utc):
+        try:
+            (folder / name).unlink()
+        except OSError:
+            pass
+    return True
+
+
+def save_vault(data: Path, vault: dict) -> None:
+    """Caller holds vault_lock. Keep the content being replaced as .bak (only a valid vault),
+    then write the new one; every file is flushed to the disk before its replace."""
+    path = data / VAULT_FILE
+    try:
+        current = path.read_bytes()
+        if parse_vault_bytes(current) is not None:
+            write_bytes_atomic(data / VAULT_BACKUP, current)
+    except OSError:
+        pass  # No previous vault, or the backup could not be written: the save itself still happens.
+    raw = json.dumps(vault, indent=4, ensure_ascii=False).encode('utf-8')
+    write_bytes_atomic(path, raw)
+    try:
+        save_vault_snapshot(data, raw)
+    except OSError:
+        pass
+
+
+def _vault_event(kind: str, level: str, text: str) -> None:
+    with _vault_events_lock:
+        _vault_events.append({'t': time.time(), 'kind': kind, 'category': 'error' if level == 'critical' else 'saver', 'level': level, 'text': text})
+        del _vault_events[:-20]
+
+
+def take_vault_events() -> list:
+    with _vault_events_lock:
+        events = list(_vault_events)
+        _vault_events.clear()
+    return events
+
+
+def _damaged_name(data: Path) -> Path:
+    stamp = time.strftime('%Y%m%d-%H%M%S')
+    target = data / f'{VAULT_FILE}.damaged-{stamp}'
+    n = 1
+    while target.exists():
+        n += 1
+        target = data / f'{VAULT_FILE}.damaged-{stamp}-{n}'
+    return target
+
+
+def _age_text(seconds: float) -> str:
+    minutes = max(0, int(seconds // 60))
+    if minutes < 120:
+        return f'{minutes} min'
+    return f'{minutes // 60} h' if minutes < 2880 else f'{minutes // 1440} days'
+
+
+def restore_vault(data: Path):
+    """Restore a damaged accounts.json from accounts.json.bak, else from the newest valid
+    snapshot. The damaged bytes are copied to accounts.json.damaged-<time> first (never
+    deleted), then the backup's exact bytes replace the file. Returns the parsed vault, or None
+    when the file is fine again or no valid copy exists (VaultDamagedError then)."""
+    path = data / VAULT_FILE
+    with vault_lock():
+        try:
+            damaged = path.read_bytes()
+        except FileNotFoundError:
+            return None
+        current = parse_vault_bytes(damaged)
+        if current is not None:
+            return current  # Someone restored or rewrote it meanwhile.
+        for candidate in [data / VAULT_BACKUP] + vault_snapshots(data):
+            try:
+                raw = candidate.read_bytes()
+            except OSError:
+                continue
+            parsed = parse_vault_bytes(raw)
+            if parsed is None:
+                continue
+            kept = _damaged_name(data)
+            write_bytes_durable(kept, damaged, exclusive=True)
+            write_bytes_atomic(path, raw)
+            try:
+                age = _age_text(time.time() - candidate.stat().st_mtime)
+            except OSError:
+                age = 'unknown age'
+            # Requests in the copy (Launch, Close, Arrange now) were carried out or dropped since:
+            # cleared in one normal save, which also keeps the restored bytes as the new .bak.
+            stale = False
+            for a in parsed.get('accounts') or []:
+                for name in ('launchRequestedAtMs', 'closeRequestedAtMs'):
+                    if isinstance(a, dict) and a.get(name):
+                        a[name], stale = 0, True
+            settings = parsed.get('settings')
+            if isinstance(settings, dict) and settings.get('arrangeRequestedAtMs'):
+                settings['arrangeRequestedAtMs'], stale = 0, True
+            if stale:
+                save_vault(data, parsed)
+            _vault_event('VAULT_RESTORED_FROM_BACKUP', 'warning',
+                         f'Account list was damaged (probably a crash while saving); restored from {candidate.name} ({age} old). '
+                         f'The damaged file is kept as {kept.name}.')
+            return parsed
+    raise VaultDamagedError(VAULT_DAMAGED)
+
+
 def load_vault(data: Path) -> dict:
-    """A missing vault is empty; a damaged one raises, so nothing ever overwrites it."""
+    """A missing vault is empty. A damaged one is restored from its newest valid backup; without
+    one it raises, so nothing ever overwrites it."""
     path = data / VAULT_FILE
     for attempt in range(3):
         try:
-            raw = path.read_text(encoding='utf-8-sig')
+            raw = path.read_bytes()
         except FileNotFoundError:
             return empty_vault()
         except OSError:
             time.sleep(0.05)
             continue
-        try:
-            parsed = json.loads(raw)
-        except ValueError:
-            if attempt == 2:
-                raise VaultError('data/accounts.json is damaged and was left untouched; restore it from a backup or fix it')
-            time.sleep(0.05)
+        parsed = parse_vault_bytes(raw)
+        if parsed is not None:
+            return normalize_vault(parsed)
+        if attempt < 2:
+            time.sleep(0.05)  # A replace in flight looks the same for a moment.
             continue
-        if not isinstance(parsed, dict):
-            raise VaultError('data/accounts.json is damaged and was left untouched; restore it from a backup or fix it')
-        return normalize_vault(parsed)
+        restored = restore_vault(data)
+        if restored is not None:
+            return normalize_vault(restored)
+        return empty_vault()  # The file vanished while it was being restored.
     raise VaultError('data/accounts.json could not be read')
+
+
+def reset_vault(data: Path) -> dict:
+    """Start a new, empty account list when accounts.json is damaged and no valid backup exists.
+    The damaged file is moved aside (accounts.json.damaged-<time>), never deleted."""
+    path = data / VAULT_FILE
+    with vault_lock():
+        try:
+            damaged = path.read_bytes()
+        except FileNotFoundError:
+            raise VaultError('There is no account list to replace')
+        if parse_vault_bytes(damaged) is not None:
+            raise VaultError('The account list is readable again; nothing to replace')
+        if any(parse_vault_bytes(p.read_bytes()) is not None for p in [data / VAULT_BACKUP] + vault_snapshots(data) if p.exists()):
+            raise VaultError('A valid backup exists; reload the page to restore it')
+        kept = _damaged_name(data)
+        write_bytes_durable(kept, damaged, exclusive=True)
+        write_json_atomic(path, empty_vault())
+        _vault_event('VAULT_RESET', 'warning', f'Started a new, empty account list; the damaged one is kept as {kept.name}.')
+        return {'kept': kept.name}
 
 
 def update_vault(data: Path, change):
@@ -663,7 +892,7 @@ def update_vault(data: Path, change):
     with vault_lock():
         vault = load_vault(data)
         result = change(vault)
-        write_json_atomic(data / VAULT_FILE, vault)
+        save_vault(data, vault)
         return result
 
 
@@ -1577,6 +1806,16 @@ def summarize_event(record: dict, names: dict) -> dict | None:
         level, text = 'warning', f"{who()} not launched: {data.get('reason') or 'unknown reason'}"
     elif kind == 'NATIVE_LAUNCH_EXITED':
         level, text = 'warning', f"{who()} closed before it was in game; relaunching after the relaunch delay"
+    elif kind == 'VAULT_READ_FROM_BACKUP':
+        text = (f"Account list is damaged: the saver reads {data['backup']} until it is restored; launches wait" if data.get('backup')
+                else 'Account list is damaged and has no valid backup: nothing is launched (Accounts page: Start a new account list)')
+    elif kind == 'ROBLOX_BUILD_FAILING':
+        text = (f"Roblox build {data.get('version') or '?'} keeps closing at start — it may be outdated or refused by Roblox "
+                f"({data.get('failures')} clients in a row). "
+                + ('Launching another installed build instead.' if data.get('fallback') else 'Launches wait until another build is chosen on the Roblox tab.'))
+    elif kind == 'ROBLOX_BUILD_GUARD_RESET':
+        builds = ', '.join(str(b) for b in data.get('builds') or []) or 'The Roblox build'
+        text = f"{builds}: {data.get('note') or 'launches use it again.'}"
     elif kind == 'LOG_WRITE_RECOVERED':
         text = f"Saver logging works again after {data.get('failures')} failed write(s)"
     elif kind == 'LOG_RETENTION':
@@ -1634,6 +1873,9 @@ def summarize_event(record: dict, names: dict) -> dict | None:
     return {'t': parse_utc(record.get('time')) or time.time(), 'kind': kind, 'category': category, 'level': level, 'text': text[:240]}
 
 
+PERSISTED_KINDS = {'SUPERVISOR', 'VAULT_RESTORED_FROM_BACKUP', 'VAULT_RESET'}  # Also written to control-center.log.
+
+
 class LogTail:
     """Follows the newest diagnostic log; survives rotation and new sessions."""
 
@@ -1650,7 +1892,7 @@ class LogTail:
             self.seq += 1
             event['id'] = self.seq
             self.events.append(event)
-        if event.get('kind') == 'SUPERVISOR':
+        if event.get('kind') in PERSISTED_KINDS:
             self._persist(event)
 
     def _persist(self, event: dict):
@@ -3303,11 +3545,16 @@ class App:
         except Exception as exc:  # The supervisor must outlive any single failure.
             self.supervisor.message = f'Supervisor error: {type(exc).__name__}'
         # A malformed log line, heartbeat value or vault must not stop supervision either.
-        for part in (lambda: self.feed.poll(self.names()), lambda: self.cookies.tick(now), lambda: self._sample(now)):
+        for part in (lambda: self.feed.poll(self.names()), lambda: self.cookies.tick(now), self.drain_vault_events, lambda: self._sample(now)):
             try:
                 part()
             except Exception:
                 pass
+
+    def drain_vault_events(self):
+        """Vault restores and resets (load_vault has no App) reach the activity feed here."""
+        for event in take_vault_events():
+            self.feed.add(event)
 
     def _sample(self, now):
         hb = self.heartbeat
@@ -3334,11 +3581,12 @@ class App:
 
     def vault_view(self) -> dict:
         """Accounts without secrets, joined with what the saver sees live."""
-        error = None
+        error, damaged = None, False
         try:
             vault = load_vault(self.data)
         except (OSError, VaultError) as exc:
-            vault, error = empty_vault(), str(exc)
+            vault, error, damaged = empty_vault(), str(exc), isinstance(exc, VaultDamagedError)
+        self.drain_vault_events()
         view = public_vault(vault)
         hb = self.heartbeat if isinstance(self.heartbeat, dict) else {}
         live = {a.get('accountId'): a for a in hb.get('accounts') or [] if isinstance(a, dict)}
@@ -3347,7 +3595,7 @@ class App:
             a['live'] = {'uiStatus': seen.get('uiStatus'), 'processId': seen.get('processId')}
             a['checking'] = a['id'] in self.cookies.busy
         config = read_json(self.data / 'config.json') or {}
-        view.update(monitors=monitor_count(), screen=work_area(), error=error, provider=((config.get('accounts') or {}).get('provider') or 'auto'),
+        view.update(monitors=monitor_count(), screen=work_area(), error=error, damaged=damaged, provider=((config.get('accounts') or {}).get('provider') or 'auto'),
                     activeProvider=hb.get('accountProvider'), providerNotice=hb.get('accountProviderNotice'),
                     login=self.login.snapshot(), browserLogin=self.login.browser is not None)
         return view
@@ -3414,7 +3662,7 @@ def backup_config(data: Path):
         return
     folder = data / 'config-backups'
     folder.mkdir(exist_ok=True)
-    shutil.copyfile(source, folder / ('config-' + time.strftime('%Y%m%d-%H%M%S') + '.json'))
+    copy_file_durable(source, folder / ('config-' + time.strftime('%Y%m%d-%H%M%S') + '.json'))
     for old in sorted(folder.glob('config-*.json'))[:-15]:
         old.unlink(missing_ok=True)
 
@@ -3694,6 +3942,7 @@ VAULT_ROUTES = {
     '/api/vault/arrange': lambda app, body: update_vault_settings(app.data, {'arrangeRequestedAtMs': now_ms()}),
     '/api/vault/servers/add': lambda app, body: add_private_server(app.data, str(body.get('name') or ''), str(body.get('link') or '')),
     '/api/vault/servers/remove': vault_server_remove,
+    '/api/vault/reset': lambda app, body: reset_vault(app.data),
     '/api/farm/start': vault_farm_start,
     '/api/farm/stop': lambda app, body: set_farm_running(app.data, False),
     '/api/farm/close-all': lambda app, body: close_all_clients(app.data),

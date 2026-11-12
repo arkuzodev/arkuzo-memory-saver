@@ -144,12 +144,13 @@
                     $slot = 0
                     $taken = @($tracked.Values | ForEach-Object { $_.Slot })
                     while ($taken -contains $slot) { $slot++ }
-                    # Capture everything BEFORE modifying anything.
+                    # Nothing is read from or set on the process here: a client can still die
+                    # during startup, and the originals are captured just before the first change
+                    # (Invoke-ArkuzoClientConfiguration, after health.config_grace_sec).
                     $state = @{
                         StartTicks = $ticks; Slot = $slot
-                        Priority = $client.PriorityClass; Affinity = $client.ProcessorAffinity
-                        Limits = [Arkuzo.MemorySaverNativeV1]::ReadLimits($client.Handle)
-                        MemoryPriority = $(try { [Arkuzo.MemorySaverNativeV1]::ReadMemoryPriority($client.Handle) } catch { $null }); MemoryPriorityChanged = $false
+                        Priority = $null; Affinity = $null; Limits = $null; MemoryPriority = $null; MemoryPriorityChanged = $false
+                        Configured = $false; ConfigReady = $false; Closing = $false; RobloxBuild = $null; BuildSuccessSeen = $false
                         Watcher = $null; LastSnapshot = $null; LastStatus = $null
                         LimitsChanged = $false; LastProgress = $clock.Elapsed.TotalSeconds
                         LastTrim = $clock.Elapsed.TotalSeconds; LastConfig = -1e6; MinimizedByUs = $false
@@ -165,6 +166,8 @@
                         if ($procRecord.CommandLine) {
                             $state.TrackerId = Get-ArkuzoBrowserTrackerId $procRecord.CommandLine
                         }
+                        # The Roblox build (version folder) for the dead-build guard.
+                        if ($procRecord.ExecutablePath) { $state.RobloxBuild = [IO.Path]::GetFileName([IO.Path]::GetDirectoryName([string]$procRecord.ExecutablePath)) }
                     } catch { }
                     # Launches are spaced from clients that start by other means (Volt, by hand).
                     # The engine's own launches are already spaced by launchDelaySec from their
@@ -187,8 +190,7 @@
                         $state.Watcher = $watcher
                     } catch { if ($null -ne $watcher) { $watcher.Dispose() }; $watcher = $null }
                     Write-Diagnostic 'CLIENT_START' @{
-                        pid = $id; startTicks = $ticks; slot = $slot
-                        originalPriority = $state.Priority.ToString(); originalAffinity = $state.Affinity.ToInt64()
+                        pid = $id; startTicks = $ticks; slot = $slot; robloxVersion = $state.RobloxBuild
                         residentMB = $client.WorkingSet64 / 1MB; privateMB = $client.PrivateMemorySize64 / 1MB
                     }
                 }
@@ -230,45 +232,26 @@
                     }
                 }
                 $now = $clock.Elapsed.TotalSeconds
-                # Reapply periodically without hammering native setters on each poll.
-                if (-not $MonitorOnly -and ($now - $state.LastConfig) -ge 10) {
-                    foreach ($operation in @('Priority','Affinity','MemoryPriority','Limits')) {
-                        try {
-                            switch ($operation) {
-                                'Priority' { $client.PriorityClass = $Priority }
-                                'Affinity' { $client.ProcessorAffinity = [Arkuzo.MemorySaverNativeV1]::Affinity($state.Affinity.ToInt64(), $state.Slot, $CoresPerInstance) }
-                                'MemoryPriority' {
-                                    # Only change what can be restored on exit.
-                                    if ($null -ne $state.MemoryPriority) {
-                                        [Arkuzo.MemorySaverNativeV1]::SetMemoryPriority($client.Handle, (ConvertTo-ArkuzoMemoryPriorityValue $MemoryPriority))
-                                        $state.MemoryPriorityChanged = $true
-                                    }
-                                }
-                                'Limits' {
-                                    if (-not $SoftLimit) {
-                                        [Arkuzo.MemorySaverNativeV1]::SetLimits($client.Handle, 1MB, $maxBytes, $limitFlags)
-                                        $state.LimitsChanged = $true
-                                    }
-                                }
-                            }
-                        } catch { Warn-Throttled "$id-$operation" "PID ${id}: $operation failed: $($_.Exception.Message)" }
-                    }
-                    if ($state.LastConfig -lt 0) { Write-Diagnostic 'RESOURCE_CONFIGURATION_REQUESTED' @{ pid = $id; priority = $Priority; logicalCpu = $CoresPerInstance; memoryPriority = $MemoryPriority; hardCap = (-not [bool]$SoftLimit); targetMB = $MaxRamMB } }
-                    $state.LastConfig = $now
+                # Reapply periodically without hammering native setters on each poll; nothing before
+                # the startup grace and a window (Test-ArkuzoClientConfigReady), never on a client
+                # that has exited or is being closed.
+                if (-not $MonitorOnly -and ($now - $state.LastConfig) -ge 10 -and
+                    (Test-ArkuzoClientConfigReady $state (([DateTime]::UtcNow - $client.StartTime.ToUniversalTime()).TotalSeconds) ($client.MainWindowHandle -ne [IntPtr]::Zero) ([double]$healthPolicy.config_grace_sec))) {
+                    [void](Invoke-ArkuzoClientConfiguration $client $state $now)
                 }
-                if (-not $MonitorOnly -and $Minimize -and $client.MainWindowHandle -ne [IntPtr]::Zero) {
+                if (-not $MonitorOnly -and $Minimize -and -not (Test-ArkuzoClientClosing $state) -and $client.MainWindowHandle -ne [IntPtr]::Zero) {
                     if (-not [Arkuzo.MemorySaverNativeV1]::IsIconic($client.MainWindowHandle)) {
                         if ([Arkuzo.MemorySaverNativeV1]::ShowWindowAsync($client.MainWindowHandle, 6)) {
                             $state.MinimizedByUs = $true
                         }
                     }
                 }
-                if (-not $MonitorOnly -and $EnableTrimming -and -not $launchError -and (([DateTime]::UtcNow - $client.StartTime.ToUniversalTime()).TotalSeconds -ge $healthPolicy.warmup_sec) -and ($now - $state.LastTrim) -ge $trimPlan.IntervalSec -and ($now - $lastGlobalTrim) -ge $healthPolicy.trim_spacing_sec) {
+                if (-not $MonitorOnly -and $EnableTrimming -and -not $launchError -and -not (Test-ArkuzoClientClosing $state) -and (([DateTime]::UtcNow - $client.StartTime.ToUniversalTime()).TotalSeconds -ge $healthPolicy.warmup_sec) -and ($now - $state.LastTrim) -ge $trimPlan.IntervalSec -and ($now - $lastGlobalTrim) -ge $healthPolicy.trim_spacing_sec) {
                     # Opt-in only, above target, skip loading/unresponsive clients.
-                    if ($client.WorkingSet64 -gt $maxBytes -and $window -ne [IntPtr]::Zero -and $isResponding) {
+                    if ($client.WorkingSet64 -gt $maxBytes -and $window -ne [IntPtr]::Zero -and $isResponding -and (Test-ArkuzoClientLive $client)) {
                         try {
                             $beforeMB = $client.WorkingSet64 / 1MB
-                            [Arkuzo.MemorySaverNativeV1]::Trim($client.Handle); $script:trimCount++; $lastGlobalTrim = $now
+                            Invoke-ArkuzoClientTrim $client; $script:trimCount++; $lastGlobalTrim = $now
                             Write-Diagnostic 'WORKING_SET_TRIM' @{ pid = $id; beforeMB = $beforeMB }
                         }
                         catch { Warn-Throttled "$id-trim" "PID ${id}: trim failed: $($_.Exception.Message)" }
@@ -328,6 +311,8 @@
                         }
                     }
                 }
+                # A client in game proves its build works (dead-build guard).
+                if ($state.EverGameReady -and -not $state.BuildSuccessSeen) { $state.BuildSuccessSeen = $true; Register-ArkuzoRobloxBuildSuccess ([string]$state.RobloxBuild) }
                 # Log discovery/tailing may have been slow. Recollect window/memory
                 # evidence and timestamp it after IO, never reuse the earlier probe.
                 [Arkuzo.LoopWatchdogV1]::Mark('client ' + $id + ': health probe')

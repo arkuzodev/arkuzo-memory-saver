@@ -56,10 +56,106 @@ function Invoke-ArkuzoVaultLocked([scriptblock]$Action) {
         $mutex.Dispose()
     }
 }
-function Read-ArkuzoVaultFile {
+# Backups of the vault (docs/accounts.md): accounts.json.bak holds the content before the last
+# save, vault-backups\accounts-<UTC yyyyMMdd-HH>.json one copy per hour. Both writers keep them.
+$script:VaultSnapshotKeep = 72
+$script:VaultSnapshotDays = 7
+$script:vaultFallbackSource = $null # The backup read while accounts.json is damaged, else $null.
+function ConvertFrom-ArkuzoVaultText([string]$Text) {
+    # The vault as an object, or $null when the text is not a vault: empty, all NUL (a crash
+    # before the data reached the disk), truncated, not JSON, or not an object with an accounts list.
+    if ($null -eq $Text -or [string]::IsNullOrWhiteSpace($Text.Trim([char]0, [char]0xFEFF))) { return $null }
+    try { $value = $Text.TrimStart([char]0xFEFF) | ConvertFrom-Json } catch { return $null }
+    if ($null -eq $value -or $value -is [array] -or $value.GetType().FullName -cne 'System.Management.Automation.PSCustomObject') { return $null }
+    if (@($value.PSObject.Properties.Name) -notcontains 'accounts' -or $value.accounts -isnot [array]) { return $null }
+    return $value
+}
+function Get-ArkuzoVaultSnapshotDirectory { return (Join-Path $DataDirectory 'vault-backups') }
+function Get-ArkuzoVaultBackupPaths {
+    # Where a damaged vault is read from, best first: accounts.json.bak, then the snapshots, newest first.
+    $paths = @((Get-ArkuzoVaultPath) + '.bak')
+    $dir = Get-ArkuzoVaultSnapshotDirectory
+    if ([IO.Directory]::Exists($dir)) {
+        $paths += @([IO.Directory]::GetFiles($dir, 'accounts-*.json') | Where-Object { [IO.Path]::GetFileName($_) -cmatch '\Aaccounts-\d{8}-\d{2}\.json\z' } |
+            Sort-Object { [IO.Path]::GetFileName($_) } -Descending)
+    }
+    return $paths
+}
+function Get-ArkuzoVaultSnapshotsToRemove([string[]]$Names, [datetime]$NowUtc) {
+    # Pure. Keeps the newest $VaultSnapshotKeep snapshots (names sort by time) and, beyond those,
+    # the newest of each UTC day of the last $VaultSnapshotDays days. The same rule as the
+    # Control Center's vault_snapshots_to_remove. Names that are not snapshots are never touched.
+    $valid = @($Names | Where-Object { $_ -cmatch '\Aaccounts-\d{8}-\d{2}\.json\z' } | Sort-Object -Descending)
+    $keep = if ([int]$script:VaultSnapshotKeep -gt 0) { [int]$script:VaultSnapshotKeep } else { 72 }
+    $days = if ([int]$script:VaultSnapshotDays -gt 0) { [double]$script:VaultSnapshotDays } else { 7.0 }
+    $keepDays = @{}
+    $remove = @()
+    for ($i = 0; $i -lt $valid.Count; $i++) {
+        $day = $valid[$i].Substring(9, 8)
+        if ($i -lt $keep) { $keepDays[$day] = $true; continue }
+        $date = [datetime]::MinValue
+        $recent = [datetime]::TryParseExact($day, 'yyyyMMdd', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal, [ref]$date) -and
+            ($NowUtc.Date - $date.Date).TotalDays -le $days
+        if ($recent -and -not $keepDays.ContainsKey($day)) { $keepDays[$day] = $true; continue }
+        $remove += $valid[$i]
+    }
+    return ,$remove
+}
+function Save-ArkuzoVaultSnapshot([byte[]]$Bytes, [datetime]$NowUtc = [datetime]::UtcNow) {
+    # At most one snapshot per UTC hour: the first save of the hour writes it. Returns $true when written.
+    $dir = Get-ArkuzoVaultSnapshotDirectory
+    [void][IO.Directory]::CreateDirectory($dir)
+    $file = Join-Path $dir ('accounts-' + $NowUtc.ToString('yyyyMMdd-HH', [Globalization.CultureInfo]::InvariantCulture) + '.json')
+    if ([IO.File]::Exists($file)) { return $false }
+    Save-ArkuzoAtomicBytes $file $Bytes
+    foreach ($name in (Get-ArkuzoVaultSnapshotsToRemove @([IO.Directory]::GetFiles($dir, 'accounts-*.json') | ForEach-Object { [IO.Path]::GetFileName($_) }) $NowUtc)) {
+        try { [IO.File]::Delete((Join-Path $dir $name)) } catch { }
+    }
+    return $true
+}
+function Read-ArkuzoVaultFile([switch]$Strict) {
+    # The vault, or $null when there is none yet. A damaged accounts.json is never written by
+    # the engine: -Strict (every read-modify-write) throws. Other reads fall back, read-only, to
+    # the newest valid backup until the Control Center restores the file; launches wait meanwhile
+    # (a rotated cookie could not be saved). Logged once per backup used.
     $path = Get-ArkuzoVaultPath
-    if (-not (Test-Path -LiteralPath $path)) { return $null }
-    return ([IO.File]::ReadAllText($path, [Text.Encoding]::UTF8) | ConvertFrom-Json)
+    if (-not [IO.File]::Exists($path)) { $script:vaultFallbackSource = $null; return $null }
+    $vault = ConvertFrom-ArkuzoVaultText ([IO.File]::ReadAllText($path, [Text.Encoding]::UTF8))
+    if ($null -ne $vault) { $script:vaultFallbackSource = $null; return $vault }
+    if ($Strict) { throw 'Account vault is damaged' }
+    foreach ($candidate in @(Get-ArkuzoVaultBackupPaths)) {
+        $backup = $null
+        try { if ([IO.File]::Exists($candidate)) { $backup = ConvertFrom-ArkuzoVaultText ([IO.File]::ReadAllText($candidate, [Text.Encoding]::UTF8)) } } catch { $backup = $null }
+        if ($null -eq $backup) { continue }
+        if ($script:vaultFallbackSource -cne $candidate) {
+            $script:vaultFallbackSource = $candidate
+            $ageMin = try { [math]::Round(([datetime]::UtcNow - [IO.File]::GetLastWriteTimeUtc($candidate)).TotalMinutes) } catch { $null }
+            Write-Diagnostic 'VAULT_READ_FROM_BACKUP' @{ backup = [IO.Path]::GetFileName($candidate); ageMinutes = $ageMin
+                note = 'data/accounts.json is damaged; the engine reads this backup (read-only) and launches wait until the Control Center restores the file.' }
+        }
+        Warn-Throttled 'vault-damaged' 'data/accounts.json is damaged: reading a backup; launches wait until the Control Center restores it.'
+        return $backup
+    }
+    if ($script:vaultFallbackSource -cne '-') {
+        $script:vaultFallbackSource = '-'
+        Write-Diagnostic 'VAULT_READ_FROM_BACKUP' @{ backup = $null; note = 'data/accounts.json is damaged and no valid backup was found; nothing is launched. Start a new account list on the Accounts page.' }
+    }
+    throw 'Account vault is damaged and no valid backup was found'
+}
+function Save-ArkuzoVaultFile($Vault) {
+    # Caller holds the vault lock and read the vault with -Strict. The content replaced is kept
+    # as accounts.json.bak (only when it is a valid vault), then the new vault is written; both
+    # flushed to the disk. The first save of each hour also writes a snapshot.
+    $path = Get-ArkuzoVaultPath
+    try {
+        if ([IO.File]::Exists($path)) {
+            $current = [IO.File]::ReadAllBytes($path)
+            if ($null -ne (ConvertFrom-ArkuzoVaultText ([Text.Encoding]::UTF8.GetString($current)))) { Save-ArkuzoAtomicBytes ($path + '.bak') $current }
+        }
+    } catch { Warn-Throttled 'vault-backup' 'accounts.json.bak could not be written; the account list itself is saved.' }
+    $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes(($Vault | ConvertTo-Json -Depth 12))
+    Save-ArkuzoAtomicBytes $path $bytes
+    try { [void](Save-ArkuzoVaultSnapshot $bytes) } catch { }
 }
 function ConvertFrom-ArkuzoSecret([string]$Value) {
     if ([string]::IsNullOrEmpty($Value) -or -not $Value.StartsWith('dpapi:')) { throw 'Account secret missing' }
@@ -76,7 +172,7 @@ function Update-ArkuzoVaultAccount([string]$AccountId, [hashtable]$Fields, [stri
     # Read-modify-write one account. OnlyIfCookie: write only if the stored
     # (encrypted) cookie is still the one this change was based on.
     return (Invoke-ArkuzoVaultLocked {
-        $vault = Read-ArkuzoVaultFile
+        $vault = Read-ArkuzoVaultFile -Strict # Never a backup: a damaged vault is not written.
         if ($null -eq $vault) { return $false }
         $rows = @($vault.accounts | Where-Object { [string]$_.id -eq $AccountId })
         if ($rows.Count -ne 1) { return $false }
@@ -85,7 +181,7 @@ function Update-ArkuzoVaultAccount([string]$AccountId, [hashtable]$Fields, [stri
             if ($rows[0].PSObject.Properties.Name -contains $name) { $rows[0].$name = $Fields[$name] }
             else { $rows[0] | Add-Member -NotePropertyName $name -NotePropertyValue $Fields[$name] }
         }
-        Save-ArkuzoAtomicJson (Get-ArkuzoVaultPath) $vault
+        Save-ArkuzoVaultFile $vault
         return $true
     })
 }
@@ -402,11 +498,74 @@ function Get-ArkuzoRobloxInstalls([string]$ManagedRoot) {
         }
     }
 }
-function Get-ArkuzoRobloxPlayerPath($Clients, $Vault = $null) {
+# Dead-build guard (docs/roblox-versions.md). Clients launched on one Roblox build that close
+# before they reach the game RobloxBuildFailureLimit times in a row (any accounts, each failure
+# within RobloxBuildFailureWindowSec of now) mark that build as failing: launches stop using it
+# (Resolve-ArkuzoRobloxPlayer). Pinned: the Auto build instead when robloxVersionFallback is on,
+# otherwise launches wait for another build. Auto: the newest other build, or wait. A client of
+# that build reaching the game, or another pinned selection, clears it. Not a per-account
+# back-off: healthy builds relaunch at once. Memory only (an engine restart starts counting again).
+# 10-11 Nov: a gutted install and two builds Roblox refused ran 16+ failed launches in a row, and
+# each client dying at start was one more chance for the kernel bug behind three blue screens.
+$script:RobloxBuildFailureLimit = 4
+$script:RobloxBuildFailureWindowSec = 300
+$script:robloxBuildGuard = @{ selection = $null; builds = @{} }
+$script:nativeLaunchBuilds = @{}    # accountId -> build version its latest launch started (when known)
+function Sync-ArkuzoRobloxBuildGuardSelection([string]$Selection) {
+    # The user picked another build (or Auto): every failing mark is cleared.
+    if ($null -eq $script:robloxBuildGuard) { $script:robloxBuildGuard = @{ selection = $null; builds = @{} } }
+    if ($script:robloxBuildGuard.selection -ceq $Selection) { return }
+    if ($null -eq $script:robloxBuildGuard.selection) { $script:robloxBuildGuard.selection = $Selection; return } # First look: nothing changed.
+    $had = @(Get-ArkuzoFailingRobloxBuilds)
+    $script:robloxBuildGuard = @{ selection = $Selection; builds = @{} }
+    if ($had.Count -gt 0) { Write-Diagnostic 'ROBLOX_BUILD_GUARD_RESET' @{ builds = $had; selection = $Selection; note = 'Another Roblox build was chosen: launches are tried again.' } }
+}
+function Get-ArkuzoFailingRobloxBuilds {
+    if ($null -eq $script:robloxBuildGuard) { return @() }
+    return @($script:robloxBuildGuard.builds.Keys | Where-Object { $script:robloxBuildGuard.builds[$_].failing } | Sort-Object)
+}
+function Register-ArkuzoRobloxBuildFailure([string]$Version, [string]$AccountId, [datetime]$NowUtc = [datetime]::UtcNow) {
+    # One client of $Version closed before it reached the game. Returns $true when this marks the build failing.
+    if ([string]::IsNullOrEmpty($Version)) { return $false }
+    if ($null -eq $script:robloxBuildGuard) { $script:robloxBuildGuard = @{ selection = $null; builds = @{} } }
+    $builds = $script:robloxBuildGuard.builds
+    if (-not $builds.ContainsKey($Version)) { $builds[$Version] = @{ failures = @(); accounts = @{}; failing = $false; sinceUtc = $null } }
+    $entry = $builds[$Version]
+    $window = if ([double]$script:RobloxBuildFailureWindowSec -gt 0) { [double]$script:RobloxBuildFailureWindowSec } else { 300.0 }
+    $limit = if ([int]$script:RobloxBuildFailureLimit -gt 0) { [int]$script:RobloxBuildFailureLimit } else { 4 }
+    $entry.failures = @(@($entry.failures | Where-Object { ($NowUtc - $_).TotalSeconds -le $window }) + @($NowUtc))
+    if ($AccountId) { $entry.accounts[$AccountId] = $true }
+    if ($entry.failing -or $entry.failures.Count -lt $limit) { return $false }
+    $entry.failing = $true; $entry.sinceUtc = $NowUtc
+    $pin = [string](Get-ArkuzoVaultSetting $script:nativeVault 'robloxVersion' 'auto')
+    $fallback = $pin -ceq 'auto' -or (Get-ArkuzoVaultSetting $script:nativeVault 'robloxVersionFallback' $false) -eq $true
+    Write-Diagnostic 'ROBLOX_BUILD_FAILING' @{ version = $Version; failures = $entry.failures.Count; accounts = $entry.accounts.Count; windowSec = $window; pinned = ($pin -ceq $Version); fallback = [bool]$fallback
+        note = $(if ($fallback) { 'Clients of this build keep closing at start; launches use another installed build.' } else { 'Clients of this build keep closing at start; launches wait until another build is chosen on the Roblox tab or fall back is turned on.' }) }
+    Warn-Throttled 'roblox-build-failing' ('Roblox build ' + $Version + ' keeps closing at start - it may be outdated or refused by Roblox.')
+    $script:robloxVersionCheckedUtc = $null # Show it on the Roblox tab with the next status read.
+    return $true
+}
+function Register-ArkuzoRobloxBuildSuccess([string]$Version) {
+    # A client of $Version reached the game: the build works, the count starts again.
+    if ([string]::IsNullOrEmpty($Version) -or $null -eq $script:robloxBuildGuard -or -not $script:robloxBuildGuard.builds.ContainsKey($Version)) { return }
+    $wasFailing = [bool]$script:robloxBuildGuard.builds[$Version].failing
+    $script:robloxBuildGuard.builds.Remove($Version)
+    if ($wasFailing) {
+        Write-Diagnostic 'ROBLOX_BUILD_GUARD_RESET' @{ builds = @($Version); note = 'A client of this build reached the game: launches use it again.' }
+        $script:robloxVersionCheckedUtc = $null
+    }
+}
+function Get-ArkuzoRobloxBuildProblem([string]$Version) {
+    return 'Roblox build ' + $Version + ' keeps closing at start ' + [char]0x2014 + ' it may be outdated or refused by Roblox'
+}
+
+function Get-ArkuzoRobloxPlayerPath($Clients, $Vault = $null, [string[]]$Exclude = @()) {
     # Auto: prefer the build that is already running; otherwise the newest complete installed one.
-    $running = @($Clients | Where-Object { $_.path -and (Test-Path -LiteralPath $_.path) } | ForEach-Object { $_.path } | Select-Object -Unique)
+    # Builds in $Exclude (failing, see the dead-build guard) are never chosen.
+    $ok = { param($exe) @($Exclude) -cnotcontains [IO.Path]::GetFileName([IO.Path]::GetDirectoryName([string]$exe)) }
+    $running = @($Clients | Where-Object { $_.path -and (Test-Path -LiteralPath $_.path) -and (& $ok $_.path) } | ForEach-Object { $_.path } | Select-Object -Unique)
     if ($running.Count -gt 0) { return (Select-ArkuzoNewestRobloxBuild $running) }
-    return (Select-ArkuzoNewestRobloxBuild @(Get-ArkuzoRobloxInstalls (Get-ArkuzoManagedVersionsRoot $Vault)))
+    return (Select-ArkuzoNewestRobloxBuild @(Get-ArkuzoRobloxInstalls (Get-ArkuzoManagedVersionsRoot $Vault) | Where-Object { & $ok $_ }))
 }
 function Get-ArkuzoProtocolPlayerPath([string]$Key = 'Registry::HKEY_CLASSES_ROOT\roblox-player\shell\open\command') {
     # The exe a roblox-player: link starts (HKCU wins over HKLM in HKEY_CLASSES_ROOT). The Control
@@ -430,13 +589,33 @@ function Resolve-ArkuzoRobloxPlayer($Clients, $Vault, [string]$Method = 'direct'
     if ($pin -cne 'auto' -and $pin -cnotmatch '\Aversion-[0-9a-f]{16}\z') { $pin = 'auto' }
     $allowFallback = (Get-ArkuzoVaultSetting $Vault 'robloxVersionFallback' $false) -eq $true
     $managed = Get-ArkuzoManagedVersionsRoot $Vault
-    $r = @{ mode = 'auto'; pinned = $null; path = $null; method = $(if ($Method -ceq 'protocol') { 'protocol' } else { 'direct' }); problem = $null; fallback = $false; managedRoot = $managed }
+    Sync-ArkuzoRobloxBuildGuardSelection $pin
+    $failing = @(Get-ArkuzoFailingRobloxBuilds)
+    $r = @{ mode = 'auto'; pinned = $null; path = $null; method = $(if ($Method -ceq 'protocol') { 'protocol' } else { 'direct' }); problem = $null; fallback = $false; managedRoot = $managed; blocked = $false }
     if ($pin -ceq 'auto') {
-        if ($r.method -ceq 'direct') { $r.path = Get-ArkuzoRobloxPlayerPath $Clients $Vault }
+        if ($r.method -ceq 'direct') {
+            $r.path = Get-ArkuzoRobloxPlayerPath $Clients $Vault $failing
+            if ($failing.Count -gt 0) {
+                # Auto skips a failing build; with nothing else installed, launches wait.
+                $r.problem = (Get-ArkuzoRobloxBuildProblem ($failing -join ', ')) + $(if ($r.path) { '; launching ' + [IO.Path]::GetFileName([IO.Path]::GetDirectoryName([string]$r.path)) + ' instead' } else { '; launches wait until another build is installed (Roblox tab)' })
+                $r.blocked = -not $r.path
+            }
+        }
         return $r
     }
     $r.mode = 'pinned'; $r.pinned = $pin; $wantProtocol = $r.method -ceq 'protocol'; $r.method = 'direct'
     $r.path = @(Get-ArkuzoRobloxInstalls $managed | Where-Object { [IO.Path]::GetFileName([IO.Path]::GetDirectoryName($_)) -ceq $pin -and (Test-ArkuzoRobloxBuildComplete $_) }) | Select-Object -First 1
+    if ($r.path -and $failing -ccontains $pin) {
+        # The pinned build keeps closing at start: the Auto build when allowed, else wait.
+        $r.problem = Get-ArkuzoRobloxBuildProblem $pin
+        $r.blocked = $true
+        $r.path = $null
+        if ($allowFallback) {
+            $r.fallback = $true; $r.path = Get-ArkuzoRobloxPlayerPath $Clients $Vault $failing
+            $r.problem += $(if ($r.path) { '; launching the Auto build ' + [IO.Path]::GetFileName([IO.Path]::GetDirectoryName([string]$r.path)) + ' instead' } else { '; no other build is installed, so launches wait' })
+        } else { $r.problem += '; launches wait until another build is chosen on the Roblox tab (or "Fall back if missing" is on)' }
+        return $r
+    }
     if ($r.path) {
         if ($wantProtocol) {
             $handler = Get-ArkuzoProtocolPlayerPath $ProtocolKey
@@ -456,7 +635,8 @@ function Update-ArkuzoRobloxVersionStatus($Player, [string]$RequestedMethod = 'd
     $script:robloxVersionStatus = [ordered]@{ mode = [string]$Player.mode; pinned = $Player.pinned; fallback = [bool]$Player.fallback
         selectedPath = $Player.path; selectedVersion = $version; method = [string]$Player.method; problem = $Player.problem; managedRoot = $Player.managedRoot
         checkedUtc = [datetime]::UtcNow.ToString('o') }
-    if ($Player.problem -and ($null -eq $previous -or [string]$previous.problem -cne [string]$Player.problem -or [bool]$previous.fallback -ne [bool]$Player.fallback)) {
+    $pinMissing = $Player.problem -and $Player.mode -ceq 'pinned' -and -not $Player.blocked # A failing build logs ROBLOX_BUILD_FAILING.
+    if ($pinMissing -and ($null -eq $previous -or [string]$previous.problem -cne [string]$Player.problem -or [bool]$previous.fallback -ne [bool]$Player.fallback)) {
         Write-Diagnostic 'ROBLOX_VERSION_PIN_MISSING' @{ pinned = $Player.pinned; fallback = [bool]$Player.fallback; usedVersion = $version
             note = $(if ($Player.fallback) { 'The pinned build is missing; "fall back to newest" is on, so the newest installed build is launched.' } else { 'The pinned build is missing; launches wait until it is installed or Auto is chosen.' }) }
     }
@@ -468,11 +648,12 @@ function Update-ArkuzoRobloxVersionStatus($Player, [string]$RequestedMethod = 'd
 function Get-ArkuzoRobloxVersionPreflight($Vault) {
     # Step 1 of a launch: a pinned build that is missing (and no fallback) refuses before a ticket is
     # requested, so a missing pin never spends Roblox requests every relaunch cycle. Auto: nothing to check.
+    # Also refuses when the dead-build guard leaves no build to launch.
     $pin = [string](Get-ArkuzoVaultSetting $Vault 'robloxVersion' 'auto')
-    if ($pin -ceq 'auto') { return '' }
+    if ($pin -ceq 'auto' -and @(Get-ArkuzoFailingRobloxBuilds).Count -eq 0) { return '' }
     $player = Resolve-ArkuzoRobloxPlayer @() $Vault ([string](Get-ArkuzoVaultSetting $Vault 'launchMethod' 'direct'))
     Update-ArkuzoRobloxVersionStatus $player ([string](Get-ArkuzoVaultSetting $Vault 'launchMethod' 'direct'))
-    if ($player.path) { return '' }
+    if ($player.path -or -not $player.problem) { return '' }
     return [string]$player.problem
 }
 function Clear-ArkuzoRobloxSavedLogin([string]$StorageDir = $(if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'Roblox\LocalStorage' } else { '' })) {
@@ -490,7 +671,9 @@ function Clear-ArkuzoRobloxSavedLogin([string]$StorageDir = $(if ($env:LOCALAPPD
         if ([string]::IsNullOrEmpty([string]$jar.CookiesData)) { return $false }
         Add-Type -AssemblyName System.Security
         $plain = [Text.Encoding]::UTF8.GetString([Security.Cryptography.ProtectedData]::Unprotect([Convert]::FromBase64String([string]$jar.CookiesData), $null, [Security.Cryptography.DataProtectionScope]::CurrentUser))
-        $hasLogin = @($plain -split "`n" | Where-Object { $f = $_ -split "`t"; $f.Count -ge 6 -and $f[5].Trim() -ceq '.ROBLOSECURITY' }).Count -gt 0
+        # Roblox also writes multiple cookie records on one line, separated only by tabs.
+        # Match an exact cookie-name field, never a substring inside another cookie.
+        $hasLogin = $plain -cmatch '(?:^|[\t\r\n])\.ROBLOSECURITY\t'
         $plain = $null
         if (-not $hasLogin) { return $false }
         # One backup, so signing in to the Roblox app again can be undone by renaming it back.
@@ -502,7 +685,7 @@ function Start-ArkuzoRobloxClient([string]$Ticket, [string]$JoinUrl, [string]$Tr
     # $Player (Resolve-ArkuzoRobloxPlayer) decides the exe and the method; without it, the Auto choice.
     $launchMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     $exe = if ($null -ne $Player) { $(if ($Player.method -ceq 'protocol') { $null } else { $Player.path }) } elseif ($Method -ceq 'protocol') { $null } else { Get-ArkuzoRobloxPlayerPath $Clients }
-    if ($null -ne $Player -and $Player.mode -ceq 'pinned' -and -not $Player.path) { throw 'Pinned Roblox build missing' } # Never Roblox's launcher instead of a pin.
+    if ($null -ne $Player -and -not $Player.path -and ($Player.mode -ceq 'pinned' -or $Player.blocked)) { throw $(if ($Player.mode -ceq 'pinned') { 'Pinned Roblox build missing or failing' } else { 'No Roblox build to launch' }) } # Never Roblox's launcher instead of a pin or around a failing build.
     $info = New-Object Diagnostics.ProcessStartInfo
     if ($exe) {
         $info.FileName = $exe; $info.WorkingDirectory = Split-Path -Parent $exe; $info.UseShellExecute = $false
@@ -578,6 +761,7 @@ function Invoke-ArkuzoNativeLaunch([string]$AccountId, [string]$TrackerId, [swit
         if ($MonitorOnly -or -not $ownsControllerMutex) { throw 'Read-only controller' }
         Initialize-ArkuzoNativeLaunchState
         $vault = Invoke-ArkuzoVaultLocked { Read-ArkuzoVaultFile }
+        if ($script:vaultFallbackSource) { throw 'Account list is damaged: launches wait until the Control Center restores it' }
         $rows = @($vault.accounts | Where-Object { [string]$_.id -eq $AccountId -and [string]$_.browserTrackerId -eq $TrackerId })
         if ($rows.Count -ne 1) { throw 'Account not found in the Arkuzo vault' }
         $a = $rows[0]
@@ -614,6 +798,7 @@ function Complete-ArkuzoNativeLaunch([string]$AccountId, $Pending, $Ticket) {
     # was requested (farm stopped, Close pressed, cookie, a client appeared), then start the
     # client. Returns the reason it was not started, or '' when it was.
     $vault = Invoke-ArkuzoVaultLocked { Read-ArkuzoVaultFile }
+    if ($script:vaultFallbackSource) { return 'Account list is damaged: launches wait until the Control Center restores it' }
     $rows = @($vault.accounts | Where-Object { [string]$_.id -eq $AccountId -and [string]$_.browserTrackerId -eq $Pending.TrackerId })
     if ($rows.Count -ne 1) { return 'Account not found in the Arkuzo vault' }
     $a = $rows[0]
@@ -643,7 +828,7 @@ function Complete-ArkuzoNativeLaunch([string]$AccountId, $Pending, $Ticket) {
     # The build to start: Auto, or the pinned one (re-checked: it may have been removed meanwhile).
     $player = Resolve-ArkuzoRobloxPlayer $clients $vault $Pending.Method
     Update-ArkuzoRobloxVersionStatus $player $Pending.Method
-    if ($player.mode -ceq 'pinned' -and -not $player.path) { Warn-Throttled 'roblox-version-pin' $player.problem; return [string]$player.problem }
+    if (-not $player.path -and ($player.mode -ceq 'pinned' -or $player.blocked)) { Warn-Throttled 'roblox-version-pin' $player.problem; return [string]$player.problem }
     if ($player.path) { Update-ArkuzoGraphicsForInstall ([IO.Path]::GetDirectoryName([string]$player.path)) }
     Enable-ArkuzoMultiInstance
     if (Clear-ArkuzoRobloxSavedLogin) {
@@ -655,6 +840,10 @@ function Complete-ArkuzoNativeLaunch([string]$AccountId, $Pending, $Ticket) {
     # Launch spacing counts from the request (step 1), so launchDelaySec is the real gap.
     $script:nativeLaunchTrackers[[string]$Pending.TrackerId] = $now
     if ($started.pid) { $script:nativeLaunchPids[$AccountId] = [int]$started.pid } else { $script:nativeLaunchPids.Remove($AccountId) }
+    # The build this client starts, for the dead-build guard: known for direct launches and pins.
+    if ($null -eq $script:nativeLaunchBuilds) { $script:nativeLaunchBuilds = @{} }
+    if ($player.path -and ($started.method -ceq 'direct' -or $player.mode -ceq 'pinned')) { $script:nativeLaunchBuilds[$AccountId] = [IO.Path]::GetFileName([IO.Path]::GetDirectoryName([string]$player.path)) }
+    else { $script:nativeLaunchBuilds.Remove($AccountId) }
     try { [void](Update-ArkuzoVaultAccount $AccountId @{ lastLaunchAtMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(); launchRequestedAtMs = 0; lastError = $null }) } catch { }
     $build = if ($started.method -ceq 'direct' -and $player.path) { [IO.Path]::GetFileName([IO.Path]::GetDirectoryName([string]$player.path)) } else { $null }
     Write-Diagnostic 'NATIVE_LAUNCH_STARTED' @{ accountId = $AccountId; username = [string]$a.username; method = [string]$started.method; pid = $started.pid; robloxVersion = $build; pinned = ($player.mode -ceq 'pinned'); note = 'Client started; game readiness is verified separately.' }
@@ -711,6 +900,8 @@ function Register-ArkuzoNativeLaunchExit([int]$ClientId, $State) {
     if (-not $script:recoveryPending.ContainsKey($key)) { return }
     $entry = $script:recoveryPending[$key]
     if ([int]$entry.oldPid -eq $ClientId -and [long]$entry.oldStartTicks -eq [long]$State.StartTicks) { return }
+    # Not the build's fault: the engine closed it (stalled launch), or it reached the game first.
+    if (($State.Closing -or $State.EverGameReady) -and $null -ne $script:nativeLaunchBuilds) { $script:nativeLaunchBuilds.Remove($key) }
     $script:nativeLaunchExits[$key] = [datetime]::UtcNow
 }
 
@@ -718,6 +909,9 @@ function Invoke-ArkuzoNativeRequests {
     # Launch / close buttons and Stop farm in the Control Center set request
     # stamps on accounts; carry them out here and clear them.
     if (-not (Test-ArkuzoNativeProvider) -or $MonitorOnly -or -not $ownsControllerMutex -or -not $voltControlStatus.available) { return }
+    # A vault read from a backup is read-only: its request stamps may be stale (a Close carried out
+    # and cleared after that copy was made would close the client again).
+    if ($script:vaultFallbackSource) { return }
     Initialize-ArkuzoNativeLaunchState
     $utc = [datetime]::UtcNow
     $launched = $false

@@ -4,14 +4,14 @@
 
 <br>
 
-[![Version](https://img.shields.io/badge/version-2.4.0-38bdf8?style=for-the-badge&labelColor=12141b)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-2.4.1-38bdf8?style=for-the-badge&labelColor=12141b)](CHANGELOG.md)
 [![Windows x64](https://img.shields.io/badge/Windows-x64-818cf8?style=for-the-badge&labelColor=12141b)](#requirements)
 [![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-a78bfa?style=for-the-badge&labelColor=12141b)](#requirements)
 [![Volt optional](https://img.shields.io/badge/Volt-optional-34d399?style=for-the-badge&labelColor=12141b)](docs/accounts.md)
 
-### [**⬇&nbsp; Download ArkuzoMemorySaver.exe**](https://github.com/arkuzodev/arkuzo-memory-saver/releases/latest/download/ArkuzoMemorySaver.exe)
+### [**â¬‡&nbsp; Download ArkuzoMemorySaver.exe**](https://github.com/arkuzodev/arkuzo-memory-saver/releases/latest/download/ArkuzoMemorySaver.exe)
 
-[Releases](https://github.com/arkuzodev/arkuzo-memory-saver/releases/latest) &nbsp;·&nbsp; [Configuration](docs/configuration.md) &nbsp;·&nbsp; [Troubleshooting](docs/troubleshooting.md) &nbsp;·&nbsp; [Accounts without Volt](docs/accounts.md) &nbsp;·&nbsp; [Farm-freeze recovery](docs/farm-freeze-recovery.md) &nbsp;·&nbsp; [Remote desktop](docs/remote-desktop.md) &nbsp;·&nbsp; [Roadmap](#roadmap) &nbsp;·&nbsp; [Changelog](CHANGELOG.md)
+[Releases](https://github.com/arkuzodev/arkuzo-memory-saver/releases/latest) &nbsp;Â·&nbsp; [Configuration](docs/configuration.md) &nbsp;Â·&nbsp; [Troubleshooting](docs/troubleshooting.md) &nbsp;Â·&nbsp; [Accounts without Volt](docs/accounts.md) &nbsp;Â·&nbsp; [Farm-freeze recovery](docs/farm-freeze-recovery.md) &nbsp;Â·&nbsp; [Remote desktop](docs/remote-desktop.md) &nbsp;Â·&nbsp; [Roadmap](#roadmap) &nbsp;Â·&nbsp; [Changelog](CHANGELOG.md)
 
 </div>
 
@@ -19,7 +19,7 @@
 
 <img src="docs/images/readme/stats.png" alt="Farm-wide freezes back in game in about 2.5 min on average (replay), 600 MB soft target per client after a 90 s warm-up, one verified relaunch at a time, a four-file checksummed runtime" width="100%">
 
-<sub>The 2.5 min is the average per account when the four logged farm-wide freezes (23–27 Oct) are replayed against v2.1.5; the logs showed 5.8 min. See [farm-freeze recovery](docs/farm-freeze-recovery.md).</sub>
+<sub>The 2.5 min is the average per account when the four logged farm-wide freezes (23â€“27 Oct) are replayed against v2.1.5; the logs showed 5.8 min. See [farm-freeze recovery](docs/farm-freeze-recovery.md).</sub>
 
 ## What it does
 
@@ -69,7 +69,7 @@
 <td valign="top">
 <img src="docs/images/readme/feature-autopilot.svg" width="44" align="left" hspace="10" alt="">
 <b>Autopilot</b><br>
-<sub>Keeps the saver alive: restarts it after a crash, exit or hang within 5–10 s, and keeps retrying every 15 s even if it keeps crashing.</sub>
+<sub>Keeps the saver alive: restarts it after a crash, exit or hang within 5â€“10 s, and keeps retrying every 15 s even if it keeps crashing.</sub>
 </td>
 </tr>
 </table>
@@ -89,14 +89,14 @@ The launcher opens it for you (it needs Python 3 on `PATH`); in a source checkou
 <td width="50%"><img src="docs/images/control-center-settings.png" alt="Settings page"><p align="center"><sub><b>Settings</b></sub></p></td>
 </tr>
 <tr>
-<td><img src="docs/images/control-center-midnight.png" alt="Midnight theme with the Violet accent"><p align="center"><sub><b>Midnight · Violet</b></sub></p></td>
-<td><img src="docs/images/control-center-frost.png" alt="Frost light theme with the Indigo accent"><p align="center"><sub><b>Frost · Indigo</b></sub></p></td>
+<td><img src="docs/images/control-center-midnight.png" alt="Midnight theme with the Violet accent"><p align="center"><sub><b>Midnight Â· Violet</b></sub></p></td>
+<td><img src="docs/images/control-center-frost.png" alt="Frost light theme with the Indigo accent"><p align="center"><sub><b>Frost Â· Indigo</b></sub></p></td>
 </tr>
 </table>
 
 <sub>Pictures use a synthetic demo farm, not real accounts or measurements.</sub>
 
-- **Close the window and it exits cleanly:** the saver stops and the Control Center quits, like **Settings → Stop farm & quit**. Your Roblox clients keep running.
+- **Close the window and it exits cleanly:** the saver stops and the Control Center quits, like **Settings â†’ Stop farm & quit**. Your Roblox clients keep running.
 - **Updates take over by themselves:** starting the launcher always runs the newest installed version. A newer Control Center replaces an older running one and restarts the saver on the new version if it was running.
 - **Start with Windows** is optional. A launcher install opens the window at sign-in; a source checkout starts in the background until you open its window and close it.
 
@@ -154,7 +154,7 @@ flowchart LR
 - **Only opted-in, uniquely mapped accounts.** Unknown mappings, loading screens, unavailable logging or an unhealthy journal block every destructive step. Arkuzo maps each client by the account's own tracker id on its command line; clients it didn't launch are left alone.
 - **Arkuzo relaunches by itself** after the relaunch delay (8 s), launches spaced 12 s apart, and retries only a launch that produced no client. An account Roblox has moderated is never retried.
 - **You stay in control of the clients:** **Stop farm** stops relaunching and closes every client; **Close all** closes them all and, while the farm runs, brings them back (a quick restart); **Close** on one account closes that client and leaves its relaunch on. The Control Center closes only the exact process the saver reported for the account.
-- **With Volt, its relaunch delay stays at 30 s or more;** a larger delay you set is kept. Missing-account retries back off for 90–900 s, with cooldowns and hourly budgets that survive saver restarts.
+- **With Volt, its relaunch delay stays at 30 s or more;** a larger delay you set is kept. Missing-account retries back off for 90â€“900 s, with cooldowns and hourly budgets that survive saver restarts.
 - **A restore must prove itself:** a new, exactly mapped process, a connected launcher socket, a responsive window without errors and matching server-join evidence, held for a continuous confirmation window.
 - **Farm-wide freezes** (in the logs, Chrome Remote Desktop disconnects and display events) are handled as one event, with closes paced so Volt doesn't show its "Roblox started before Volt could connect" notice. Switch it off with `health.farm_freeze_enabled`.
 - **Remote desktop:** in the logs, 12 of 14 Chrome Remote Desktop disconnects with clients running froze them. The saver recognises a disconnect and recycles the farm sooner, never hangs on a frozen client's log, warns you in the Control Center while a session is connected (minimise it instead of disconnecting), and has a "Leave Remote Desktop safely" button for RDP. See [remote desktop disconnects](docs/remote-desktop.md).
@@ -219,14 +219,14 @@ Arkuzo started as a memory saver bolted onto Volt. The roadmap turns it into a f
 
 ## Integrity and antivirus
 
-v2.4.0 ships a rebuilt executable, runtime and Control Center add-on; all 1.x releases are deprecated. VirusTotal results for these files follow after release. Compare the checksums with the release before running anything.
+v2.4.1 ships a rebuilt executable, runtime and Control Center add-on; all 1.x releases are deprecated. VirusTotal results for these files follow after release. Compare the checksums with the release before running anything.
 
 | File | SHA-256 | VirusTotal |
 | :--- | :--- | :--- |
-| **`ArkuzoMemorySaver.exe`** | `3bb9ef9b40fed1b6811e9cd416ae1da6b651fcbad75c3295f6f59e3ea1dae7eb` | Scan pending |
-| **`ArkuzoMemorySaver-runtime.zip`** | `94186e60ebcd36fd5139a65cf11683c45bd4452da521c8bf1b0c77b151358765` | Scan pending |
-| **`ArkuzoMemorySaver-controlcenter.zip`** | `7cc6e811d612edd9f3f7fb94427da6f8898fe086fa92b764bca83f6eed3f82f3` | Scan pending |
-| **`ArkuzoMemorySaver-v2.4.0-win-x64.zip`** | `0db839e0133c35edd846b5d5229cb0177d1db80b10278a21b8a3b0487b539971` | Scan pending |
+| **`ArkuzoMemorySaver.exe`** | `61884aa316c0a6ca67c35b730250c7d463f6e1a824722a65afc2058fb0aa1f80` | Scan pending |
+| **`ArkuzoMemorySaver-runtime.zip`** | `f87d67925044de24b377c94152fb1f8f9df27ac631731af6fcdefa21ae4ad466` | Scan pending |
+| **`ArkuzoMemorySaver-controlcenter.zip`** | `1551b2b2b71fc5294d5e57090655c90051214ee3bef93327773be357b5b5c984` | Scan pending |
+| **`ArkuzoMemorySaver-v2.4.1-win-x64.zip`** | `ef653ab9efea6fff291ab37d74d4a62b144542f42219ecfc01286dfa32d05ac3` | Scan pending |
 
 Each release also publishes **`SHA256SUMS.txt`**, plus **`ArkuzoMemorySaver-runtime.sha256`** and **`ArkuzoMemorySaver-controlcenter.sha256`** for the updater. The launcher checks downloaded bytes and GitHub's asset digests. A checksum detects a mismatch; it is not a code signature. See [security and privacy](SECURITY.md).
 

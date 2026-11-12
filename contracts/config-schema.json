@@ -64,6 +64,7 @@
       "private_limit_mb": ["int", 1024, 16384],
       "hang_timeout_sec": ["int", 60, 900],
       "warmup_sec": ["int", 60, 900],
+      "config_grace_sec": ["int", 10, 300],
       "pressure_percent": ["int", 60, 98],
       "pressure_min_private_mb": ["int", 1024, 16384],
       "cooldown_sec": ["int", 30, 300],

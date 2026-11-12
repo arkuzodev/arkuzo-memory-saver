@@ -139,7 +139,7 @@ Write-Output 'PASS: stall watchdog reports blocked phase from its own thread, th
 $text=$ast.Extent.Text
 Assert (([regex]::Matches($text,'Get-CimInstance Win32_Process[^\r\n]*')|Where-Object { $_.Value -notmatch '-OperationTimeoutSec' }).Count -eq 0) 'Every Win32_Process query is time-bounded'
 Assert ($text -match "LoopWatchdogV1\]::Start\(\(Join-Path \`$DataDirectory 'saver-stall\.json'\), 60\)" -and ([regex]::Matches($text,'LoopWatchdogV1\]::Mark\(')).Count -ge 12) 'Watchdog is armed and the loop marks its phases'
-Assert ($text -match "'MemoryPriority'\s*\{\s*#\s*Only change what can be restored" -and $text -match 'SetMemoryPriority\(\$Client\.Handle, \[uint32\]\$State\.MemoryPriority\)') 'Memory priority is applied and restored'
+Assert ($text -match "'MemoryPriority'\s*\{\s*#\s*Only change what can be restored" -and $text -match 'Set-ArkuzoClientMemoryPriority \$Client \(\[uint32\]\$State\.MemoryPriority\)') 'Memory priority is applied and restored'
 Assert ($text -match '\$trimPlan = Get-ArkuzoTrimPlan' -and $text -match '-ge \$trimPlan\.IntervalSec') 'Trim loop uses the adaptive plan'
 Assert ($text -match 'Update-ArkuzoLiveSettings \$pendingLiveSettings') 'Main loop applies live settings'
 Assert ($text -match 'trim-now\.signal') 'Trim-now signal is wired'

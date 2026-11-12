@@ -522,6 +522,7 @@ function renderVault() {
   const notice = v.error || v.providerNotice || (hb && hb.accountProviderNotice) ||
     (v.unreadableCount ? `${v.unreadableCount} account row${v.unreadableCount === 1 ? '' : 's'} in data/accounts.json could not be read and ${v.unreadableCount === 1 ? 'is' : 'are'} kept untouched there.` : '');
   $('farmNotice').hidden = !notice; $('farmNotice').textContent = notice || '';
+  $('vaultResetRow').hidden = !v.damaged; // Damaged accounts.json and no valid backup: the user may start over.
   // Sign-in line.
   const login = v.login || {};
   const busy = ['starting', 'waiting', 'reading'].includes(login.state);
@@ -1038,7 +1039,7 @@ function renderRobloxSettings(v, current, complete, running, kept) {
   if (mode === 'exploit') {
     const chosen = follow.slice(8), list = exploits.slice().sort((a, b) => (Number(b.usable) - Number(a.usable)) || a.title.localeCompare(b.title));
     const pick = el('select', { class: 'rbx-wide', 'aria-label': 'Exploit to follow' }, ...list.map((x) => el('option', { value: x.id, disabled: !x.usable || null,
-      text: `${x.title}${x.version ? ' ' + x.version : ''} · ${x.usable ? (x.updated ? 'updated' : 'not updated') : (x.reason || 'not usable')}${x.detected ? ' · detected' : ''}${x.robloxVersion ? ' · ' + shortBuild(x.robloxVersion).slice(0, 8) : ''}` })));
+      text: `${x.title}${x.version ? ' ' + x.version : ''}` })));
     if (!chosen) pick.prepend(el('option', { value: '', text: 'Choose your exploit…' }));
     else if (!list.some((x) => x.id === chosen)) pick.prepend(el('option', { value: chosen, text: 'No longer listed on weao.gg' }));
     pick.value = chosen;
@@ -1274,6 +1275,7 @@ const FIELDS = [
     ['health', 'remote_hold_max_sec', 'RDP disconnect hold', 's', 'While an RDP session is disconnected, pause recovery this long at most. 0 turns it off.'],
     ['health', 'disconnect_timeout_sec', 'Disconnect grace', 's', 'Wait after a kick or disconnect.'],
     ['health', 'warmup_sec', 'Warmup', 's', 'Startup grace for each new client.'],
+    ['health', 'config_grace_sec', 'Hands-off at start', 's', 'A new client is not touched (priority, CPU cores, memory priority) until it is this old and has a window.'],
     ['health', 'pressure_percent', 'Commit pressure', '%', 'OS commit level that recycles the largest clients.'],
     ['health', 'cooldown_sec', 'Recycle cooldown', 's', 'Minimum spacing between recycles.'],
     ['health', 'max_recycles_per_hour', 'Recycles per hour', '', 'Farm-wide budget; prevents restart storms.'],
@@ -1399,6 +1401,8 @@ $('btnLeaveRdp').onclick = () => armed($('btnLeaveRdp'), 'Click again to move th
   () => act('/api/remote/leave', 'Session moved to the console', {}, 'good'));
 const goodbye = (text) => document.body.replaceChildren(el('div', { style: 'height:100vh;display:grid;place-items:center;color:#7e879a;font-weight:600', text }));
 $('btnQuit').onclick = async () => { await post('/api/quit', {}).catch(() => {}); goodbye('Control Center closed. The saver keeps running; you can close this window.'); };
+$('btnVaultReset').onclick = () => armed($('btnVaultReset'), 'Click again to set the damaged account list aside (kept as accounts.json.damaged-…) and start a new, empty one. Accounts must then be added again.',
+  () => vaultAct('/api/vault/reset', {}, 'New account list started; the damaged file is kept in the data folder', 'good'));
 $('btnQuitAll').onclick = () => armed($('btnQuitAll'), 'Click again to stop the saver and quit. Clients keep running but are no longer managed.',
   async () => { await post('/api/quit', { stopSaver: true }).catch(() => {}); goodbye('Saver stopped and Control Center closed. You can close this window.'); });
 

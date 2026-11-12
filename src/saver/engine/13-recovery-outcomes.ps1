@@ -132,7 +132,11 @@ function Update-ArkuzoRecoveryOutcomes {
             if ($native -and $null -ne $script:nativeLaunchExits -and $script:nativeLaunchExits.ContainsKey($key)) {
                 # Its launched client went away before it was in game: relaunch after the relaunch delay.
                 $script:nativeLaunchExits.Remove($key)
-                Write-Diagnostic 'NATIVE_LAUNCH_EXITED' @{accountId=$key;pid=$entry.replacementPid;attempt=[int]$entry.retryCount;note='The launched client closed before it was verified in game; relaunching after the relaunch delay.'}
+                $exitBuild = if ($null -ne $script:nativeLaunchBuilds -and $script:nativeLaunchBuilds.ContainsKey($key)) { [string]$script:nativeLaunchBuilds[$key] } else { $null }
+                if ($null -ne $script:nativeLaunchBuilds) { $script:nativeLaunchBuilds.Remove($key) }
+                Write-Diagnostic 'NATIVE_LAUNCH_EXITED' @{accountId=$key;pid=$entry.replacementPid;attempt=[int]$entry.retryCount;robloxVersion=$exitBuild;note='The launched client closed before it was verified in game; relaunching after the relaunch delay.'}
+                # Dead-build guard: a build whose clients keep closing at start stops getting launches.
+                if ($exitBuild) { [void](Register-ArkuzoRobloxBuildFailure $exitBuild $key $utc) }
                 $entry.closedUtc=$utc.ToString('o');$entry.nextRetryUtc=$null;$entry.replacementPid=0;$entry.replacementStartTicks=0;$entry.readySinceUtc=$null;$entry.lastObservedUtc=$null
             }
             if ($native -and -not $voltControlStatus.farmRunning) {
@@ -219,6 +223,7 @@ function Update-ArkuzoRecoveryOutcomes {
                 Write-Diagnostic 'NATIVE_LAUNCH_STALLED' @{accountId=$key;username=$a.username;pid=$stalledPid;startTicks=[long]$replacementState.StartTicks;note='No window after the launch timeout; closing it for a fresh launch.'}
                 if ($logFailed) { throw 'Recovery requires audit logging' }
                 try {
+                    $replacementState.Closing = $true # Nothing else touches it from here on.
                     if (Test-ArkuzoClientIdentity $replacementState.Watcher $stalledPid $replacementState.StartTicks) { $replacementState.Watcher.Kill() }
                 } catch { Warn-Throttled ('stalled-'+$key) ((Get-ArkuzoAccountDisplayLabel -AccountId $key)+': a launch without a window could not be closed: '+$_.Exception.Message) }
                 $entry.readySinceUtc=$null;$entry.lastObservedUtc=$null

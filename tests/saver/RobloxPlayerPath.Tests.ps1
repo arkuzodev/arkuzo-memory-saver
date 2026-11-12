@@ -9,7 +9,7 @@ $engine = Join-Path $PSScriptRoot '..\..\src\saver\Arkuzo-Memory-Saver.ps1'
 $t = $null; $e = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile((Resolve-Path $engine), [ref]$t, [ref]$e)
 foreach ($name in @('Get-ArkuzoVaultSetting', 'Get-ArkuzoManagedVersionsRoot', 'Test-ArkuzoRobloxBuildComplete', 'Select-ArkuzoNewestRobloxBuild',
-        'Get-ArkuzoRobloxInstalls', 'Get-ArkuzoRobloxPlayerPath', 'Get-ArkuzoProtocolPlayerPath', 'Resolve-ArkuzoRobloxPlayer', 'Update-ArkuzoRobloxVersionStatus', 'Get-ArkuzoRobloxVersionPreflight', 'Start-ArkuzoRobloxClient')) {
+        'Get-ArkuzoRobloxInstalls', 'Get-ArkuzoRobloxPlayerPath', 'Get-ArkuzoProtocolPlayerPath', 'Resolve-ArkuzoRobloxPlayer', 'Sync-ArkuzoRobloxBuildGuardSelection', 'Get-ArkuzoFailingRobloxBuilds', 'Get-ArkuzoRobloxBuildProblem', 'Update-ArkuzoRobloxVersionStatus', 'Get-ArkuzoRobloxVersionPreflight', 'Start-ArkuzoRobloxClient')) {
     $fn = $ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name }, $true) | Select-Object -First 1
     if (-not $fn) { throw "$name not found" }
     . ([scriptblock]::Create($fn.Extent.Text))

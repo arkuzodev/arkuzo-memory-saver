@@ -63,6 +63,8 @@ The tables below describe the current repository defaults in `config/defaults.js
 | `adaptive_trim` | `true` | Trims three times as often (never below 15 s) while free physical RAM is scarce. |
 | `pressure_trim_available_percent` | `20` | Free physical RAM percentage below which adaptive trimming applies. |
 
+Priority, CPU cores, memory priority and the hard limit apply to a client only once it is `health.config_grace_sec` (20 s) old and has a window; they are re-applied every 10 s after that. A client that exits or that the saver is closing is never touched.
+
 Everything in `settings` except `hard_limit` and `apply_graphics_flags` is applied to a running saver within about 10 seconds of saving. A configuration that predates `memory_priority` or `adaptive_trim` inherits them from its `selected_preset`.
 
 Trimming waits for the **individual client's** warmup, checks its current resident memory against the soft target, and requires a present, responsive window without a detected startup-error dialog. Global spacing staggers eligible clients. A trim can cause subsequent page faults as needed pages return to RAM. It does not decommit private allocations or repair the cause of memory growth.
@@ -77,6 +79,7 @@ Trimming waits for the **individual client's** warmup, checks its current reside
 | `pressure_percent` | `88` | OS **commit** utilization threshold for pressure-based candidate selection, not physical-RAM usage. |
 | `pressure_min_private_mb` | `4000` | Minimum private footprint for the pressure-selection path. |
 | `warmup_sec` | `90` | Startup grace in seconds for ordinary trimming and routine health evaluation. |
+| `config_grace_sec` | `20` | A new client is left alone until it is this old **and** has a window (or has answered once). Until then nothing is read or changed: priority, CPU cores, memory priority, hard limit and their original values. On exit, a client that was never configured is not "restored". 10–300. Three blue screens on 10 and 11 Nov each hit while a client the saver had just started was dying at start; see [troubleshooting](troubleshooting.md#the-pc-blue-screens-while-roblox-clients-start-kmode_exception_not_handled). |
 | `hang_timeout_sec` | `120` | Continuous unresponsive-window observation before a hang becomes a candidate. |
 | `startup_error_timeout_sec` | `5` | Separate continuous observation grace for a recognized startup-error dialog. |
 | `disconnect_timeout_sec` | `5` | Grace after a detected, correctly bound in-game disconnect or kick. |

@@ -141,6 +141,19 @@ Vault setting `robloxVersion` (accounts.json → settings), set on the Roblox ta
   - If the pinned build is missing or incomplete, the launch is refused **before** a ticket is requested (event `ROBLOX_VERSION_PIN_MISSING`, a dashboard warning, the Roblox tab and the account's last error say why), unless `robloxVersionFallback` is on: then the Auto choice is used and the event says so.
   - With `launchMethod` `protocol`, a pin launches by protocol **only while `roblox-player:` starts exactly the pinned build's `RobloxPlayerBeta.exe`** (the engine reads `HKEY_CLASSES_ROOT\roblox-player\shell\open\command`; see [Roblox links](#roblox-links-roblox-player-protocol)). Otherwise it launches directly, because the handler would be Roblox's own launcher, which updates Roblox and starts its own newest build, ignoring the pin; the engine then logs `ROBLOX_VERSION_PROTOCOL_OVERRIDDEN` once per engine run.
 
+**A build that keeps closing at start (dead-build guard).** Clients launched on one build sometimes close before they reach the game. On 10 and 11 Nov this happened with a gutted install, with test-channel `version-93c5b49b03b84a46`, and with an older build Roblox refused; each ran 16 or more failed launches in a row, and three of those exits were followed by blue screens. When it happens 4 times in a row within 5 minutes, on any accounts, the build is marked failing (`ROBLOX_BUILD_FAILING`). The heartbeat's `robloxVersion.problem`, the Roblox tab and the Activity feed then say "Roblox build version-… keeps closing at start — it may be outdated or refused by Roblox".
+
+- **Pinned:** with `robloxVersionFallback` on, launches use the Auto choice without the failing build. Otherwise they are refused before a ticket is requested, like a missing pin.
+- **Auto:** launches skip the failing build and start the newest other installed build, or wait if there is none.
+
+What counts:
+
+- **Counted:** an exit of a client the engine launched directly (or a pinned build launched by protocol), before it was in game.
+- **Not counted:** clients the engine closed itself (a stalled launch) and clients that reached the game.
+- **Not covered:** in Auto mode, protocol launches go through Roblox's own launcher, which picks the build, so the guard cannot steer them.
+
+The mark lifts when a client of that build reaches the game, or when another pinned build (or Auto) is chosen (`ROBLOX_BUILD_GUARD_RESET`). It is kept in memory, so an engine restart starts counting again. It is not a per-account back-off: other builds and accounts relaunch at once.
+
 The heartbeat's `robloxVersion` block (`mode`, `pinned`, `fallback`, `selectedPath`, `selectedVersion`, `method`, `problem`, `managedRoot`, `checkedUtc`; refreshed every 30 s and at each launch, `null` until the first check) tells the page what the saver chose; `NATIVE_LAUNCH_STARTED` names the build (`robloxVersion`, `pinned`).
 
 Pinning a build in Roblox's own folder works, but Roblox's updater deletes its old version folders when it updates (that is how the gutted `version-f0ea…` folder on this PC came about), so the tab offers to install the build into Arkuzo's folder as well.

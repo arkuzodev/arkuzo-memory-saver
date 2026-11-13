@@ -68,6 +68,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $root $py) -Destination (Join-Path $copy $py)
     Copy-Item -LiteralPath (Join-Path $root 'VERSION') -Destination (Join-Path $copy 'VERSION')
     Copy-Item -LiteralPath (Join-Path $root 'contracts') -Destination (Join-Path $copy 'contracts') -Recurse
+    Copy-Item -LiteralPath (Join-Path $root 'src/saver/assets') -Destination (Join-Path $copy 'src/saver/assets') -Recurse
     $copyBundler = Join-Path $copy 'build/bundle.ps1'
     & $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $copyBundler -Check | Out-Null
     Assert ($LASTEXITCODE -eq 0) 'a faithful copy is up to date'
@@ -91,6 +92,18 @@ try {
     Assert ($LASTEXITCODE -eq 1) 'a schema change makes -Check fail'
     & $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $copyBundler | Out-Null
     Assert ((Get-Comparable (Join-Path $copy $py)).Contains("'launchDelaySec': (('int', 5, 99), 7),")) 'the bundler writes the schema into the Control Center'
+    # The window/taskbar icon is generated from the logo: a new logo makes the block stale.
+    $iconBlock = { param($text) $text.Substring($text.IndexOf('# BEGIN GENERATED app-icon:'), $text.IndexOf('# END GENERATED app-icon') - $text.IndexOf('# BEGIN GENERATED app-icon:')) }
+    $iconBefore = & $iconBlock (Get-Comparable (Join-Path $copy $py))
+    Assert ($iconBefore.Contains("APP_ICON = (") -and $iconBefore.Length -gt 20000) 'the app-icon block holds the generated icon'
+    Add-Type -AssemblyName System.Drawing
+    $logoPath = Join-Path $copy 'src/saver/assets/arkuzo-logo-512.png'
+    $logo = New-Object Drawing.Bitmap(256, 256)
+    try { $logo.SetPixel(0, 0, [Drawing.Color]::Red); $logo.Save($logoPath, [Drawing.Imaging.ImageFormat]::Png) } finally { $logo.Dispose() }
+    & $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $copyBundler -Check | Out-Null
+    Assert ($LASTEXITCODE -eq 1) 'a changed logo makes -Check fail'
+    & $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $copyBundler | Out-Null
+    Assert ((& $iconBlock (Get-Comparable (Join-Path $copy $py))) -cne $iconBefore) 'the bundler rewrites the icon from the new logo'
     # The version comes from VERSION: a new version is stamped into the bundle.
     [IO.File]::WriteAllText((Join-Path $copy 'VERSION'), "9.8.7`n")
     & $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $copyBundler | Out-Null

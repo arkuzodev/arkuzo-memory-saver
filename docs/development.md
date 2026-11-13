@@ -20,7 +20,9 @@ src/saver/
   Arkuzo-Memory-Saver.ps1        GENERATED from engine/ (checked in)
   Arkuzo-Control-Center.html     GENERATED from control-center/ (checked in)
   Arkuzo-Control-Center.py       hand-written; its PRESETS/SCHEMA/VAULT_SETTINGS blocks are GENERATED
-                                 from contracts/config-schema.json
+                                 from contracts/config-schema.json, its APP_ICON block from assets/
+  assets/arkuzo-logo-512.png     the Control Center logo; bundle.ps1 renders the window and taskbar
+                                 icon (16-256 px, PNG-in-ICO) from it
   Arkuzo-Volt-Control.ps1, Arkuzo-Volt-Probe.py, 00-arkuzo-signal.luau
 src/launcher/                    the launcher (C#); Directory.Build.props takes the version from VERSION
 build/
@@ -33,7 +35,7 @@ The generated files stay checked in under their old names, so the tests, `Arkuzo
 
 ## Workflow
 
-1. Edit a module in `src/saver/engine/` or `src/saver/control-center/`, or `contracts/config-schema.json`; never the generated files.
+1. Edit a module in `src/saver/engine/` or `src/saver/control-center/`, `contracts/config-schema.json` or `src/saver/assets/arkuzo-logo-512.png`; never the generated files.
 2. `powershell -NoProfile -ExecutionPolicy Bypass -File build/bundle.ps1` rebuilds them.
 3. `build/test.ps1 -Filter <names>` while you work, `build/test.ps1` before you commit. `Bundle.Tests.ps1` fails when a generated file is out of date; `test_config_schema.py`, `WindowLayout.Tests.ps1` / `test_window_layout.py` and `test_version.py` fail when a copy drifts from its contract.
 4. Commit the modules together with the regenerated files. `build/package.ps1` refuses stale generated files.
@@ -54,5 +56,7 @@ It bundles the sources into a fresh copy under `%TEMP%\arkuzo-dev-<id>\runtime`,
 - the engine with `-MonitorOnly -Headless` for `-RunForSec` seconds (600 by default). It watches the clients and logs to the dev data folder, but writes no heartbeat, takes no controller lock and never changes, closes or launches a client. In the dev copy the executor `autoexec` sync is switched off, because those folders are shared with any farm on the same PC.
 
 Press Enter (or wait `-ForSec` seconds) to stop both; the data folder is kept. The page of the dev Control Center shows the saver as stopped, because a monitor-only engine writes no heartbeat. Its **Start** button would run a full, controlling engine from the dev copy: it refuses while another controller holds the lock, but never press it on a PC where clients run without one.
+
+Without `-NoWindow` the dev Control Center opens its desktop window (architecture.md, 5.9): a native title bar with Edge embedded below it. Check window behaviour there by hand: drag, double-click, snap, resizing from the edges, the caption buttons, the right-click menu, the strip's theme colours and the taskbar icon. `tests/saver/test_window_chrome.py` and `test_window_controls.py` cover the hit-test geometry, theme validation, the icon block and the page side, but no real window.
 
 `Arkuzo-Control-Center.cmd` still starts the Control Center from `src\saver` against the real `data` folder and port; it is the way to run the sources as *the* farm controller, not next to one.

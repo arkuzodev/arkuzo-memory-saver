@@ -879,6 +879,40 @@ async function post(path, body) {
   return data;
 }
 
+// ---------- desktop window ----------
+// A window this Control Center opened is a native host with a real Windows title bar
+// above this page: Windows itself moves, snaps, maximizes and resizes it. The page only
+// helps the host find it (a key in the title until attached) and keeps the host's title
+// bar in the page's theme colours. An ordinary browser tab has no key and is left alone.
+let desktopKey = null, desktopAttached = false;
+function desktopTheme() {
+  const css = getComputedStyle(document.documentElement), v = (name) => css.getPropertyValue('--' + name).trim().toLowerCase();
+  return { bar: v('side-top'), barEnd: v('bg-top'), line: v('side-bottom'), text: v('text'), muted: v('muted'),
+    hover: v('surface-hover'), pressed: v('surface-2'), closeHover: '#c42b1c' };
+}
+function sendDesktopTheme() {
+  if (desktopAttached) post('/api/desktop-window', { key: desktopKey, action: 'theme', colors: desktopTheme() }).catch(() => {});
+}
+async function initDesktopWindow() {
+  const key = params.get('desktop');
+  if (!key || !/^[a-f0-9]{32}$/.test(key)) return;
+  desktopKey = key;
+  const title = document.title;
+  document.title = 'Arkuzo Memory Saver · ' + key;
+  let stopped = false;
+  window.addEventListener('pagehide', () => { stopped = true; });
+  const deadline = Date.now() + 60000;
+  while (!stopped && !desktopAttached && Date.now() < deadline) {
+    try {
+      const response = await fetch('/api/desktop-window?key=' + encodeURIComponent(key), { cache: 'no-store', headers: { 'X-Arkuzo-Token': TOKEN } });
+      if (response.ok && (await response.json()).attached) desktopAttached = true;
+    } catch (_) { /* Not attached (yet): the page stays an ordinary app window. */ }
+    if (!desktopAttached) await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  document.title = title;
+  sendDesktopTheme();
+}
+
 // ---------- themes & accents (UiTheme.ALL, ArkuzoGuiConfig accents) ----------
 const THEMES = {
   graphite: ['Graphite', 0, '16181f 0e1015 101218 0a0b0f 1a1d26 232733 2a2f3d 0b0d12 2c313e 1e222c 2a2f3b eef1f6 b8bfcc 7e879a 555d6f', 0xAA, 0x0A, 0x16],
@@ -904,6 +938,7 @@ function applyTheme(id) {
   document.body.classList.toggle('light', !!light);
   document.querySelectorAll('.th').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.id === id)));
   if (typeof redrawCharts === 'function' && S) redrawCharts();
+  sendDesktopTheme();
 }
 function applyAccent(name) {
   if (!ACCENTS[name]) name = 'Cyan';
@@ -2186,6 +2221,7 @@ $('btnQuitAll').onclick = () => armed($('btnQuitAll'), 'Click again to stop the 
   async () => { await post('/api/quit', { stopSaver: true }).catch(() => {}); goodbye('Saver stopped and Control Center closed. You can close this window.'); });
 
 showPage(PAGES[params.get('page')] ? params.get('page') : PAGES[store.get('arkuzo-page')] ? store.get('arkuzo-page') : 'overview');
+initDesktopWindow();
 poll();
 </script>
 </body>

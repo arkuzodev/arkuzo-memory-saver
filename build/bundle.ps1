@@ -4,7 +4,8 @@ Builds the shipped single-file sources from their modules:
 
   src/saver/engine/*.ps1  ->  src/saver/Arkuzo-Memory-Saver.ps1
   src/saver/control-center/*  ->  src/saver/Arkuzo-Control-Center.html (markup, styles.css, app.js)
-  contracts/config-schema.json  ->  the GENERATED blocks in src/saver/Arkuzo-Control-Center.py
+  contracts/config-schema.json  ->  the GENERATED schema blocks in src/saver/Arkuzo-Control-Center.py
+  src/saver/assets/arkuzo-logo-512.png -> the GENERATED app-icon block there (multi-size .ico, base64)
 
 The outputs are checked in as generated files, so tests, Arkuzo-Control-Center.cmd,
 packaging and the launcher keep using the same paths and file names. Edit the
@@ -175,8 +176,66 @@ function Get-ConfigSchemaBlocks {
     $vault += '}'
     return @{ 'config-schema' = $config; 'vault-settings' = $vault }
 }
+function Get-AppIconBlock {
+    # The Control Center's own logo (src/saver/assets/arkuzo-logo-512.png) as a multi-size,
+    # PNG-in-ICO icon for its desktop window and taskbar button. Embedded as base64 so the
+    # Control Center ZIP keeps exactly two files. Downscaled with System.Drawing's
+    # high-quality bicubic filter; the same input gives the same bytes.
+    Add-Type -AssemblyName System.Drawing
+    $sourcePath = Join-Path $root 'src/saver/assets/arkuzo-logo-512.png'
+    $sizes = @(16, 20, 24, 32, 40, 48, 64, 96, 128, 256)
+    $images = New-Object 'System.Collections.Generic.List[byte[]]'
+    $master = [Drawing.Image]::FromFile($sourcePath)
+    try {
+        if ($master.Width -ne $master.Height -or $master.Width -lt 256) { throw 'src/saver/assets/arkuzo-logo-512.png must be square and at least 256 px.' }
+        foreach ($size in $sizes) {
+            $bitmap = New-Object Drawing.Bitmap($size, $size, [Drawing.Imaging.PixelFormat]::Format32bppArgb)
+            $bitmap.SetResolution(96, 96)  # fixed pHYs: the bytes never depend on the DPI of the building process
+            $graphics = [Drawing.Graphics]::FromImage($bitmap)
+            $attributes = New-Object Drawing.Imaging.ImageAttributes
+            $stream = New-Object IO.MemoryStream
+            try {
+                $graphics.CompositingMode = [Drawing.Drawing2D.CompositingMode]::SourceCopy
+                $graphics.CompositingQuality = [Drawing.Drawing2D.CompositingQuality]::HighQuality
+                $graphics.InterpolationMode = [Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+                $graphics.PixelOffsetMode = [Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+                $graphics.SmoothingMode = [Drawing.Drawing2D.SmoothingMode]::HighQuality
+                $attributes.SetWrapMode([Drawing.Drawing2D.WrapMode]::TileFlipXY)  # no dark fringe at the edges
+                $graphics.DrawImage($master, (New-Object Drawing.Rectangle(0, 0, $size, $size)), 0, 0, $master.Width, $master.Height, [Drawing.GraphicsUnit]::Pixel, $attributes)
+                $bitmap.Save($stream, [Drawing.Imaging.ImageFormat]::Png)
+                $images.Add($stream.ToArray())
+            } finally { $stream.Dispose(); $attributes.Dispose(); $graphics.Dispose(); $bitmap.Dispose() }
+        }
+    } finally { $master.Dispose() }
+    $stream = New-Object IO.MemoryStream
+    try {
+        $writer = New-Object IO.BinaryWriter($stream)
+        $writer.Write([uint16]0); $writer.Write([uint16]1); $writer.Write([uint16]$sizes.Count)
+        $offset = 6 + 16 * $sizes.Count
+        for ($i = 0; $i -lt $sizes.Count; $i++) {
+            $side = if ($sizes[$i] -ge 256) { 0 } else { $sizes[$i] }  # 0 means 256 in an icon directory
+            $writer.Write([byte]$side); $writer.Write([byte]$side); $writer.Write([byte]0); $writer.Write([byte]0)
+            $writer.Write([uint16]1); $writer.Write([uint16]32)
+            $writer.Write([uint32]$images[$i].Length); $writer.Write([uint32]$offset)
+            $offset += $images[$i].Length
+        }
+        foreach ($image in $images) { $writer.Write($image) }
+        $writer.Flush()
+        $text = [Convert]::ToBase64String($stream.ToArray())
+    } finally { $stream.Dispose() }
+    $lines = @('APP_ICON = (')
+    for ($i = 0; $i -lt $text.Length; $i += 1000) {
+        $take = $text.Length - $i
+        if ($take -gt 1000) { $take = 1000 }
+        $lines += ("    '" + $text.Substring($i, $take) + "'")
+    }
+    $lines += ')'
+    return $lines
+}
+$controlCenterBlocks = Get-ConfigSchemaBlocks
+$controlCenterBlocks['app-icon'] = Get-AppIconBlock
 $blockFiles = @(
-    [pscustomobject]@{ File = 'src/saver/Arkuzo-Control-Center.py'; Blocks = (Get-ConfigSchemaBlocks) }
+    [pscustomobject]@{ File = 'src/saver/Arkuzo-Control-Center.py'; Blocks = $controlCenterBlocks }
 )
 function Get-FileWithBlocks([string]$Text, [hashtable]$Blocks, [string]$File) {
     $eol = if ($Text.Contains("`r`n")) { "`r`n" } else { "`n" }

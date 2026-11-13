@@ -2,6 +2,12 @@
 
 Changes for **Arkuzo Memory Saver with Volt Integration** are recorded here.
 
+## Unreleased
+
+- Give the desktop Control Center a native, theme-matched title bar. Windows itself now handles dragging, double-click maximize, Aero Snap (including drag to the top, and Win+arrow keys after a click on the title bar), resizing from the window edges and the window menu (right-click on the title bar). Opening the window, the taskbar and Alt+Tab give the keyboard to the page. A maximized window fits the work area above the taskbar. The title bar follows the page's theme and shows Windows-style minimize, maximize/restore and close buttons; close turns red on hover.
+- Show the Arkuzo logo instead of the Python icon in the title bar, on the taskbar and in Alt+Tab. The Control Center now groups on the taskbar under its own ID, separate from other Python programs. The embedded browser window never gets a taskbar button of its own.
+- Ordinary browser tabs keep their normal browser frame.
+
 ## v2.4.1 — Crash-safe accounts and launch reliability
 
 - Recognize Roblox's tab-only saved-login format before ticket launches. The previous cleanup missed this format and the client could fail authentication with HTTP 403. Preserve the saved-login file as a backup.

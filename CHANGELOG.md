@@ -4,9 +4,15 @@ Changes for **Arkuzo Memory Saver with Volt Integration** are recorded here.
 
 ## Unreleased
 
-- Give the desktop Control Center a native, theme-matched title bar. Windows itself now handles dragging, double-click maximize, Aero Snap (including drag to the top, and Win+arrow keys after a click on the title bar), resizing from the window edges and the window menu (right-click on the title bar). Opening the window, the taskbar and Alt+Tab give the keyboard to the page. A maximized window fits the work area above the taskbar. The title bar follows the page's theme and shows Windows-style minimize, maximize/restore and close buttons; close turns red on hover.
+- Give the desktop Control Center a native, theme-matched title bar. Windows itself now handles dragging, double-click maximize, Aero Snap (including drag to the top, and Win+arrow keys after a click on the title bar), resizing from the window edges and the window menu (right-click on the title bar). Opening the window, the taskbar and Alt+Tab give the keyboard to the page. A maximized window fits the work area above the taskbar. The title bar is drawn in the Arkuzo style: the Arkuzo mark, "Arkuzo / Control Center", and rounded minimize, maximize/restore and close buttons that match the page's buttons. It follows the page's theme, and close tints red on hover.
 - Show the Arkuzo logo instead of the Python icon in the title bar, on the taskbar and in Alt+Tab. The Control Center now groups on the taskbar under its own ID, separate from other Python programs. The embedded browser window never gets a taskbar button of its own.
 - Ordinary browser tabs keep their normal browser frame.
+- The Control Center window no longer opens as a plain browser window without its Arkuzo frame. Three causes are fixed:
+  - Edge was still running on the window's browser profile (a plain window left over from an earlier start). The new Edge handed the page to that old Edge and exited. The window now uses a profile no other Edge holds.
+  - Edge had not yet created the page window the frame measures. The frame now falls back to Windows' standard frame sizes.
+  - Edge started slowly. The window now waits up to 55 s for it.
+  If the window still opens without its frame, the Activity feed and `control-center.log` say why.
+- **Removed the executor kick-signal script.** The saver no longer writes `00-arkuzo-signal.luau` into executor `autoexec` folders, and no script of its own runs inside the clients. Kicks and disconnects are detected from the Roblox client logs, as before. On start, the saver deletes the script and its `arkuzo_signals` files from the executor folders where earlier versions put them, and logs `AUTOEXEC_SIGNAL_SCRIPT_REMOVED`. A disconnect from the client log still skips the recovery cooldown and hourly budget.
 
 ## v2.4.1 — Crash-safe accounts and launch reliability
 

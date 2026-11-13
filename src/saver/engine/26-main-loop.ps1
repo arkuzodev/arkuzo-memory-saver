@@ -12,19 +12,19 @@
         Initialize-ArkuzoRecoveryJournal
         Resolve-ArkuzoAccountProvider
         Update-VoltRecoveryCapability -SyncControl
-        Sync-ArkuzoAutoexecSignals
+        [Arkuzo.LoopWatchdogV1]::Mark('legacy autoexec cleanup')
+        Remove-ArkuzoLegacyAutoexecSignal | Out-Null
     }
     while ($true) {
         $script:loopPass = [long]$script:loopPass + 1
-        Step-ArkuzoLoopPhase 'signals'
-        [Arkuzo.LoopWatchdogV1]::Mark('loop: executor signals')
+        Step-ArkuzoLoopPhase 'health'
+        [Arkuzo.LoopWatchdogV1]::Mark('loop: health observation')
         $recoveredStall = [Arkuzo.LoopWatchdogV1]::TakeRecovered()
         if ($recoveredStall) {
             $stallParts = $recoveredStall.Split('|')
             Write-Diagnostic 'SAVER_STALL_RECOVERED' @{ phase = $stallParts[0]; stalledSec = [double]$stallParts[1] }
             Warn-Throttled 'saver-stall' ("Saver was blocked for $($stallParts[1])s during '$($stallParts[0])'.")
         }
-        Process-ArkuzoExecutorSignals
         $swPhase = [Diagnostics.Stopwatch]::StartNew()
         Invoke-ArkuzoHealthObservation
         $swPhase.Stop()
@@ -41,7 +41,6 @@
             Update-ArkuzoLivePolicy
             if (-not $MonitorOnly) { Resolve-ArkuzoAccountProvider }
             if ($null -ne $pendingLiveSettings) { Update-ArkuzoLiveSettings $pendingLiveSettings; $pendingLiveSettings = $null }
-            Sync-ArkuzoAutoexecSignals
             $swPhase.Stop()
             if ($swPhase.Elapsed.TotalSeconds -gt 5) {
                 Write-Diagnostic 'DASHBOARD_STALL' @{ phase='PolicyCheck'; durationSec=[math]::Round($swPhase.Elapsed.TotalSeconds,2) }

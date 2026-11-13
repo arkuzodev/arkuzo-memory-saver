@@ -888,7 +888,7 @@ let desktopKey = null, desktopAttached = false;
 function desktopTheme() {
   const css = getComputedStyle(document.documentElement), v = (name) => css.getPropertyValue('--' + name).trim().toLowerCase();
   return { bar: v('side-top'), barEnd: v('bg-top'), line: v('side-bottom'), text: v('text'), muted: v('muted'),
-    hover: v('surface-hover'), pressed: v('surface-2'), closeHover: '#c42b1c' };
+    hover: v('surface-hover'), pressed: v('surface-2'), closeHover: v('danger') };
 }
 function sendDesktopTheme() {
   if (desktopAttached) post('/api/desktop-window', { key: desktopKey, action: 'theme', colors: desktopTheme() }).catch(() => {});

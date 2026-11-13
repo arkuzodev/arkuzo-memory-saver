@@ -94,16 +94,12 @@ $hangB.LastRecoveryRefusalUtc = $null
 Invoke-ArkuzoRecoveryCandidates
 Assert ($hangB.Watcher.Kills -eq 1 -and $script:recoveryAttempts.Count -eq 1) 'with budget it is closed despite the failing account (no handoff deadlock) and charged'
 
-# --- A bare "ClientReplicator removed" executor signal can be an ordinary teleport: it keeps the gates.
+# --- A kick reason from the Roblox log skips an exhausted cooldown and hourly budget.
 Reset-Fixture
 $teleB = New-FakeClient 201 '100000000002' 'IN_GAME_DISCONNECT' $true
-$teleB.DisconnectSource = 'NetworkClient.ChildRemoved'
+$teleB.DisconnectSource = 'log'
 $script:tracked = @{ 201 = $teleB }
 Set-Status @(@($A, '100000000001', $null), @($B, '100000000002', 201))
-Invoke-ArkuzoRecoveryCandidates
-Assert ($teleB.Watcher.Kills -eq 0 -and $script:warned -contains 'recovery-budget') 'a ClientReplicator-only signal stays behind the cooldown and hourly budget'
-$teleB.DisconnectSource = 'log'
-$teleB.LastRecoveryRefusalUtc = $null
 Invoke-ArkuzoRecoveryCandidates
 Assert ($teleB.Watcher.Kills -eq 1 -and $script:recoveryAttempts.Count -eq 20) 'a kick reason from the Roblox log is closed at once, uncharged'
 

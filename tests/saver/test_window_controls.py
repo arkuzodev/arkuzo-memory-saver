@@ -33,7 +33,7 @@ const document = {title: 'Arkuzo Memory Saver', documentElement: {}};
 const window = {addEventListener: (k, f) => {listeners[k] = f;}};
 const setTimeout = f => {timers.push(f);};
 const vars = {'side-top': ' #101218', 'bg-top': '#16181F ', 'side-bottom': '#0a0b0f', text: '#eef1f6', muted: '#7e879a',
-  'surface-hover': '#2a2f3d', 'surface-2': '#232733'};
+  'surface-hover': '#2a2f3d', 'surface-2': '#232733', danger: '#f87171'};
 const getComputedStyle = () => ({getPropertyValue: name => vars[name.slice(2)] || ''});
 let nativeState = {attached: true, maximized: false};
 const fetch = async (url, options) => {assert.equal(options.headers['X-Arkuzo-Token'], TOKEN); calls.push({get: url}); return {ok: true, json: async () => nativeState};};
@@ -70,7 +70,7 @@ assert.equal(posts.length, 1);
 assert.equal(posts[0].post, '/api/desktop-window');
 assert.deepEqual(posts[0].body, {key: 'a'.repeat(32), action: 'theme', colors: {
   bar: '#101218', barEnd: '#16181f', line: '#0a0b0f', text: '#eef1f6', muted: '#7e879a',
-  hover: '#2a2f3d', pressed: '#232733', closeHover: '#c42b1c'}});
+  hover: '#2a2f3d', pressed: '#232733', closeHover: '#f87171'}});
 for (const value of Object.values(posts[0].body.colors)) assert.match(value, /^#[0-9a-f]{6}$/);
 vars['side-top'] = '#edf0f5';
 sendDesktopTheme(); await settle();

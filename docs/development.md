@@ -12,7 +12,7 @@ contracts/
   window-layout.json             golden vectors for the window layout planner (engine and page)
 src/saver/
   engine/00-header.ps1 ...       the engine, in 27 modules by concern (config, process, logs,
-    26-main-loop.ps1             executor signal, policy and journal, native accounts, windows,
+    26-main-loop.ps1             legacy autoexec cleanup, policy and journal, native accounts, windows,
                                  Volt control, farm freeze, remote session, outcomes, status,
                                  closure, pagefile, version check, startup, native types,
                                  console and graphics, state, logging, privileges, UI, main loop)
@@ -23,7 +23,7 @@ src/saver/
                                  from contracts/config-schema.json, its APP_ICON block from assets/
   assets/arkuzo-logo-512.png     the Control Center logo; bundle.ps1 renders the window and taskbar
                                  icon (16-256 px, PNG-in-ICO) from it
-  Arkuzo-Volt-Control.ps1, Arkuzo-Volt-Probe.py, 00-arkuzo-signal.luau
+  Arkuzo-Volt-Control.ps1, Arkuzo-Volt-Probe.py
 src/launcher/                    the launcher (C#); Directory.Build.props takes the version from VERSION
 build/
   bundle.ps1                     builds the generated files; -Check fails when one is out of date

@@ -178,7 +178,7 @@ RESTART_KEYS = {'apply_graphics_flags', 'hard_limit'}
 EVENT_KINDS = {
     'SESSION_START': 'saver', 'SESSION_STOP': 'saver', 'SAVER_FATAL_ERROR': 'error',
     'CLIENT_START': 'client', 'CLIENT_EXIT': 'client', 'CLIENT_STATE_CHANGED': 'client',
-    'CLIENT_LOG_DISCONNECT_DETECTED': 'recovery', 'EXECUTOR_KICK_SIGNAL_TRIGGERED': 'recovery',
+    'CLIENT_LOG_DISCONNECT_DETECTED': 'recovery',
     'RECOVERY_REQUESTED': 'recovery', 'CLIENT_CLOSED_FOR_RECOVERY': 'recovery', 'EXITED_CLIENT_RECOVERY_QUEUED': 'recovery', 'ACCOUNT_RESTORED_VERIFIED': 'recovery',
     'FARM_FREEZE_DETECTED': 'recovery', 'FARM_FREEZE_EPISODE_END': 'recovery',
     'VOLT_MISSING_LAUNCH_REQUEST': 'recovery', 'VOLT_MISSING_LAUNCH_RESULT': 'recovery', 'MISSING_ACCOUNT_DETECTED': 'recovery',
@@ -1775,8 +1775,6 @@ def summarize_event(record: dict, names: dict) -> dict | None:
         text = f"{sample.get('account') or 'PID ' + str(sample.get('pid'))}: {state.lower()}"
     elif kind == 'CLIENT_LOG_DISCONNECT_DETECTED':
         level, text = 'warning', f"PID {data.get('pid')} disconnected: {data.get('reason', '')}"
-    elif kind == 'EXECUTOR_KICK_SIGNAL_TRIGGERED':
-        level, text = 'warning', f"{who()} kicked: {data.get('reason', '')}"
     elif kind == 'RECOVERY_REQUESTED':
         level, text = 'warning', f"Recovering {who()} ({str(data.get('reason', '')).replace('_', ' ').lower()})"
     elif kind == 'CLIENT_CLOSED_FOR_RECOVERY':
@@ -3431,7 +3429,9 @@ class App:
         self.data = data
         self.port = port
         self.token = secrets.token_urlsafe(24)
-        self.desktop = DesktopWindows(data / 'desktop-browser', relaunch=desktop_relaunch_command(data, port))
+        self.desktop = DesktopWindows(data / 'desktop-browser', relaunch=desktop_relaunch_command(data, port),
+                                      note=lambda text: self.feed.add({'t': time.time(), 'kind': 'SUPERVISOR', 'category': 'error',
+                                                                       'level': 'warning', 'text': text}))
         self.prefs_path = data / 'control-center.json'
         self.prefs = {'autopilot': True, 'startSaverOnLaunch': True}
         self.prefs.update(read_json(self.prefs_path) or {})
@@ -4102,9 +4102,11 @@ DESKTOP_APP_ID = 'Arkuzo.MemorySaver.ControlCenter'
 DESKTOP_TITLE = 'Arkuzo Memory Saver'
 DESKTOP_THEME_KEYS = ('bar', 'barEnd', 'line', 'text', 'muted', 'hover', 'pressed', 'closeHover')
 DESKTOP_THEME_DEFAULT = {'bar': '#101218', 'barEnd': '#16181f', 'line': '#0a0b0f', 'text': '#eef1f6',
-                         'muted': '#7e879a', 'hover': '#2a2f3d', 'pressed': '#232733', 'closeHover': '#c42b1c'}
+                         'muted': '#7e879a', 'hover': '#2a2f3d', 'pressed': '#232733', 'closeHover': '#f87171'}
 _HEX_COLOR = re.compile(r'\A#[0-9a-fA-F]{6}\Z')
-CAPTION_HEIGHT, CAPTION_BUTTON, CAPTION_EDGE = 32, 46, 5  # pixels at 96 DPI
+# The Arkuzo title bar: 36 px high, 36 x 26 rounded buttons 4 px apart, 6 px from the right edge.
+CAPTION_HEIGHT, CAPTION_BUTTON, CAPTION_EDGE = 36, 40, 5  # pixels at 96 DPI
+CAPTION_PAD, CAPTION_PILL_W, CAPTION_PILL_H = 6, 36, 26
 HTCLIENT, HTCAPTION, HTMINBUTTON, HTMAXBUTTON = 1, 2, 8, 9
 HTTOP, HTTOPLEFT, HTTOPRIGHT, HTCLOSE = 12, 13, 14, 20
 CAPTION_BUTTONS = (HTCLOSE, HTMAXBUTTON, HTMINBUTTON)  # right to left
@@ -4132,6 +4134,12 @@ def shade(value: str, factor: float) -> str:
     return '#' + ''.join('%02x' % max(0, min(255, round(((n >> s) & 255) * factor))) for s in (16, 8, 0))
 
 
+def mix(base: str, over: str, amount: float) -> str:
+    """'#rrggbb' of `over` laid on `base` at `amount` (0..1) opacity."""
+    a, b = int(base[1:], 16), int(over[1:], 16)
+    return '#' + ''.join('%02x' % round(((a >> s) & 255) * (1 - amount) + ((b >> s) & 255) * amount) for s in (16, 8, 0))
+
+
 def caption_metrics(dpi: int) -> tuple:
     """(strip height, caption button width, top resize band) in pixels at this DPI."""
     return tuple(max(1, (n * dpi + 48) // 96) for n in (CAPTION_HEIGHT, CAPTION_BUTTON, CAPTION_EDGE))
@@ -4145,7 +4153,10 @@ def caption_hit_test(x: int, y: int, width: int, dpi: int, maximized: bool) -> i
         return HTCLIENT
     if not maximized and y < edge:
         return HTTOPLEFT if x < 2 * edge else HTTOPRIGHT if x >= width - 2 * edge else HTTOP
-    slot = (width - 1 - x) // button
+    pad = max(0, (CAPTION_PAD * dpi + 48) // 96)
+    if x >= width - pad:
+        return HTCAPTION
+    slot = (width - pad - 1 - x) // button
     return CAPTION_BUTTONS[slot] if slot < len(CAPTION_BUTTONS) else HTCAPTION
 
 
@@ -4180,11 +4191,12 @@ class DesktopWindows:
     hand it the page's theme colours; it never names an HWND and never moves a window."""
     ACTIONS = ('theme',)
 
-    def __init__(self, profiles=None, relaunch=None):
+    def __init__(self, profiles=None, relaunch=None, note=None):
         self.windows = {}
         self.lock = threading.RLock()
         self.profiles = profiles
         self.relaunch = relaunch  # Command line the taskbar uses for a pinned Control Center.
+        self.note = note  # Called with a short text when a window falls back to a plain browser window.
         self.slots = set()
         self.theme = dict(DESKTOP_THEME_DEFAULT)  # The last colours a page sent; new windows start in them.
 
@@ -4227,11 +4239,34 @@ class DesktopWindows:
         host = _DesktopHost(self, key)
         with self.lock:
             slot = 0
-            while slot in self.slots:
+            # A profile still held by another Edge (a plain window left over from an earlier
+            # Control Center, or Edge kept alive in the background) would take over the launch:
+            # the new Edge hands the page to it and exits, and the host has nothing to attach.
+            while slot in self.slots or (self.profiles and edge_profile_in_use(Path(self.profiles) / str(slot))):
                 slot += 1
             self.slots.add(slot)
         host.slot = slot
         threading.Thread(target=host.run, args=(url, browser), daemon=True, name='desktop-window').start()
+
+
+def edge_profile_in_use(profile: Path) -> bool:
+    """True while a running Edge holds this --user-data-dir (Chromium keeps its 'lockfile' open, unshared)."""
+    lock = Path(profile) / 'lockfile'
+    if os.name != 'nt' or not lock.exists():
+        return False
+    try:
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        create = kernel.CreateFileW
+        create.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        create.restype = wintypes.HANDLE
+        kernel.CloseHandle.argtypes, kernel.CloseHandle.restype = [wintypes.HANDLE], wintypes.BOOL
+        handle = create(str(lock), 0x80000000, 0, None, 3, 0x80, None)  # GENERIC_READ, no sharing, OPEN_EXISTING
+    except (OSError, AttributeError):
+        return False
+    if handle is None or handle == ctypes.c_void_p(-1).value:
+        return ctypes.get_last_error() == 32  # ERROR_SHARING_VIOLATION: Edge has it open
+    kernel.CloseHandle(handle)
+    return False
 
 
 _WIN32 = {}
@@ -4364,6 +4399,13 @@ def _desktop_win32():
         'SetTextColor': ([wintypes.HDC, wintypes.DWORD], wintypes.DWORD),
         'CreateFontW': ([ctypes.c_int] * 5 + [wintypes.DWORD] * 8 + [wintypes.LPCWSTR], wintypes.HFONT),
         'GetTextFaceW': ([wintypes.HDC, ctypes.c_int, wintypes.LPWSTR], ctypes.c_int),
+        'CreatePen': ([ctypes.c_int, ctypes.c_int, wintypes.DWORD], wintypes.HPEN),
+        'GetStockObject': ([ctypes.c_int], wintypes.HGDIOBJ),
+        'MoveToEx': ([wintypes.HDC, ctypes.c_int, ctypes.c_int, P], wintypes.BOOL),
+        'LineTo': ([wintypes.HDC, ctypes.c_int, ctypes.c_int], wintypes.BOOL),
+        'Rectangle': ([wintypes.HDC] + [ctypes.c_int] * 4, wintypes.BOOL),
+        'RoundRect': ([wintypes.HDC] + [ctypes.c_int] * 6, wintypes.BOOL),
+        'GetTextExtentPoint32W': ([wintypes.HDC, wintypes.LPCWSTR, ctypes.c_int, ctypes.POINTER(wintypes.SIZE)], wintypes.BOOL),
     })
     msimg = bind(ctypes.WinDLL('msimg32'), {
         'GradientFill': ([wintypes.HDC, ctypes.POINTER(TRIVERTEX), wintypes.ULONG, P, wintypes.ULONG, wintypes.ULONG], wintypes.BOOL),
@@ -4457,8 +4499,9 @@ class _DesktopHost:
             if not previous_dpi:
                 raise ctypes.WinError(ctypes.get_last_error())
             self._run(url, browser, profile)
-        except (OSError, ValueError, AttributeError):
+        except (OSError, ValueError, AttributeError) as exc:
             # Fail open: until attachment succeeds the page is an ordinary app window.
+            self._fallback(f'{type(exc).__name__}: {exc}')
             if self.proc is None:
                 webbrowser.open(url)
         finally:
@@ -4482,6 +4525,15 @@ class _DesktopHost:
             with self.manager.lock:
                 self.manager.slots.discard(self.slot)
 
+    def _fallback(self, reason):
+        """Records why the window stayed a plain browser window (no Arkuzo frame)."""
+        note = self.manager.note
+        if note:
+            try:
+                note('Control Center window opened without its Arkuzo frame (' + str(reason)[:200] + ')')
+            except Exception:
+                pass  # Diagnostics never stop the window.
+
     def _run(self, url, browser, profile):
         api = _desktop_win32()
         u, g = self.u, self.g = api.u, api.g
@@ -4502,22 +4554,11 @@ class _DesktopHost:
             if dpi not in resources:
                 small = u.GetSystemMetricsForDpi(49, dpi) or scaled(16, dpi)  # SM_CXSMICON
                 big = u.GetSystemMetricsForDpi(11, dpi) or scaled(32, dpi)  # SM_CXICON
-                title = g.CreateFontW(-scaled(12, dpi), 0, 0, 0, 600, 0, 0, 0, 1, 0, 0, 5, 0, 'Segoe UI')
-                glyphs = None
-                probe = g.CreateCompatibleDC(None)
-                for face in ('Segoe Fluent Icons', 'Segoe MDL2 Assets'):
-                    font = g.CreateFontW(-scaled(10, dpi), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, face)
-                    old = g.SelectObject(probe, font)
-                    name = ctypes.create_unicode_buffer(64)
-                    g.GetTextFaceW(probe, 64, name)
-                    g.SelectObject(probe, old)
-                    if name.value.lower() == face.lower():
-                        glyphs = font
-                        break
-                    g.DeleteObject(font)
-                g.DeleteDC(probe)
+                # The page's caption type: 11 px, semibold name, regular sub-title.
+                title = g.CreateFontW(-scaled(11, dpi), 0, 0, 0, 600, 0, 0, 0, 1, 0, 0, 5, 0, 'Segoe UI')
+                sub = g.CreateFontW(-scaled(11, dpi), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, 'Segoe UI')
                 resources[dpi] = {'small': make_icon(small), 'big': make_icon(big), 'small_size': small,
-                                  'title': title, 'glyphs': glyphs}
+                                  'title': title, 'sub': sub}
             return resources[dpi]
 
         def window_dpi():
@@ -4533,6 +4574,17 @@ class _DesktopHost:
             n = int(self.theme['bar'][1:], 16)
             dark = ctypes.c_int(int((n >> 16) * 0.299 + ((n >> 8) & 255) * 0.587 + (n & 255) * 0.114 < 128))
             api.dwm.DwmSetWindowAttribute(self.hwnd, 20, ctypes.byref(dark), ctypes.sizeof(dark))  # DWMWA_USE_IMMERSIVE_DARK_MODE
+
+        def frame_inset():
+            """Edge's page inset from the standard frame metrics at its DPI: the same values the
+            renderer measures (8, 31, 8, 8 at 96 DPI). Edge does not always create the renderer
+            window that measure() reads (it can be missing until the window is activated)."""
+            dpi = (u.GetDpiForWindow(self.child) if self.child else 0) or 96
+            frame = u.GetSystemMetricsForDpi(33, dpi) + u.GetSystemMetricsForDpi(92, dpi)  # SM_CYFRAME + SM_CXPADDEDBORDER
+            side = u.GetSystemMetricsForDpi(32, dpi) + u.GetSystemMetricsForDpi(92, dpi)  # SM_CXFRAME + SM_CXPADDEDBORDER
+            caption = u.GetSystemMetricsForDpi(4, dpi)  # SM_CYCAPTION
+            inset = (side, caption + frame, side, frame)
+            return inset if min(inset) >= 0 and inset[1] <= 160 else None
 
         def measure():
             """Edge's renderer inset inside its own window: (left, top, right, bottom), or None."""
@@ -4640,6 +4692,57 @@ class _DesktopHost:
             if old:
                 g.SelectObject(dc, old)
 
+        def text_width(dc, text, font):
+            old = g.SelectObject(dc, font) if font else None
+            size = wintypes.SIZE()
+            g.GetTextExtentPoint32W(dc, text, len(text), ctypes.byref(size))
+            if old:
+                g.SelectObject(dc, old)
+            return size.cx
+
+        def pill(dc, left, top, right, bottom, radius, color, edge):
+            """A rounded button face; `edge` is a lighter 1 px top sheen (None when pressed)."""
+            brush = g.CreateSolidBrush(colorref(color))
+            pen = g.CreatePen(0, 1, colorref(color))
+            old_brush, old_pen = g.SelectObject(dc, brush), g.SelectObject(dc, pen)
+            g.RoundRect(dc, left, top, right, bottom, 2 * radius, 2 * radius)
+            g.SelectObject(dc, old_brush)
+            g.SelectObject(dc, old_pen)
+            g.DeleteObject(brush)
+            g.DeleteObject(pen)
+            if edge:
+                fill(dc, left + radius, top, right - radius, top + 1, edge)
+
+        def glyph(dc, code, maximized, cx, cy, size, color, dpi):
+            """The page's line icons (minimize, maximize/restore, x) on a 24-unit grid."""
+            width = max(1, round(1.5 * dpi / 96))
+            pen = g.CreatePen(0, width, colorref(color))
+            old_pen, old_brush = g.SelectObject(dc, pen), g.SelectObject(dc, g.GetStockObject(5))  # NULL_BRUSH
+
+            def at(x, y):
+                return cx + round((x - 12) * size / 24), cy + round((y - 12) * size / 24)
+
+            def line(x1, y1, x2, y2):
+                g.MoveToEx(dc, *at(x1, y1), None)
+                g.LineTo(dc, *at(x2, y2))
+
+            if code == HTMINBUTTON:
+                line(5, 12, 19, 12)
+            elif code == HTMAXBUTTON and maximized:
+                g.Rectangle(dc, *at(4, 8), *at(16, 20))
+                line(8, 8, 8, 4)
+                line(8, 4, 20, 4)
+                line(20, 4, 20, 16)
+                line(20, 16, 16, 16)
+            elif code == HTMAXBUTTON:
+                g.Rectangle(dc, *at(5, 5), *at(19, 19))
+            else:
+                line(6, 6, 18, 18)
+                line(18, 6, 6, 18)
+            g.SelectObject(dc, old_pen)
+            g.SelectObject(dc, old_brush)
+            g.DeleteObject(pen)
+
         def paint(hwnd):
             ps = api.PAINTSTRUCT()
             dc = u.BeginPaint(hwnd, ctypes.byref(ps))
@@ -4659,30 +4762,43 @@ class _DesktopHost:
                 previous = g.SelectObject(memory, bitmap)
                 try:
                     # Drawn off screen, then copied once: no flicker while resizing.
+                    # The Arkuzo title bar: the page's sidebar-to-page gradient, a dark rule, the
+                    # logo and "Arkuzo / Control Center", and rounded pill buttons on the right.
                     gradient(memory, width, height - 1, theme['bar'], theme['barEnd'])
+                    fill(memory, 0, 0, width, 1, mix(theme['bar'], theme['text'], 0.06))  # top sheen
                     fill(memory, 0, height - 1, width, height, theme['line'])
                     maximized = u.IsZoomed(hwnd)
-                    glyphs = {HTMINBUTTON: '', HTMAXBUTTON: '' if maximized else '', HTCLOSE: ''}
+                    edge_pad = scaled(CAPTION_PAD, dpi)
+                    pill_w, pill_h = scaled(CAPTION_PILL_W, dpi), scaled(CAPTION_PILL_H, dpi)
                     for slot, code in enumerate(CAPTION_BUTTONS):
-                        left = width - (slot + 1) * button
+                        slot_left = width - edge_pad - (slot + 1) * button
+                        left = slot_left + (button - pill_w) // 2
+                        top = (height - 1 - pill_h) // 2
                         lit = self.hover == code
                         down = lit and self.pressed == code
-                        background = None
                         if code == HTCLOSE and lit:
-                            background = shade(theme['closeHover'], 0.85) if down else theme['closeHover']
-                        elif lit:
-                            background = theme['pressed'] if down else theme['hover']
+                            background = mix(theme['bar'], theme['closeHover'], 0.24 if down else 0.16)
+                            color = theme['closeHover']
+                        else:
+                            background = (theme['pressed'] if down else theme['hover']) if lit else None
+                            color = theme['text'] if lit else theme['muted'] if self.active else shade(theme['muted'], 0.8)
                         if background:
-                            fill(memory, left, 0, left + button, height - 1, background)
-                        color = '#ffffff' if code == HTCLOSE and lit else theme['text'] if self.active or lit else theme['muted']
-                        if found['glyphs']:
-                            text_out(memory, glyphs[code], found['glyphs'], (left, 0, left + button, height - 1), color, 0x1)  # DT_CENTER
-                    pad, size = scaled(10, dpi), found['small_size']
+                            pill(memory, left, top, left + pill_w, top + pill_h, scaled(7, dpi), background,
+                                 None if down else mix(background, theme['text'], 0.09))
+                        glyph(memory, code, maximized, left + pill_w // 2, top + pill_h // 2, scaled(14, dpi), color, dpi)
+                    pad, size = scaled(14, dpi), found['small_size']
                     if found['small']:
                         u.DrawIconEx(memory, pad, (height - size) // 2, found['small'], size, size, 0, None, 3)  # DI_NORMAL
-                    left = pad + size + scaled(8, dpi)
-                    text_out(memory, DESKTOP_TITLE, found['title'], (left, 0, max(left, width - 3 * button - pad), height - 1),
-                             theme['text'] if self.active else theme['muted'], 0x8000)  # DT_END_ELLIPSIS
+                    left = pad + size + scaled(9, dpi)
+                    limit = max(left, width - edge_pad - 3 * button - scaled(8, dpi))
+                    name_color = theme['text'] if self.active else theme['muted']
+                    for text, font, color in (('Arkuzo', found['title'], name_color),
+                                              ('  /  ', found['sub'], shade(theme['muted'], 0.75)),
+                                              ('Control Center', found['sub'], theme['muted'])):
+                        if left >= limit:
+                            break
+                        text_out(memory, text, font, (left, 0, limit, height - 1), color, 0x8000)  # DT_END_ELLIPSIS
+                        left += text_width(memory, text, font)
                     g.BitBlt(dc, 0, 0, width, height, memory, 0, 0, 0x00CC0020)  # SRCCOPY
                 finally:
                     g.SelectObject(memory, previous)
@@ -4785,7 +4901,7 @@ class _DesktopHost:
                 invalidate()
                 return 0
             if msg == 0x113 and wp == 2:  # WM_TIMER: re-measure Edge's insets after a DPI change
-                offset = measure()
+                offset = measure() or frame_inset()
                 if offset and offset != self.offset:
                     self.offset = offset
                     layout()
@@ -4842,7 +4958,9 @@ class _DesktopHost:
             launch = url + separator + urllib.parse.urlencode({'desktop': self.key})
             self.proc = subprocess.Popen([str(browser), '--user-data-dir=' + profile, '--no-first-run',
                 '--no-default-browser-check', EDGE_QUIET, '--app=' + launch, '--window-size=1440,920'])
-            deadline = time.monotonic() + 20
+            # The page keeps the key in its title for 60 s; a cold Edge start (for example
+            # right after the previous window closed) can take well over 20 s.
+            deadline = time.monotonic() + 55
             while time.monotonic() < deadline and self.proc.poll() is None:
                 matches = [h for h, title in WINDOWS.windows(self.proc.pid) if self.key in title]
                 if len(matches) == 1:
@@ -4850,11 +4968,21 @@ class _DesktopHost:
                     break
                 time.sleep(.1)
             if not self.child:
+                self._fallback('browser exited' if self.proc.poll() is not None else 'browser window not found')
                 return
             # Renderer bounds expose the real page origin, including Chromium's
             # custom caption. Measure before reparenting and preserve that inset.
+            # The renderer's window can appear a moment after the title, or not at all
+            # until Edge is activated: retry briefly, then use the frame metrics.
+            settle = time.monotonic() + 3
             self.offset = measure()
+            while not self.offset and time.monotonic() < settle and u.IsWindow(self.child):
+                time.sleep(.1)
+                self.offset = measure()
+            if not self.offset and u.IsWindow(self.child):
+                self.offset = frame_inset()
             if not self.offset:
+                self._fallback('page area not measurable')
                 return
             outer = wintypes.RECT()
             u.GetWindowRect(self.child, ctypes.byref(outer))
@@ -4908,7 +5036,7 @@ class _DesktopHost:
                 for handle in (found['small'], found['big']):
                     if handle:
                         u.DestroyIcon(handle)
-                for handle in (found['title'], found['glyphs']):
+                for handle in (found['title'], found['sub']):
                     if handle:
                         g.DeleteObject(handle)
             if com >= 0:

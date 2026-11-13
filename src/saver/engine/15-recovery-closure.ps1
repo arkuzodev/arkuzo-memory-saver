@@ -111,15 +111,12 @@ function Test-ArkuzoRecoveryHandoff([string]$AccountId, $State = $null, [string]
     return $true
 }
 function Test-ArkuzoKickedClosure($State) {
-    # Arkuzo provider, client verified kicked or disconnected (its log or the executor said so):
-    # it is out of the game whatever happens, so closing it costs nothing. It skips the
-    # cooldown and the hourly budget and does not count against them.
-    # A bare "ClientReplicator removed" signal can also come from an ordinary teleport, so
-    # it keeps the normal gates; kicks, error prompts and the Roblox log's own reasons
-    # (which already skip code 285, a client-initiated leave) do not.
+    # Arkuzo provider, client verified kicked or disconnected by its Roblox log (which already
+    # skips code 285, a client-initiated leave): it is out of the game whatever happens, so
+    # closing it costs nothing. It skips the cooldown and the hourly budget and does not
+    # count against them.
     return ((Test-ArkuzoNativeProvider) -and $null -ne $State -and $null -ne $State.HealthDecision -and
-        [string]$State.HealthDecision.Reason -ceq 'IN_GAME_DISCONNECT' -and [bool]$State.isDisconnected -and
-        [string]$State.DisconnectSource -cne 'NetworkClient.ChildRemoved')
+        [string]$State.HealthDecision.Reason -ceq 'IN_GAME_DISCONNECT' -and [bool]$State.isDisconnected)
 }
 function Invoke-ClientRecovery([int]$ClientId, $State) {
     if ($MonitorOnly -or -not $healthPolicy.enabled -or -not $ownsControllerMutex -or $State.RecoveryRequested -or -not $State.HealthDecision.Recycle) { return }

@@ -204,7 +204,7 @@ By code review (no client was launched from Arkuzo's folder; only the graphics p
 | Saved Roblox login | `%LOCALAPPDATA%\Roblox\LocalStorage\RobloxCookies.dat` is shared by every build folder; cleared the same way. |
 | Roblox logs, health, trim | By process and `%LOCALAPPDATA%\Roblox\logs`, independent of the folder. |
 | Window arrangement, instant close | By process id, start time and image name `RobloxPlayerBeta.exe`, not path. |
-| Executor signal (`00-arkuzo-signal.luau`), Volt | Written to the executors' `autoexec` folders; independent of the Roblox folder. The executor must support the build (that is what the exploit picker is for). |
+| Volt | Independent of the Roblox folder. The executor must support the build (that is what the exploit picker is for). |
 | Orphaned crash handlers | `RobloxCrashHandler.exe` from Arkuzo's folder is trusted like Roblox's own (it must still be signed by Roblox). |
 
 ## Settings and routes

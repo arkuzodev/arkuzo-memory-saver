@@ -38,7 +38,7 @@ $targets = @(
         Folder = 'src/saver/engine'
         Parts = @(
             '00-header.ps1', '01-config.ps1', '02-health-native.ps1', '03-process.ps1', '04-roblox-logs.ps1',
-            '05-executor-signal.ps1', '06-health-observation.ps1', '07-policy-journal.ps1', '08-native-accounts.ps1',
+            '05-autoexec-cleanup.ps1', '06-health-observation.ps1', '07-policy-journal.ps1', '08-native-accounts.ps1',
             '09-windows.ps1', '10-volt-control.ps1', '11-farm-freeze.ps1', '12-remote-session.ps1',
             '13-recovery-outcomes.ps1', '14-status.ps1', '15-recovery-closure.ps1', '16-pagefile.ps1',
             '17-version-check.ps1', '18-startup-config.ps1', '19-native-types.ps1', '20-console-graphics.ps1',

@@ -26,6 +26,36 @@ FROST = {'bar': '#EDF0F5', 'barEnd': '#fafbfd', 'line': '#e2e7ef', 'text': '#151
 
 
 class WindowChromeTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'nt', 'Edge profile locks are a Windows feature')
+    def test_a_profile_held_by_another_edge_is_skipped(self):
+        # A plain Edge window left from an earlier Control Center keeps its profile's
+        # lockfile open; a new launch on that profile would hand the page to it and exit.
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        kernel.CreateFileW.restype = wintypes.HANDLE
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        with tempfile.TemporaryDirectory() as root:
+            held = Path(root) / '0'
+            held.mkdir()
+            (held / 'lockfile').write_bytes(b'')
+            (Path(root) / '1').mkdir()
+            (Path(root) / '1' / 'lockfile').write_bytes(b'')  # Left behind by an Edge that exited: free.
+            handle = kernel.CreateFileW(str(held / 'lockfile'), 0x80000000, 0, None, 3, 0x80, None)
+            self.assertNotEqual(handle, ctypes.c_void_p(-1).value)
+            try:
+                self.assertTrue(cc.edge_profile_in_use(held))
+                self.assertFalse(cc.edge_profile_in_use(Path(root) / '1'))
+                self.assertFalse(cc.edge_profile_in_use(Path(root) / '2'))
+                desktop = cc.DesktopWindows(Path(root))
+                with patch.object(cc.threading, 'Thread') as thread:
+                    desktop.open('http://127.0.0.1/', 'unused')
+                    self.assertEqual(thread.call_args.kwargs['target'].__self__.slot, 1)
+            finally:
+                kernel.CloseHandle(handle)
+            self.assertFalse(cc.edge_profile_in_use(held))
+
     def test_profile_slots_are_reserved_before_launch_and_reused_after_exit(self):
         with tempfile.TemporaryDirectory() as root:
             desktop = cc.DesktopWindows(Path(root))
@@ -92,31 +122,35 @@ class WindowChromeTests(unittest.TestCase):
     def test_caption_hit_test_geometry(self):
         hit = cc.caption_hit_test
         width = 1000
-        # 96 DPI: 32 px strip, 46 px buttons, 5 px top resize band.
-        self.assertEqual(cc.caption_metrics(96), (32, 46, 5))
+        # 96 DPI: 36 px strip, 40 px button slots 6 px from the right edge, 5 px top resize band.
+        self.assertEqual(cc.caption_metrics(96), (36, 40, 5))
         self.assertEqual(hit(500, 2, width, 96, False), cc.HTTOP)
         self.assertEqual(hit(3, 2, width, 96, False), cc.HTTOPLEFT)
         self.assertEqual(hit(997, 2, width, 96, False), cc.HTTOPRIGHT)
         self.assertEqual(hit(500, 2, width, 96, True), cc.HTCAPTION)  # maximized: no resize band
         self.assertEqual(hit(500, 16, width, 96, False), cc.HTCAPTION)
         self.assertEqual(hit(10, 16, width, 96, False), cc.HTCAPTION)  # the icon drags too
-        self.assertEqual(hit(999, 16, width, 96, False), cc.HTCLOSE)
+        self.assertEqual(hit(999, 16, width, 96, False), cc.HTCAPTION)  # the 6 px right margin drags
+        self.assertEqual(hit(994, 16, width, 96, False), cc.HTCAPTION)
+        self.assertEqual(hit(993, 16, width, 96, False), cc.HTCLOSE)
         self.assertEqual(hit(954, 16, width, 96, False), cc.HTCLOSE)
         self.assertEqual(hit(953, 16, width, 96, False), cc.HTMAXBUTTON)
-        self.assertEqual(hit(908, 16, width, 96, False), cc.HTMAXBUTTON)
-        self.assertEqual(hit(907, 16, width, 96, False), cc.HTMINBUTTON)
-        self.assertEqual(hit(862, 16, width, 96, False), cc.HTMINBUTTON)
-        self.assertEqual(hit(861, 16, width, 96, False), cc.HTCAPTION)
-        self.assertEqual(hit(500, 31, width, 96, False), cc.HTCAPTION)
-        self.assertEqual(hit(500, 32, width, 96, False), cc.HTCLIENT)  # below the strip: the page
+        self.assertEqual(hit(914, 16, width, 96, False), cc.HTMAXBUTTON)
+        self.assertEqual(hit(913, 16, width, 96, False), cc.HTMINBUTTON)
+        self.assertEqual(hit(874, 16, width, 96, False), cc.HTMINBUTTON)
+        self.assertEqual(hit(873, 16, width, 96, False), cc.HTCAPTION)
+        self.assertEqual(hit(500, 35, width, 96, False), cc.HTCAPTION)
+        self.assertEqual(hit(500, 36, width, 96, False), cc.HTCLIENT)  # below the strip: the page
         self.assertEqual(hit(-1, 16, width, 96, False), cc.HTCLIENT)
-        # 150 %: everything scales.
-        self.assertEqual(cc.caption_metrics(144), (48, 69, 8))
-        self.assertEqual(hit(1000 - 69, 40, width, 144, False), cc.HTCLOSE)
-        self.assertEqual(hit(1000 - 70, 40, width, 144, False), cc.HTMAXBUTTON)
+        # 150 %: everything scales (9 px right margin).
+        self.assertEqual(cc.caption_metrics(144), (54, 60, 8))
+        self.assertEqual(hit(1000 - 9 - 60, 40, width, 144, False), cc.HTCLOSE)
+        self.assertEqual(hit(1000 - 10, 40, width, 144, False), cc.HTCLOSE)
+        self.assertEqual(hit(1000 - 9, 40, width, 144, False), cc.HTCAPTION)
+        self.assertEqual(hit(1000 - 9 - 61, 40, width, 144, False), cc.HTMAXBUTTON)
         self.assertEqual(hit(500, 7, width, 144, False), cc.HTTOP)
-        self.assertEqual(hit(500, 47, width, 144, False), cc.HTCAPTION)
-        self.assertEqual(hit(500, 48, width, 144, False), cc.HTCLIENT)
+        self.assertEqual(hit(500, 53, width, 144, False), cc.HTCAPTION)
+        self.assertEqual(hit(500, 54, width, 144, False), cc.HTCLIENT)
 
     def test_embedded_icon_is_the_logo_at_every_size(self):
         data = cc.app_icon()
